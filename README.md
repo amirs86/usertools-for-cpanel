@@ -106,8 +106,9 @@ Full removal including settings and log:
 |---|---|
 | 11.138 / AlmaLinux 9 | tested |
 | 11.134 LTS / AlmaLinux 10 with CloudLinux CageFS | tested |
-| Meridian | untested |
-| Reseller packages | untested |
+| Reseller-owned packages + account-creation hook (11.134 LTS) | tested |
+| Signed update, repeat and rollback (11.134 LTS) | tested |
+| Meridian | not supported yet: cPanel has no published plugin docs for it, and the pages do not load for accounts on Meridian (switch those accounts to Jupiter) |
 
 ## Security model
 
