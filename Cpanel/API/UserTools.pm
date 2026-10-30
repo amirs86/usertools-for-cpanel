@@ -2148,7 +2148,7 @@ sub _select_nodejs_bin {
     $alt_base    = '/opt/alt' unless defined $alt_base;
     my @families = (
         [ $cpanel_base, qr/^ea-nodejs(\d+)$/, 'bin/node', 'ea-nodejs' ],
-        # CG5: CloudLinux Node.js lives at /opt/alt/alt-nodejsNN/root/usr/bin
+        # CloudLinux Node.js lives at /opt/alt/alt-nodejsNN/root/usr/bin
         # (npm is root/usr/bin/npm, a symlink to npm-cli.js), not bin/node.
         [ $alt_base,    qr/^alt-nodejs(\d+)$/, 'root/usr/bin/node', 'alt-nodejs' ],
     );
@@ -2269,7 +2269,7 @@ sub _lve_hint {
     # guidance or undef when nothing matches (never raises limits).
     my $out = ref $run_hr eq 'HASH' ? ( $run_hr->{output} // '' ) : '';
     my $exit = ref $run_hr eq 'HASH' ? ( $run_hr->{exit} ) : undef;
-    # CG6: exit 137 (128+SIGKILL) is the OOM-killer/LVE kill signature.
+    # Exit 137 (128+SIGKILL) is the OOM-killer/LVE kill signature.
     # Treat it as a memory-limit kill even with no output text.
     if ( defined $exit && ( $exit == 137 || $exit == -9 ) ) {
         return 'The task ran out of memory. On CloudLinux hosting this is often '
@@ -2291,7 +2291,7 @@ sub _lve_hint {
 }
 
 sub _deploy_lve_hint {
-    # CG6: an npm/composer step killed by an LVE limit (exit 137/SIGKILL or
+    # An npm/composer step killed by an LVE limit (exit 137/SIGKILL or
     # a memory fault in the log) reports plain words, never a raw exit code.
     my ( $final, $log ) = @_;
     $log = '' unless defined $log;
@@ -4484,7 +4484,7 @@ sub _find_composer {
     # but UNSAFE candidate stops the search (the admin must fix it; it is
     # never silently skipped for whatever comes next). $TEST_COMPOSER fakes
     # the binary in tests (replaces the whole list).
-    # CG2 (CloudLinux/CageFS): this module already runs as the user inside
+    # CloudLinux/CageFS: this module already runs as the user inside
     # the cage, so `-x` above is the visibility check — but a path that
     # exists on the host yet is not mounted into the cage must be reported
     # as not visible (not as found), with the conf.d remedy, so the page
@@ -4627,7 +4627,7 @@ sub _select_node_for_app {
     my ( $approot, $cpanel_base, $alt_base ) = @_;
     # Newest installed Node with the engines major, else newest available
     # with a warning. Returns (bin, source, warning).
-    # CG5: CloudLinux layout is root/usr/bin (alt-nodejsNN/root/usr/bin/node).
+    # CloudLinux layout is root/usr/bin (alt-nodejsNN/root/usr/bin/node).
     my @families;
     push @families, [ defined $cpanel_base ? $cpanel_base : '/opt/cpanel', qr/^ea-nodejs(\d+)$/, 'bin/node' ];
     push @families, [ defined $alt_base ? $alt_base : '/opt/alt', qr/^alt-nodejs(\d+)$/, 'root/usr/bin/node' ];
@@ -4841,7 +4841,7 @@ sub _deploy_recipe_composer {
     # THIS invocation only — `-d key=value` on the PHP command line, in the
     # argv list (no shell) — so the setting applies to this one process and
     # nothing else. No php.ini is ever read for a write, anywhere.
-    # CG3: when the admin explicitly sets composer_lift_disable_functions=1
+    # When the admin explicitly sets composer_lift_disable_functions=1
     # (default 0, never set by the installer), this one Composer process
     # also runs with an empty disable_functions (re-enabling proc_open for
     # that process only). Anything else keeps the host hardening intact.
@@ -5119,7 +5119,7 @@ sub app_helper_deploy_info {
             $npm = $npmdir;
         }
     }
-    # CG3: read disable_functions from the selected PHP binary as the user.
+    # Read disable_functions from the selected PHP binary as the user.
     # When the host disables proc_open, Composer cannot run: hide the button
     # and explain instead of failing at runtime with a usage dump.
     my ( $php_bin_info, undef, undef ) = _select_php_for_app( $user, $approot );
@@ -5194,7 +5194,7 @@ sub app_helper_composer_start {
         $result->error( 'No PHP available: [_1].', $php_err );
         return;
     }
-    # CG3: refuse when the host disables proc_open, unless the admin
+    # Refuse when the host disables proc_open, unless the admin
     # explicitly opted into composer_lift_disable_functions=1 (which runs
     # only this Composer process with an empty disable_functions).
     my $policy = eval { _read_user_policy() };
@@ -5306,7 +5306,7 @@ sub app_helper_deploy_status {
                 $nm = 'kept';
             }
         }
-        # CG6: LVE-killed npm/composer steps report plain words, never a raw
+        # LVE-killed npm/composer steps report plain words, never a raw
         # exit code. The log tail stays for detail; the hint is the summary.
         my $log_tail = _deploy_log_tail($job);
         my $hint;
@@ -6424,7 +6424,7 @@ sub _readiness_flags {
 }
 
 sub _proc_open_disabled_for_app {
-    # CG3: 1 when the selected PHP disables proc_open, else 0. Undef-safe:
+    # 1 when the selected PHP disables proc_open, else 0. Undef-safe:
     # unknown PHP or unreadable ini reads as 0 (not disabled).
     my ( $user, $approot ) = @_;
     my ( $php_bin, undef, undef ) = _select_php_for_app( $user, $approot );
@@ -6433,7 +6433,7 @@ sub _proc_open_disabled_for_app {
 }
 
 sub _missing_extensions_for_app {
-    # CG3: sorted short names the app needs (ext-* requirements) that the
+    # Sorted short names the app needs (ext-* requirements) that the
     # selected PHP lacks. Empty list when nothing is required, nothing is
     # missing, or the lists cannot be determined.
     my ( $user, $approot ) = @_;

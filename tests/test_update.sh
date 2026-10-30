@@ -123,9 +123,9 @@ assert_eq "identity pinned" "1" "$(grep -q 'acme/widgets/.github/workflows/ci.ym
 # Rollback now, before other updates clobber previous/.
 rm -f "$FX_MARKER"
 out="$(USERTOOLS_SKIP_ROOT=1 main --rollback 2>&1)"; rc=$?
-assert_eq "U-A rollback succeeds" "0" "$rc"
-assert_eq "U-A rollback reinstalls" "1" "$(grep -q 'UPDATER-INSTALLED --upgrade --yes' "$FX_MARKER" && echo 1 || echo 0)"
-assert_eq "U-A rollback restores VERSION A" "0.1.0" "$(tr -d ' \t\r\n' <"$fx/base/VERSION")"
+assert_eq "rollback succeeds" "0" "$rc"
+assert_eq "rollback reinstalls" "1" "$(grep -q 'UPDATER-INSTALLED --upgrade --yes' "$FX_MARKER" && echo 1 || echo 0)"
+assert_eq "rollback restores VERSION A" "0.1.0" "$(tr -d ' \t\r\n' <"$fx/base/VERSION")"
 rm -f "$FX_MARKER" "$FX_CALLS"
 export FAKE_COSIGN=ok
 
@@ -145,7 +145,7 @@ assert_eq "missing cosign refuses" "1" "$rc"
 assert_eq "refusal names cosign" "1" "$(printf '%s' "$out" | grep -q 'cosign not found' && echo 1 || echo 0)"
 export USERTOOLS_COSIGN="$fx/fakebin/cosign"
 
-# Cosign_bin accepts only the fixed paths with safe ownership, never PATH.
+# cosign_bin accepts only the fixed paths with safe ownership, never PATH.
 unset USERTOOLS_COSIGN
 out="$(PATH="$fx/fakebin:/usr/bin:/bin" cosign_bin 2>&1)"; rc=$?
 assert_eq "PATH cosign ignored" "1" "$rc"
@@ -160,6 +160,7 @@ printf '0.3.0\n' >"$fx/base/VERSION"
 out="$(PATH="$fx/fakebin:/usr/bin:/bin" main --update --base-url "file://$fx/host" 2>&1)"; rc=$?
 assert_eq "downgrade is a no-op" "0" "$rc"
 assert_eq "already-current message" "1" "$(printf '%s' "$out" | grep -q 'already current' && echo 1 || echo 0)"
+assert_eq "message prefixed once" "usertools-update: already current (0.3.0); nothing to do" "$out"
 printf '0.1.0\n' >"$fx/base/VERSION"
 printf '{"tag_name":"nightly","html_url":"https://example.invalid/r"}\n' >"$fx/api/repos/acme/widgets/releases/latest"
 out="$(PATH="$fx/fakebin:/usr/bin:/bin" main --update --base-url "file://$fx/host" 2>&1)"; rc=$?

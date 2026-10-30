@@ -2965,7 +2965,7 @@ package main;
 
 {
     # Node.js resolvers: ea-nodejs first, then alt-nodejs, newest each.
-    # CG5: CloudLinux layout is root/usr/bin (not bin/).
+    # CloudLinux layout is root/usr/bin (not bin/).
     my $home = make_home();
     make_path("$home/cpanel/ea-nodejs18/bin");
     make_path("$home/cpanel/ea-nodejs20/bin");
@@ -2984,8 +2984,8 @@ package main;
     like( $bin, qr/ea-nodejs20/, 'newest ea-nodejs wins' );
     is( $src, 'ea-nodejs', 'source named' );
     ( $bin, $src ) = Cpanel::API::UserTools::_select_nodejs_bin( "$home/empty", "$home/alt" );
-    like( $bin, qr/alt-nodejs14/, 'CG5: alt-nodejs fallback at root/usr/bin' );
-    like( $bin, qr{root/usr/bin/node$}, 'CG5: alt layout used' );
+    like( $bin, qr/alt-nodejs14/, 'alt-nodejs fallback at root/usr/bin' );
+    like( $bin, qr{root/usr/bin/node$}, 'alt layout used' );
     is( $src, 'alt-nodejs', 'source named' );
     my ( $nobin, $reason ) = Cpanel::API::UserTools::_select_nodejs_bin( "$home/empty", "$home/empty2" );
     ok( !defined $nobin, 'nothing found' );
@@ -3006,9 +3006,9 @@ package main;
     make_path($app);
     my ( $bin, $src, $warn ) =
       Cpanel::API::UserTools::_select_node_for_app( $app, "$home/empty", "$home/alt" );
-    like( $bin, qr{alt-nodejs24/root/usr/bin/node$}, 'CG5: app resolver uses alt layout' );
+    like( $bin, qr{alt-nodejs24/root/usr/bin/node$}, 'app resolver uses alt layout' );
     ( my $npm = $bin ) =~ s{/bin/node$}{/bin/npm};
-    ok( -x $npm, 'CG5: npm sits next to node' );
+    ok( -x $npm, 'npm sits next to node' );
     my $r = Cpanel::API::UserTools::_deploy_recipe_npm(
         $home, $app, $npm, 0 );
     like( $r->{steps}[0]{env}{PATH},
@@ -3024,11 +3024,11 @@ package main;
         qr/out of memory|resource limit/, 'OOM hinted' );
     like( Cpanel::API::UserTools::_lve_hint( { exit => 1, output => 'fork: Resource temporarily unavailable' } ),
         qr/process or file limit/, 'fork failure hinted' );
-    # CG6: exit 137 (OOM-killer/LVE SIGKILL) hints even with no output text.
+    # Exit 137 (OOM-killer/LVE SIGKILL) hints even with no output text.
     like( Cpanel::API::UserTools::_lve_hint( { exit => 137, output => '' } ),
-        qr/out of memory|resource limit/, 'CG6: exit 137 hinted' );
+        qr/out of memory|resource limit/, 'exit 137 hinted' );
     like( Cpanel::API::UserTools::_lve_hint( { exit => -9, output => '' } ),
-        qr/out of memory|resource limit/, 'CG6: SIGKILL hinted' );
+        qr/out of memory|resource limit/, 'SIGKILL hinted' );
 
     # Overall recipe budget comes from the public policy (default 3600).
     my $pdir = tempdir( CLEANUP => 1 );
@@ -3054,19 +3054,19 @@ package main;
     ok( $ok, 'artisan accepted' );
     like( $res->{data}{resource_hint} // '', qr/resource limit/, 'hint travels with the result' );
 
-    # CG6: deploy LVE hint — exit 137 or memory fault says so in plain words.
+    # Deploy LVE hint — exit 137 or memory fault says so in plain words.
     is( Cpanel::API::UserTools::_deploy_lve_hint(
             { ok => 0, steps => [ { name => 'npm run build', exit => 137 } ] }, '' ),
         'Your account hit its memory limit while building; ask your host or build locally',
-        'CG6: exit 137 says memory limit in plain words' );
+        'exit 137 says memory limit in plain words' );
     is( Cpanel::API::UserTools::_deploy_lve_hint(
             { ok => 0, steps => [ { name => 'composer install', exit => 1 } ] },
             "PHP Fatal error: Allowed memory size exhausted\n" ),
         'Your account hit its memory limit while building; ask your host or build locally',
-        'CG6: memory fault says memory limit in plain words' );
+        'memory fault says memory limit in plain words' );
     is( Cpanel::API::UserTools::_deploy_lve_hint(
             { ok => 0, steps => [ { name => 'npm run build', exit => 1 } ] }, 'ok' ),
-        undef, 'CG6: ordinary failure has no LVE hint' );
+        undef, 'ordinary failure has no LVE hint' );
 }
 
 {
@@ -3257,7 +3257,7 @@ package main;
         0700, 'node compile cache is 0700' );
     is( Cpanel::API::UserTools::_ensure_cache_dirs($chome), undef, 're-run is a no-op' );
 
-    # Keep_node_modules validation fails fast on bad input.
+    # keep_node_modules validation fails fast on bad input.
     {
         my $khome = make_app_home();
         my $res = FakeResult->new();
@@ -3433,7 +3433,7 @@ package main;
 }
 
 {
-    # CG2: CageFS visibility — a host-visible composer that CageFS does not
+    # CageFS visibility — a host-visible composer that CageFS does not
     # mount is reported as not visible (not as found), with the conf.d remedy.
     my $home = make_home();
     my $bin_path = "$home/composer";
@@ -3452,19 +3452,19 @@ package main;
     local $Cpanel::API::UserTools::TEST_CAGEFS_MP = $mp;
     local $Cpanel::API::UserTools::TEST_CAGEFS_CONF_D = $confd;
     my ( $bin, $err ) = Cpanel::API::UserTools::_find_composer();
-    ok( !defined $bin, 'CG2: unmounted composer not reported as found' );
-    like( $err, qr/not visible to caged users/, 'CG2: reason names cage visibility' );
-    like( $err, qr/conf\.d.*INI|INI.*conf\.d|conf\.d INI entry/, 'CG2: reason gives the conf.d remedy' );
-    like( $err, qr/cagefsctl --force-update/, 'CG2: reason names force-update' );
+    ok( !defined $bin, 'unmounted composer not reported as found' );
+    like( $err, qr/not visible to caged users/, 'reason names cage visibility' );
+    like( $err, qr/conf\.d.*INI|INI.*conf\.d|conf\.d INI entry/, 'reason gives the conf.d remedy' );
+    like( $err, qr/cagefsctl --force-update/, 'reason names force-update' );
     # Listing the path in a conf.d INI entry makes it visible again.
     open my $cf, '>', "$confd/usertools-composer.cfg" or die $!;
     print $cf "[usertools-composer]\ncomment=Composer\npaths=$bin_path\n";
     close $cf;
     ( $bin, $err ) = Cpanel::API::UserTools::_find_composer();
-    is( $bin, $bin_path, 'CG2: conf.d-listed composer visible again' );
+    is( $bin, $bin_path, 'conf.d-listed composer visible again' );
     delete $FAKE_UID{$bin_path};
 
-    # CG2 fail-open: /etc/cagefs/conf.d is commonly 0711, so the user
+    # Fail-open: /etc/cagefs/conf.d is commonly 0711, so the user
     # cannot enumerate it — an unprovable absence must never veto a path
     # whose -x check already passed.
     my $home2 = make_home();
@@ -3482,12 +3482,12 @@ package main;
     local $Cpanel::API::UserTools::TEST_CAGEFS_MP = $mp2;
     local $Cpanel::API::UserTools::TEST_CAGEFS_CONF_D = "$home2/conf.d-missing";
     ( $bin, $err ) = Cpanel::API::UserTools::_find_composer();
-    is( $bin, $bin2, 'CG2: unreadable conf.d fails open (passing -x stands)' );
+    is( $bin, $bin2, 'unreadable conf.d fails open (passing -x stands)' );
     delete $FAKE_UID{$bin2};
 }
 
 {
-    # CG3: proc_open gate + ext-* requirements.
+    # proc_open gate + ext-* requirements.
     my $home = make_app_home();
     my $phpdir = "$home/phpbin/opt/cpanel";
     make_path("$phpdir/ea-php82/root/usr/bin");
@@ -3517,14 +3517,14 @@ SCRIPT
     close $mf;
     local $Cpanel::API::UserTools::TEST_PHP_DIR = $phpdir;
     my $dis = Cpanel::API::UserTools::_php_disable_functions( $php, "$home/myapp" );
-    like( $dis, qr/proc_open/, 'CG3: disable_functions read from the selected PHP' );
+    like( $dis, qr/proc_open/, 'disable_functions read from the selected PHP' );
     ok( Cpanel::API::UserTools::_proc_open_disabled( $php, "$home/myapp" ),
-        'CG3: proc_open detected as disabled' );
+        'proc_open detected as disabled' );
     open $df, '>', "$phpdir/ea-php82/root/usr/bin/disable.txt" or die $!;
     print $df "exec, popen";
     close $df;
     ok( !Cpanel::API::UserTools::_proc_open_disabled( $php, "$home/myapp" ),
-        'CG3: clean ini reads as enabled' );
+        'clean ini reads as enabled' );
     open $df, '>', "$phpdir/ea-php82/root/usr/bin/disable.txt" or die $!;
     print $df "proc_open, exec";
     close $df;
@@ -3537,9 +3537,9 @@ SCRIPT
     print $cl '{"platform":{"ext-fileinfo":"1.0"},"packages":[]}';
     close $cl;
     my $need = Cpanel::API::UserTools::_app_required_extensions("$home/myapp");
-    is_deeply( $need, [ 'fileinfo', 'mbstring' ], 'CG3: ext-* collected from json+lock' );
+    is_deeply( $need, [ 'fileinfo', 'mbstring' ], 'ext-* collected from json+lock' );
     my $missing = Cpanel::API::UserTools::_php_missing_extensions( $php, "$home/myapp", $need );
-    is_deeply( $missing, ['fileinfo'], 'CG3: missing extensions detected (fileinfo)' );
+    is_deeply( $missing, ['fileinfo'], 'missing extensions detected (fileinfo)' );
 
     # Lift policy: only with composer_lift_disable_functions=1 does the
     # recipe add -d disable_functions= (and only for that process).
@@ -3551,14 +3551,14 @@ SCRIPT
     my $r = Cpanel::API::UserTools::_deploy_recipe_composer(
         $home, "$home/myapp", $php, '/usr/local/bin/composer' );
     ok( !( grep { $_ eq 'disable_functions=' } @{ $r->{steps}[0]{argv} } ),
-        'CG3: lift off by default' );
+        'lift off by default' );
     open $pcf, '>', $conf or die $!;
     print $pcf "composer_lift_disable_functions=1\n";
     close $pcf;
     $r = Cpanel::API::UserTools::_deploy_recipe_composer(
         $home, "$home/myapp", $php, '/usr/local/bin/composer' );
     ok( ( grep { $_ eq 'disable_functions=' } @{ $r->{steps}[0]{argv} } ),
-        'CG3: lift adds -d disable_functions= for this process only' );
+        'lift adds -d disable_functions= for this process only' );
 }
 
 {
@@ -3837,7 +3837,7 @@ sub write_fake_crontab {
 }
 
 {
-    # CG4: CloudLinux wrapper inserts SHELL="..." between marker and line.
+    # CloudLinux wrapper inserts SHELL="..." between marker and line.
     # Remove skips blank/env lines, matches the command, and keeps the env.
     my $home = make_app_home();
     make_fake_php("$home/phpbin");
@@ -3848,7 +3848,7 @@ sub write_fake_crontab {
     local $ENV{DUMP_CRONTAB_ARGS} = "$home/crontab-argv.txt";
     my $res = FakeResult->new();
     my $ok = Cpanel::API::UserTools::app_helper_cron_add( FakeArgs->new( app => 'myapp' ), $res );
-    ok( $ok, 'CG4: add accepted' );
+    ok( $ok, 'add accepted' );
     my $marker = '# usertools:schedule ' . Digest::SHA::sha1_hex("$home/myapp");
     open my $cf, '<', "$home/crontab.txt" or die $!;
     my $after = do { local $/; <$cf> };
@@ -3862,23 +3862,23 @@ sub write_fake_crontab {
     close $wf;
     $res = FakeResult->new();
     $ok = Cpanel::API::UserTools::app_helper_cron_status( FakeArgs->new( app => 'myapp' ), $res );
-    ok( $ok, 'CG4: status accepted with wrapper env' );
-    is( $res->{data}{present}, 1, 'CG4: line still detected past SHELL' );
+    ok( $ok, 'status accepted with wrapper env' );
+    is( $res->{data}{present}, 1, 'line still detected past SHELL' );
     $res = FakeResult->new();
     $ok = Cpanel::API::UserTools::app_helper_cron_remove( FakeArgs->new( app => 'myapp' ), $res );
-    ok( $ok, 'CG4: remove works past the wrapper SHELL' );
+    ok( $ok, 'remove works past the wrapper SHELL' );
     open my $rf, '<', "$home/crontab.txt" or die $!;
     my $final = do { local $/; <$rf> };
     close $rf;
-    like( $final, qr/^SHELL=/m, 'CG4: wrapper env lines kept' );
-    unlike( $final, qr/schedule:run/, 'CG4: command gone' );
-    unlike( $final, qr/usertools:schedule/, 'CG4: marker gone' );
+    like( $final, qr/^SHELL=/m, 'wrapper env lines kept' );
+    unlike( $final, qr/schedule:run/, 'command gone' );
+    unlike( $final, qr/usertools:schedule/, 'marker gone' );
     delete $ENV{CRONTAB_FILE};
     delete $ENV{DUMP_CRONTAB_ARGS};
 }
 
 {
-    # CG4: backup banner on stderr ignored; garbage on stdout refused.
+    # Backup banner on stderr ignored; garbage on stdout refused.
     my $home = make_app_home();
     make_fake_php("$home/phpbin");
     local $Cpanel::API::UserTools::TEST_PHP_DIR = "$home/phpbin/opt/cpanel";
@@ -3896,19 +3896,19 @@ sub write_fake_crontab {
     local $ENV{DUMP_CRONTAB_ARGS} = "$home/crontab-argv.txt";
     my $res = FakeResult->new();
     my $ok = Cpanel::API::UserTools::app_helper_cron_add( FakeArgs->new( app => 'myapp' ), $res );
-    ok( $ok, 'CG4: banner on stderr ignored' );
+    ok( $ok, 'banner on stderr ignored' );
     # Garbage on stdout: the next write must refuse, never clobber.
     open my $gf, '>', "$home/crontab.txt" or die $!;
     print $gf "hello world\n";
     close $gf;
     $res = FakeResult->new();
     $ok = Cpanel::API::UserTools::app_helper_cron_add( FakeArgs->new( app => 'myapp' ), $res );
-    ok( !$ok, 'CG4: garbage on stdout refused' );
-    like( $res->{errors}[0][1], qr/unrecognized/, 'CG4: refusal names the content' );
+    ok( !$ok, 'garbage on stdout refused' );
+    like( $res->{errors}[0][1], qr/unrecognized/, 'refusal names the content' );
     open my $cf, '<', "$home/crontab.txt" or die $!;
     my $kept = do { local $/; <$cf> };
     close $cf;
-    is( $kept, "hello world\n", 'CG4: garbage left untouched' );
+    is( $kept, "hello world\n", 'garbage left untouched' );
     delete $ENV{CRONTAB_FILE};
     delete $ENV{DUMP_CRONTAB_ARGS};
 }

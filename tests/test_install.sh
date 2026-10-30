@@ -515,7 +515,7 @@ USERTOOLS_DESTDIR="$crdir" verify_no_cr >/dev/null; rc=$?
 assert_eq "planted CR fails the row" "1" "$rc"
 rm -rf "$crdir"
 
-# --- CG1: CageFS conf.d INI format (configparser-validated, force-update FAIL) -----------
+# --- CageFS conf.d INI format (configparser-validated, force-update FAIL) -----------
 cgdir="$(mktemp -d)"
 mkdir -p "$cgdir/etc/cagefs/conf.d" "$cgdir/etc/cagefs"
 touch "$cgdir/etc/cagefs/cagefs.mp"

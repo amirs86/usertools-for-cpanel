@@ -3,6 +3,13 @@
 All notable changes to this project are documented here. Versions follow
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- The updater no longer prints its name twice ("usertools-update:
+  usertools-update: already current").
+
 ## [0.1.2] - 2026-10-30
 
 ### Changed

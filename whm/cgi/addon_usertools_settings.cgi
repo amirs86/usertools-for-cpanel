@@ -80,7 +80,7 @@ our @COMPOSER_DEFAULT_PATHS = (
     '/opt/cpanel/composer/bin/composer', # fallback
 );
 
-# CageFS locations (CG2): the mount-points file proves CageFS is active;
+# CageFS locations: the mount-points file proves CageFS is active;
 # conf.d holds the INI entries. Package vars so tests can point them at
 # fixtures; production uses the real paths.
 our $CAGEFS_MP     = '/etc/cagefs/cagefs.mp';
@@ -172,7 +172,7 @@ sub validate_settings {
         $v = '' unless defined $v;
         $v =~ s/^\s+|\s+$//g;
         if ( $kind eq 'bool' ) {
-            # CG3: the lift key defaults to 0 when an old form posts without
+            # The lift key defaults to 0 when an old form posts without
             # it (never set by default; explicit opt-in only).
             if ( $key eq 'composer_lift_disable_functions' && $v eq '' ) {
                 $clean{$key} = '0';
@@ -603,7 +603,7 @@ sub find_composer {
     # (found + where it came from), a configured-but-unsafe composer_path
     # (path + reason — the search stops there, exactly like the user-side
     # code), a path that exists on the host but is not mounted into the
-    # cage (CG2: found, but not visible to caged users, with the conf.d
+    # cage (found, but not visible to caged users, with the conf.d
     # remedy), or nothing found (the template then prints how to install).
     # $bin_check is the test seam for the ownership check.
     $bin_check = \&_composer_bin_check unless defined $bin_check;

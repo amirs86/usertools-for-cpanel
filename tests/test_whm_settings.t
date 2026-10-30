@@ -60,7 +60,7 @@ sub write_pair {
     ok( !exists $clean->{ssh_port}, 'read-only keys never written' );
     ok( !exists $clean->{bogus_key}, 'unknown keys never written' );
 
-    # Composer_path accepts empty (auto-discover) or an absolute path.
+    # composer_path accepts empty (auto-discover) or an absolute path.
     my %base = (
         enable_shell => '1', allowed_shell_modes => 'disabled,jailed',
         enable_fix_home => '1', enable_bulk_perms => '1',
@@ -77,14 +77,14 @@ sub write_pair {
         { %base, composer_path => '/opt/tools/composer' }, $pdir );
     is_deeply( $errs, [], 'absolute composer_path accepted' );
     is( $clean->{composer_path}, '/opt/tools/composer', 'absolute composer_path kept' );
-    # CG3: composer_lift_disable_functions is a strict bool, default 0.
+    # composer_lift_disable_functions is a strict bool, default 0.
     ( $clean, $errs ) = $Pkg->can('validate_settings')->(
         { %base, composer_path => '', composer_lift_disable_functions => '1' }, $pdir );
-    is_deeply( $errs, [], 'CG3: lift=1 accepted (explicit admin choice)' );
-    is( $clean->{composer_lift_disable_functions}, '1', 'CG3: lift kept' );
+    is_deeply( $errs, [], 'lift=1 accepted (explicit admin choice)' );
+    is( $clean->{composer_lift_disable_functions}, '1', 'lift kept' );
     ( $clean, $errs ) = $Pkg->can('validate_settings')->(
         { %base, composer_path => '', composer_lift_disable_functions => '2' }, $pdir );
-    ok( ( grep { /composer_lift_disable_functions/ } @$errs ) ? 1 : 0, 'CG3: lift=2 refused' );
+    ok( ( grep { /composer_lift_disable_functions/ } @$errs ) ? 1 : 0, 'lift=2 refused' );
     for my $bad ( 'relative/bin/composer', '/has space/composer', '/x#y', '/x;y', 'com poser' ) {
         ( $clean, $errs ) = $Pkg->can('validate_settings')->( { %base, composer_path => $bad }, $pdir );
         ok( ( grep { /composer_path/ } @$errs ) ? 1 : 0, "composer_path refused: [$bad]" );
@@ -271,7 +271,7 @@ sub write_pair {
     like( $got->{reason}, qr/root-owned/, 'with the ownership reason' );
 }
 
-# --- CG2: CageFS composer visibility (WHM row) --------------------------------------
+# --- CageFS composer visibility (WHM row) --------------------------------------
 {
     require File::Path;
     my $dir = tempdir( CLEANUP => 1 );
@@ -291,9 +291,9 @@ sub write_pair {
         "$dir/usertools.conf",
         sub { return $_[0] eq '/usr/local/bin/composer' ? ( 'ok', undef ) : ( 'missing', 'not found' ); }
     );
-    is( $got->{found}, 0, 'CG2: unmounted composer not found on the WHM page' );
-    like( $got->{reason}, qr/not visible to caged users/, 'CG2: WHM row names cage visibility' );
-    is( $got->{cagefs}, 1, 'CG2: WHM flags the cage case for the template' );
+    is( $got->{found}, 0, 'unmounted composer not found on the WHM page' );
+    like( $got->{reason}, qr/not visible to caged users/, 'WHM row names cage visibility' );
+    is( $got->{cagefs}, 1, 'WHM flags the cage case for the template' );
     open my $ef, '>', "$confd/usertools-composer.cfg" or die $!;
     print $ef "[usertools-composer]\ncomment=Composer\npaths=/usr/local/bin/composer\n";
     close $ef;
@@ -301,7 +301,7 @@ sub write_pair {
         "$dir/usertools.conf",
         sub { return $_[0] eq '/usr/local/bin/composer' ? ( 'ok', undef ) : ( 'missing', 'not found' ); }
     );
-    is( $got->{found}, 1, 'CG2: conf.d-listed composer found again' );
+    is( $got->{found}, 1, 'conf.d-listed composer found again' );
 }
 
 # --- audit tail ----------------------------------------------------------------------

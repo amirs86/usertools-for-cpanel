@@ -108,10 +108,10 @@ latest_tag() {
 }
 
 # verify_release tmp tgz sig repo ver: cosign REQUIRED here (0 ok).
-# cosign_bin: fixed locations only (U-C, never PATH as root). Accepts
+# cosign_bin: fixed locations only (never PATH as root). Accepts
 # /usr/local/bin/cosign or /usr/bin/cosign when root-owned and not
 # group- or other-writable (the same rule as Composer). USERTOOLS_COSIGN
-# is the test seam (honoured only in test mode via the U-B gate above).
+# is the test seam (honoured only in test mode).
 cosign_bin() {
     if [ -n "${USERTOOLS_COSIGN:-}" ]; then
         printf '%s' "$USERTOOLS_COSIGN"
@@ -180,7 +180,7 @@ do_update() { # mode(update|auto) base-url: full verified update
     repo="$(policy_value "$POLICY" update_repo)"
     [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "update_repo not configured"; return 1; }
     if [ "$mode" = "auto" ]; then
-        [ "$(policy_value "$POLICY" auto_update)" = "1" ] || { info "auto-update off; nothing to do"; return 0; }
+        [ "$(policy_value "$POLICY" auto_update)" = "1" ] || { echo "auto-update off; nothing to do"; return 0; }
     fi
     [ -f "$VERSION_FILE" ] || { echo "installed VERSION missing"; return 1; }
     cur="$(tr -d ' \t\r\n' <"$VERSION_FILE")"
@@ -188,7 +188,7 @@ do_update() { # mode(update|auto) base-url: full verified update
     valid_tag "$latest" || { echo "ignoring non-release tag $latest"; return 1; }
     cmp="$(semver_cmp "$cur" "$latest")" || { echo "uncomparable versions"; return 1; }
     if [ "$cmp" != "-1" ]; then
-        info "already current ($cur); nothing to do"
+        echo "already current ($cur); nothing to do"
         return 0
     fi
     if [ "$mode" = "auto" ]; then
@@ -243,7 +243,7 @@ do_update() { # mode(update|auto) base-url: full verified update
     if [ "$mode" = "auto" ]; then
         write_status 1 "updated to $latest"
     fi
-    info "updated to $latest"
+    echo "updated to $latest"
     return 0
 }
 
@@ -274,7 +274,7 @@ do_rollback() { # : reinstall the kept previous tarball
     [[ "$top" =~ ^usertools-for-cpanel-v[0-9.]+\/$ ]] || { echo "unexpected tarball layout"; return 1; }
     do_install "$tmp/${top%/}" || return 1
     audit "rollback to $(basename "$tgz")"
-    info "rolled back to $(basename "$tgz")"
+    echo "rolled back to $(basename "$tgz")"
     return 0
 }
 
