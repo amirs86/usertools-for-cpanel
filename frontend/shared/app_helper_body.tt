@@ -1,0 +1,945 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    Shared App Helper page body (tool E). App list with Add
+    folder, per-app panels (versions/domains, grouped Artisan buttons with
+    confirm, collapsible output, Fix app permissions, .env safety check).
+    Included once by each theme adapter. %]
+<div class="ut-wrap">
+  <p class="ut-lead">[% locale.maketext('Look after your Laravel applications: run maintenance, fix permissions, check .env safety.') %]</p>
+  <details class="ut-learn">
+    <summary>[% locale.maketext('Learn more') %]</summary>
+    <p>[% locale.maketext('Apps are found automatically by their artisan file and Laravel markers. You can also add a folder by hand.') %]</p>
+    <p>[% locale.maketext('Point a website at an app, generate safe .htaccess files, and switch the main domain to public_html/public. Every change shows a preview first and can be undone.') %]</p>
+  </details>
+  <div class="ut-banner warn" id="ut-banner" role="status" aria-live="polite">[% locale.maketext('Loading.') %]</div>
+  <div class="ut-controls">
+    <button class="ut-btn secondary" id="ut-reload" type="button">[% locale.maketext('Reload') %]</button>
+  </div>
+  <div class="ut-addrow">
+    <label class="ut-path" for="ut-addpath">[% locale.maketext('Add folder (home-relative):') %]</label>
+    <input class="ut-input" type="text" id="ut-addpath" size="30" placeholder="[% locale.maketext('example: apps/blog') %]">
+    <button class="ut-btn small" id="ut-add" type="button">[% locale.maketext('Add folder') %]</button>
+  </div>
+  <div class="ut-grid" id="ut-apps" aria-live="polite"></div>
+  <dialog class="ut-dialog" id="ut-dialog" aria-labelledby="ut-dialog-title">
+    <h2 id="ut-dialog-title"></h2>
+    <p id="ut-dialog-body"></p>
+    <div class="ut-dialog-actions">
+      <button class="ut-btn" id="ut-dialog-apply" type="button"></button>
+      <button class="ut-btn secondary" id="ut-dialog-cancel" type="button">[% locale.maketext('Cancel') %]</button>
+    </div>
+  </dialog>
+[% PROCESS 'shared/footer.tt' -%]
+</div>
+<script>
+var UT_STR = {
+    apply: "[% locale.maketext('Apply') %]",
+    loading: "[% locale.maketext('Loading.') %]",
+    copied: "[% locale.maketext('Copied') %]",
+    reload: "[% locale.maketext('Reload') %]",
+    loadFailed: "[% locale.maketext('Could not load apps: ') %]",
+    noApps: "[% locale.maketext('No applications found. Add a folder above.') %]",
+    appsFoundOne: "[% locale.maketext('1 application.') %]",
+    appsFoundMany: "[% locale.maketext('COUNT applications.') %]",
+    addFailed: "[% locale.maketext('Could not add folder: ') %]",
+    added: "[% locale.maketext('Folder added.') %]",
+    remove: "[% locale.maketext('Remove') %]",
+    removed: "[% locale.maketext('Folder removed.') %]",
+    removeTitle: "[% locale.maketext('Remove folder?') %]",
+    removeBody: "[% locale.maketext('Stop tracking PATH in this list? Nothing on disk changes.') %]",
+    version: "[% locale.maketext('Laravel version') %]",
+    unknown: "[% locale.maketext('unknown') %]",
+    domains: "[% locale.maketext('Websites') %]",
+    noDomains: "[% locale.maketext('No website points here that we can see.') %]",
+    groupClear: "[% locale.maketext('Clear') %]",
+    groupCache: "[% locale.maketext('Cache') %]",
+    groupStorage: "[% locale.maketext('Storage link') %]",
+    runTitle: "[% locale.maketext('Run maintenance?') %]",
+    runBody: "[% locale.maketext('Run COMMAND on PATH?') %]",
+    runFailed: "[% locale.maketext('Command failed: ') %]",
+    ranOk: "[% locale.maketext('Finished.') %]",
+    timedOut: "[% locale.maketext('Timed out after two minutes.') %]",
+    details: "[% locale.maketext('Details') %]",
+    fixPerms: "[% locale.maketext('Fix app permissions') %]",
+    fixPreviewOne: "[% locale.maketext('Fix 1 path in PATH?') %]",
+    fixPreviewMany: "[% locale.maketext('Fix COUNT paths in PATH?') %]",
+    fixPermsNote: "[% locale.maketext('Preview first, then apply. Uses the Bulk Permissions engine on this app only.') %]",
+    envCheck: "[% locale.maketext('Check .env safety') %]",
+    envSafe: "[% locale.maketext('.env looks safe.') %]",
+    envCritical: "[% locale.maketext('CRITICAL: your .env file may be readable on the web. See how to fix below.') %]",
+    envUnknown: "[% locale.maketext('Could not tell whether .env is exposed.') %]",
+    envHowto: "[% locale.maketext('How to fix: make sure the website serves the public folder only, never the app folder itself. The one-click fix below applies the safe .htaccess pair.') %]",
+    envFailed: "[% locale.maketext('Safety check failed: ') %]",
+    deployWarning: "[% locale.maketext('Your deploy replaced public/.htaccess; re-apply to restore the extra protection.') %]",
+    commitHint: "[% locale.maketext('Tip: commit the generated public/.htaccess to your repository so deploys keep it.') %]",
+    docrootTitle: "[% locale.maketext('Point a website here') %]",
+    docrootPreview: "[% locale.maketext('Preview') %]",
+    docrootApply: "[% locale.maketext('Point domain here') %]",
+    docrootUndo: "[% locale.maketext('Undo pointing') %]",
+    docrootGoes: "[% locale.maketext('DOMAIN now serves OLD and will serve NEW.') %]",
+    docrootBlocked: "[% locale.maketext('Not allowed: ') %]",
+    docrootFailed: "[% locale.maketext('Domain change failed: ') %]",
+    docrootDone: "[% locale.maketext('Website now points at the app.') %]",
+    docrootUndone: "[% locale.maketext('Pointing undone.') %]",
+    htaccessTitle: "[% locale.maketext('Protect with .htaccess') %]",
+    htaccessPreview: "[% locale.maketext('Preview .htaccess') %]",
+    htaccessApply: "[% locale.maketext('Apply safe .htaccess') %]",
+    htaccessUndo: "[% locale.maketext('Undo .htaccess') %]",
+    htaccessDone: "[% locale.maketext('.htaccess applied.') %]",
+    htaccessRestored: "[% locale.maketext('The homepage broke, so both files were restored: ') %]",
+    htaccessUndone: "[% locale.maketext('.htaccess undone.') %]",
+    htaccessFailed: "[% locale.maketext('.htaccess change failed: ') %]",
+    optNonwww: "[% locale.maketext('Redirect www to bare domain') %]",
+    optHttps: "[% locale.maketext('Force HTTPS') %]",
+    optSlash: "[% locale.maketext('Trim trailing slashes') %]",
+    optIndexphp: "[% locale.maketext('Strip index.php from URLs') %]",
+    optAuth: "[% locale.maketext('Pass Authorization header to the app') %]",
+    optExpires: "[% locale.maketext('Browser caching + compression') %]",
+    optSitemap: "[% locale.maketext('Cache sitemap XML for an hour') %]",
+    primaryTitle: "[% locale.maketext('Main domain') %]",
+    primaryCheck: "[% locale.maketext('Check main domain') %]",
+    primaryServe: "[% locale.maketext('Serve my main domain from public_html/public') %]",
+    primaryRevert: "[% locale.maketext('Serve my main domain from public_html') %]",
+    primaryAsk: "[% locale.maketext('Ask my host') %]",
+    primaryCopy: "[% locale.maketext('Copy request') %]",
+    primaryDone: "[% locale.maketext('Main domain switched.') %]",
+    primaryAlready: "[% locale.maketext('Main domain already serves this setting.') %]",
+    primaryFailed: "[% locale.maketext('Main-domain change failed: ') %]",
+    deployTitle: "[% locale.maketext('Deploy and maintain') %]",
+    deployLoad: "[% locale.maketext('Open deploy panel') %]",
+    deployFailed: "[% locale.maketext('Deploy action failed: ') %]",
+    readinessCheck: "[% locale.maketext('Check readiness') %]",
+    readinessProduction: "[% locale.maketext('Production') %]",
+    readinessDebug: "[% locale.maketext('Debug on') %]",
+    readinessKey: "[% locale.maketext('APP_KEY empty') %]",
+    readinessStorage: "[% locale.maketext('Storage link missing') %]",
+    readinessEnv: "[% locale.maketext('.env exposed') %]",
+    readinessCache: "[% locale.maketext('Config cache stale or missing') %]",
+    readinessLog: "[% locale.maketext('Oversized log (MB): ') %]",
+    readinessLive: "[% locale.maketext('No website points here yet.') %]",
+    prodPreview: "[% locale.maketext('Preview production settings') %]",
+    prodApply: "[% locale.maketext('Use production settings') %]",
+    prodUndo: "[% locale.maketext('Undo production settings') %]",
+    prodDone: "[% locale.maketext('Production settings applied.') %]",
+    prodUndone: "[% locale.maketext('Production settings undone.') %]",
+    prodNoChanges: "[% locale.maketext('(no changes)') %]",
+    keyGenerate: "[% locale.maketext('Generate APP_KEY') %]",
+    keyDone: "[% locale.maketext('APP_KEY generated.') %]",
+    composerRun: "[% locale.maketext('Install dependencies (composer)') %]",
+    composerScripts: "[% locale.maketext('Composer runs the project scripts as your account (post-autoload-dump). Servers often run with allow_url_fopen off, so it is enabled for this run only — no php.ini is ever edited.') %]",
+    composerProcOpen: "[% locale.maketext('Your host has disabled proc_open in PHP, which Composer needs. Ask your host.') %]",
+    readinessProcOpen: "[% locale.maketext('PHP disables proc_open (Composer cannot run).') %]",
+    readinessExt: "[% locale.maketext('Missing PHP extensions: ') %]",
+    npmRun: "[% locale.maketext('Build front-end assets (npm)') %]",
+    npmScripts: "[% locale.maketext('npm runs the project lifecycle scripts as your account.') %]",
+    npmQuota: "[% locale.maketext('Quota left: ') %]",
+    npmRemove: "[% locale.maketext('Keep node_modules for debugging') %]",
+    lockCreated: "[% locale.maketext('No package-lock.json was found, so npm install ran instead of npm ci. A lockfile was created — commit it.') %]",
+    nmRemoved: "[% locale.maketext('node_modules was removed after the build.') %]",
+    nmRemovedCleanup: "[% locale.maketext('The build failed, so node_modules was removed to save quota.') %]",
+    nmKept: "[% locale.maketext('node_modules was kept on disk.') %]",
+    jobRunning: "[% locale.maketext('Running: ') %]",
+    jobDone: "[% locale.maketext('Finished.') %]",
+    jobFailed: "[% locale.maketext('Failed.') %]",
+    jobCancelled: "[% locale.maketext('Cancelled.') %]",
+    jobCancel: "[% locale.maketext('Cancel job') %]",
+    logsTitle: "[% locale.maketext('Logs') %]",
+    logView: "[% locale.maketext('View last lines') %]",
+    logClear: "[% locale.maketext('Clear log') %]",
+    logClearTitle: "[% locale.maketext('Clear this log? There is no undo.') %]",
+    logCleared: "[% locale.maketext('Log cleared.') %]",
+    maintDown: "[% locale.maketext('Take down for maintenance') %]",
+    maintUp: "[% locale.maketext('Bring back up') %]",
+    maintBypass: "[% locale.maketext('Bypass URL (shown once): ') %]",
+    cronTitle: "[% locale.maketext('Scheduler') %]",
+    cronAdd: "[% locale.maketext('Add scheduler cron') %]",
+    cronRemove: "[% locale.maketext('Remove scheduler cron') %]",
+    cronOn: "[% locale.maketext('Scheduler cron is installed.') %]",
+    cronOff: "[% locale.maketext('Scheduler cron is missing.') %]",
+    cronNA: "[% locale.maketext('Scheduler unavailable on this server.') %]",
+    steps: "[% locale.maketext('Steps: 1 public .htaccess, 2 point the domain, 3 lock the app root, 4 .env check.') %]",
+    lockRoot: "[% locale.maketext('Lock the app root') %]",
+    storageNote: "[% locale.maketext('Storage link created by fallback.') %]"
+};
+</script>
+<script>
+"use strict";
+window.addEventListener("DOMContentLoaded", function () {
+    if (!window.UserTools) {
+        document.getElementById("ut-banner").textContent = "UserTools failed to load.";
+        return;
+    }
+    var bannerEl = document.getElementById("ut-banner");
+    var appsEl = document.getElementById("ut-apps");
+    var reloadBtn = document.getElementById("ut-reload");
+    var addInput = document.getElementById("ut-addpath");
+    var addBtn = document.getElementById("ut-add");
+    var dlg = document.getElementById("ut-dialog");
+    var dlgTitle = document.getElementById("ut-dialog-title");
+    var dlgBody = document.getElementById("ut-dialog-body");
+    var dlgApply = document.getElementById("ut-dialog-apply");
+    var dlgCancel = document.getElementById("ut-dialog-cancel");
+    var lastApply = null;
+    var lastFocus = null;
+    var apps = [];
+
+    var COMMAND_GROUPS = [
+        { name: "groupClear", commands: ["optimize:clear", "cache:clear", "config:clear", "route:clear", "view:clear"] },
+        { name: "groupCache", commands: ["optimize", "config:cache", "route:cache", "view:cache"] },
+        { name: "groupStorage", commands: ["storage:link"] }
+    ];
+    function tok(s, name, value) { return String(s).split(name).join(value); }
+    function setBanner(kind, text) {
+        bannerEl.className = "ut-banner " + kind;
+        bannerEl.textContent = text;
+    }
+    function openDialog(title, body, applyLabel, onApply) {
+        lastFocus = document.activeElement;
+        dlgTitle.textContent = title;
+        dlgBody.textContent = body;
+        dlgApply.textContent = applyLabel;
+        lastApply = onApply;
+        if (dlg.showModal) { dlg.showModal(); } else { dlg.setAttribute("open", ""); }
+        dlgCancel.focus();
+    }
+    function closeDialog() {
+        if (dlg.close) { dlg.close(); } else { dlg.removeAttribute("open"); }
+        lastApply = null;
+        if (lastFocus && lastFocus.focus) { lastFocus.focus(); }
+    }
+    dlgApply.addEventListener("click", function () {
+        var fn = lastApply;
+        closeDialog();
+        if (fn) { fn(); }
+    });
+    dlgCancel.addEventListener("click", closeDialog);
+
+    function esc(s) { return UserTools.escHtml(s); }
+    function render() {
+        var html = "";
+        if (!apps.length) {
+            setBanner("warn", UT_STR.noApps);
+        } else {
+            setBanner("ok", UserTools.plural(apps.length, UT_STR.appsFoundOne, UT_STR.appsFoundMany));
+        }
+        apps.forEach(function (app, idx) {
+            var ver = app.framework_version ? esc(app.framework_version) : esc("(" + UT_STR.unknown + ")");
+            html += '<div class="ut-card" data-app="' + idx + '"><h2>' + esc(app.path) + "</h2>";
+            html += "<p>" + esc(UT_STR.version) + ": " + ver + " &middot; " + esc(app.source) + "</p>";
+            var ht = app.htaccess || {};
+            if (ht.lock && !ht.public) {
+                html += '<div class="ut-banner warn">' + esc(UT_STR.deployWarning) + "</div>";
+            }
+            var doms = app.domains || [];
+            if (doms.length) {
+                html += "<p>" + esc(UT_STR.domains) + ": ";
+                html += doms.map(function (d) { return esc(d); }).join(", ");
+                html += "</p>";
+            } else {
+                html += "<p>" + esc(UT_STR.noDomains) + "</p>";
+            }
+            COMMAND_GROUPS.forEach(function (g) {
+                html += "<p><strong>" + esc(UT_STR[g.name]) + ":</strong> ";
+                g.commands.forEach(function (c) {
+                    html += '<button class="ut-btn small" type="button" data-artisan="' + esc(c)
+                        + '" data-idx="' + idx + '">' + esc(c) + "</button> ";
+                });
+                html += "</p>";
+            });
+            html += '<div class="ut-out" id="ut-out-' + idx + '" aria-live="polite"></div>';
+            html += '<p><button class="ut-btn small secondary" type="button" data-fixperms="' + idx + '">'
+                + esc(UT_STR.fixPerms) + "</button> ";
+            html += '<button class="ut-btn small secondary" type="button" data-envcheck="' + idx + '">'
+                + esc(UT_STR.envCheck) + "</button> ";
+            if (app.source === "added") {
+                html += '<button class="ut-btn small secondary" type="button" data-remove="' + idx + '">'
+                    + esc(UT_STR.remove) + "</button>";
+            }
+            html += "</p>";
+            html += '<div class="ut-env" id="ut-env-' + idx + '" aria-live="polite"></div>';
+            html += '<details class="ut-sub"><summary>' + esc(UT_STR.docrootTitle) + "</summary>";
+            html += "<p>" + esc(UT_STR.steps) + "</p><p>";
+            html += '<select class="ut-input" id="ut-domain-' + idx + '" aria-label="' + esc(UT_STR.docrootTitle) + '">'
+                + doms.map(function (d) {
+                    return '<option value="' + esc(d) + '">' + esc(d) + "</option>";
+                }).join("") + "</select> ";
+            html += '<button class="ut-btn small secondary" type="button" data-docroot-preview="' + idx + '">'
+                + esc(UT_STR.docrootPreview) + "</button> ";
+            html += '<button class="ut-btn small secondary" type="button" data-docroot-apply="' + idx + '">'
+                + esc(UT_STR.docrootApply) + "</button> ";
+            html += '<button class="ut-btn small secondary" type="button" data-docroot-undo="' + idx + '">'
+                + esc(UT_STR.docrootUndo) + "</button></p>";
+            html += '<div class="ut-out" id="ut-docroot-' + idx + '" aria-live="polite"></div></details>';
+            html += '<details class="ut-sub"><summary>' + esc(UT_STR.htaccessTitle) + "</summary><p>";
+            var HTOPTS = [["nonwww", "optNonwww", true], ["https", "optHttps", false],
+                ["slash", "optSlash", true], ["indexphp", "optIndexphp", false],
+                ["auth", "optAuth", false], ["expires", "optExpires", true],
+                ["sitemap", "optSitemap", false]];
+            HTOPTS.forEach(function (o) {
+                html += '<label class="ut-check"><input type="checkbox" data-htopt="' + o[0]
+                    + '" data-idx="' + idx + '"' + (o[2] ? " checked" : "") + "> "
+                    + esc(UT_STR[o[1]]) + "</label> ";
+            });
+            html += '</p><p><button class="ut-btn small secondary" type="button" data-ht-preview="' + idx + '">'
+                + esc(UT_STR.htaccessPreview) + "</button> ";
+            html += '<button class="ut-btn small secondary" type="button" data-ht-apply="' + idx + '">'
+                + esc(UT_STR.htaccessApply) + "</button> ";
+            html += '<button class="ut-btn small secondary" type="button" data-ht-undo="' + idx + '">'
+                + esc(UT_STR.htaccessUndo) + "</button></p>";
+            html += "<p>" + esc(UT_STR.commitHint) + "</p>";
+            html += '<div class="ut-out" id="ut-ht-' + idx + '" aria-live="polite"></div></details>';
+            if (app.path === "public_html") {
+                html += '<details class="ut-sub"><summary>' + esc(UT_STR.primaryTitle) + "</summary><p>";
+                html += '<button class="ut-btn small secondary" type="button" data-primary-check="' + idx + '">'
+                    + esc(UT_STR.primaryCheck) + "</button></p>";
+                html += '<div class="ut-out" id="ut-primary-' + idx + '" aria-live="polite"></div></details>';
+            }
+            html += '<details class="ut-sub"><summary>' + esc(UT_STR.deployTitle) + "</summary>";
+            html += '<div class="ut-out" id="ut-deploy-' + idx + '"><button class="ut-btn small secondary" type="button" data-deploy-load="' + idx + '">'
+                + esc(UT_STR.deployLoad) + "</button></div></details>";
+            html += "</div>";
+        });
+        appsEl.innerHTML = html;
+        bindCardButtons();
+    }
+    function showOut(idx, text, kind) {
+        var el = document.getElementById("ut-out-" + idx);
+        if (!el) { return; }
+        el.innerHTML = "<details" + (kind === "bad" ? " open" : "") + "><summary>"
+            + esc(UT_STR.details) + "</summary><pre></pre></details>";
+        el.querySelector("pre").textContent = text;
+    }
+    function showPre(id, text, kind) {
+        var el = document.getElementById(id);
+        if (!el) { return; }
+        el.innerHTML = "<details" + (kind === "bad" ? " open" : "") + "><summary>"
+            + esc(UT_STR.details) + "</summary><pre></pre></details>";
+        el.querySelector("pre").textContent = text;
+    }
+    function copyText(text) {
+        function done() { setBanner("ok", UT_STR.copied); }
+        function fallback() {
+            var ta = document.createElement("textarea");
+            ta.value = text;
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand("copy"); done(); }
+            catch (e) { setBanner("err", String((e && e.message) || e)); }
+            document.body.removeChild(ta);
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, fallback);
+        } else { fallback(); }
+    }
+    function htOptions(idx) {
+        var o = {};
+        Array.prototype.forEach.call(
+            document.querySelectorAll('[data-htopt][data-idx="' + idx + '"]'), function (cb) {
+                o[cb.getAttribute("data-htopt")] = cb.checked ? "1" : "0";
+            });
+        return o;
+    }
+    function bindCardButtons() {
+        Array.prototype.forEach.call(document.querySelectorAll("[data-artisan]"), function (btn) {
+            btn.addEventListener("click", function () {
+                var app = apps[+btn.getAttribute("data-idx")];
+                var cmd = btn.getAttribute("data-artisan");
+                openDialog(UT_STR.runTitle,
+                    tok(tok(UT_STR.runBody, "COMMAND", cmd), "PATH", app.path),
+                    UT_STR.apply, function () {
+                        runArtisan(app, cmd);
+                    });
+            });
+        });
+        Array.prototype.forEach.call(document.querySelectorAll("[data-remove]"), function (btn) {
+            btn.addEventListener("click", function () {
+                var app = apps[+btn.getAttribute("data-idx")];
+                openDialog(UT_STR.removeTitle,
+                    tok(UT_STR.removeBody, "PATH", app.path),
+                    UT_STR.apply, function () {
+                        UserTools.callApi("app_helper_remove", { path: app.path }, "POST").then(function () {
+                            setBanner("ok", UT_STR.removed);
+                            load();
+                        }).catch(function (err) {
+                            setBanner("err", UT_STR.addFailed + err.message);
+                        });
+                    });
+            });
+        });
+        Array.prototype.forEach.call(document.querySelectorAll("[data-fixperms]"), function (btn) {
+            btn.addEventListener("click", function () {
+                var app = apps[+btn.getAttribute("data-idx")];
+                UserTools.callApi("app_helper_fix_perms", { app: app.path }, "POST").then(function (data) {
+                    var n = ((data.preview_counts || {}).would_change) || 0;
+                    openDialog(UT_STR.fixPerms,
+                        tok(UserTools.plural(n, UT_STR.fixPreviewOne, UT_STR.fixPreviewMany), "PATH", app.path),
+                        UT_STR.apply, function () {
+                            UserTools.callApi("bulk_permissions_start",
+                                { scope: data.scope, dry_run: "0" }, "POST").then(function () {
+                                    setBanner("ok", UT_STR.ranOk);
+                                }).catch(function (err) {
+                                    setBanner("err", UT_STR.runFailed + err.message);
+                                });
+                        });
+                }).catch(function (err) {
+                    setBanner("err", UT_STR.runFailed + err.message);
+                });
+            });
+        });
+        Array.prototype.forEach.call(document.querySelectorAll("[data-envcheck]"), function (btn) {
+            btn.addEventListener("click", function () {
+                var idx = +btn.getAttribute("data-idx");
+                var app = apps[idx];
+                var box = document.getElementById("ut-env-" + idx);
+                box.textContent = UT_STR.loading || "";
+                UserTools.callApi("app_helper_env_check", { app: app.path }, "POST").then(function (data) {
+                    var crit = (data.checked || []).filter(function (c) { return c.verdict === "critical"; });
+                    var unk = (data.checked || []).filter(function (c) { return c.verdict === "unknown"; });
+                    if (crit.length) {
+                        box.innerHTML = '<div class="ut-banner err">'
+                            + esc(UT_STR.envCritical) + "</div><p>" + esc(UT_STR.envHowto) + "</p>";
+                    } else if ((data.checked || []).length && !unk.length) {
+                        box.innerHTML = '<div class="ut-banner ok">' + esc(UT_STR.envSafe) + "</div>";
+                    } else {
+                        box.innerHTML = '<div class="ut-banner warn">' + esc(UT_STR.envUnknown) + "</div>";
+                    }
+                }).catch(function (err) {
+                    box.innerHTML = '<div class="ut-banner err">'
+                        + esc(UT_STR.envFailed + err.message) + "</div>";
+                });
+            });
+        });
+        Array.prototype.forEach.call(document.querySelectorAll("[data-docroot-preview]"), function (btn) {
+            btn.addEventListener("click", function () {
+                previewDocroot(+btn.getAttribute("data-docroot-preview"));
+            });
+        });
+        Array.prototype.forEach.call(document.querySelectorAll("[data-docroot-apply]"), function (btn) {
+            btn.addEventListener("click", function () {
+                var idx = +btn.getAttribute("data-docroot-apply");
+                var app = apps[idx];
+                var sel = document.getElementById("ut-domain-" + idx);
+                var domain = sel ? sel.value : "";
+                previewDocroot(idx, function (data) {
+                    if (!data.allowed) { return; }
+                    openDialog(UT_STR.docrootTitle,
+                        tok(tok(tok(UT_STR.docrootGoes, "DOMAIN", data.domain), "OLD", data.old_docroot), "NEW", data.new_docroot),
+                        UT_STR.apply, function () {
+                            UserTools.callApi("app_helper_set_docroot",
+                                { app: app.path, domain: domain }, "POST").then(function () {
+                                    var box = document.getElementById("ut-docroot-" + idx);
+                                    box.innerHTML = '<div class="ut-banner ok">'
+                                        + esc(UT_STR.docrootDone) + "</div>" + lockButton(idx);
+                                    bindLock(idx);
+                                    load();
+                                }).catch(function (err) {
+                                    setBanner("err", UT_STR.docrootFailed + err.message);
+                                });
+                        });
+                });
+            });
+        });
+        Array.prototype.forEach.call(document.querySelectorAll("[data-docroot-undo]"), function (btn) {
+            btn.addEventListener("click", function () {
+                var idx = +btn.getAttribute("data-docroot-undo");
+                var app = apps[idx];
+                var sel = document.getElementById("ut-domain-" + idx);
+                var domain = sel ? sel.value : "";
+                UserTools.callApi("app_helper_undo_docroot", { domain: domain }, "POST").then(function () {
+                    setBanner("ok", UT_STR.docrootUndone);
+                    load();
+                }).catch(function (err) {
+                    setBanner("err", UT_STR.docrootFailed + err.message);
+                });
+            });
+        });
+        Array.prototype.forEach.call(document.querySelectorAll("[data-ht-preview]"), function (btn) {
+            btn.addEventListener("click", function () {
+                previewHtaccess(+btn.getAttribute("data-ht-preview"), false);
+            });
+        });
+        Array.prototype.forEach.call(document.querySelectorAll("[data-ht-apply]"), function (btn) {
+            btn.addEventListener("click", function () {
+                var idx = +btn.getAttribute("data-ht-apply");
+                previewHtaccess(idx, true);
+            });
+        });
+        Array.prototype.forEach.call(document.querySelectorAll("[data-ht-undo]"), function (btn) {
+            btn.addEventListener("click", function () {
+                var idx = +btn.getAttribute("data-ht-undo");
+                var app = apps[idx];
+                UserTools.callApi("app_helper_htaccess_undo", { app: app.path }, "POST").then(function () {
+                    setBanner("ok", UT_STR.htaccessUndone);
+                }).catch(function (err) {
+                    setBanner("err", UT_STR.htaccessFailed + err.message);
+                });
+            });
+        });
+        Array.prototype.forEach.call(document.querySelectorAll("[data-primary-check]"), function (btn) {
+            btn.addEventListener("click", function () {
+                checkPrimary(+btn.getAttribute("data-primary-check"));
+            });
+        });
+        Array.prototype.forEach.call(document.querySelectorAll("[data-deploy-load]"), function (btn) {
+            btn.addEventListener("click", function () {
+                loadDeployPanel(+btn.getAttribute("data-deploy-load"));
+            });
+        });
+    }
+    var deployTimers = {};
+    function deployFail(idx, err) {
+        setBanner("err", UT_STR.deployFailed + err.message);
+    }
+    function loadDeployPanel(idx) {
+        var app = apps[idx];
+        var box = document.getElementById("ut-deploy-" + idx);
+        box.textContent = UT_STR.loading || "";
+        UserTools.callApi("app_helper_deploy_info", { app: app.path }, "POST").then(function (info) {
+            UserTools.callApi("app_helper_logs", { app: app.path }, "POST").then(function (logs) {
+                renderDeployPanel(idx, app, info, logs);
+            }).catch(function (err) { deployFail(idx, err); });
+        }).catch(function (err) { deployFail(idx, err); });
+    }
+    function renderDeployPanel(idx, app, info, logs) {
+        var box = document.getElementById("ut-deploy-" + idx);
+        var html = "";
+        html += '<p><button class="ut-btn small secondary" type="button" data-readiness="' + idx + '">'
+            + esc(UT_STR.readinessCheck) + "</button></p>";
+        html += '<div class="ut-out" id="ut-ready-' + idx + '"></div>';
+        if (info.composer && info.composer.found) {
+            html += '<p>' + esc(UT_STR.composerScripts) + "</p>";
+            html += '<p><button class="ut-btn small" type="button" data-composer="' + idx + '">'
+                + esc(UT_STR.composerRun) + "</button></p>";
+        } else if (info.composer && info.composer.reason) {
+            html += '<div class="ut-banner warn">' + esc(info.composer.reason) + "</div>";
+        }
+        if (info.node && info.node.found) {
+            html += '<p>' + esc(UT_STR.npmScripts) + "</p>";
+            if (info.quota && typeof info.quota.megabytes_remain !== "undefined") {
+                html += "<p>" + esc(UT_STR.npmQuota + info.quota.megabytes_remain + " MB") + "</p>";
+            }
+            if (info.node.warning) {
+                html += '<div class="ut-banner warn">' + esc(info.node.warning) + "</div>";
+            }
+            html += '<p><label class="ut-check"><input type="checkbox" id="ut-rmnm-' + idx + '"> '
+                + esc(UT_STR.npmRemove) + "</label></p>";
+            html += '<p><button class="ut-btn small" type="button" data-npm="' + idx + '">'
+                + esc(UT_STR.npmRun) + "</button></p>";
+        }
+        html += '<div class="ut-out" id="ut-job-' + idx + '"></div>';
+        html += "<p><strong>" + esc(UT_STR.logsTitle) + "</strong></p>";
+        html += '<p><select class="ut-input" id="ut-log-' + idx + '">'
+            + (logs.logs || []).map(function (l) {
+                return '<option value="' + esc(l.name) + '">' + esc(l.name + " (" + l.size + ")") + "</option>";
+            }).join("") + "</select> ";
+        html += '<button class="ut-btn small secondary" type="button" data-logview="' + idx + '">'
+            + esc(UT_STR.logView) + "</button> ";
+        html += '<button class="ut-btn small secondary" type="button" data-logclear="' + idx + '">'
+            + esc(UT_STR.logClear) + "</button></p>";
+        if (logs.advice) {
+            html += "<p>" + esc(logs.advice) + "</p>";
+        }
+        html += '<div class="ut-out" id="ut-logview-' + idx + '"></div>';
+        html += "<p><strong>" + esc(UT_STR.cronTitle) + "</strong>: ";
+        if (!info.cron || !info.cron.available) {
+            html += esc(UT_STR.cronNA);
+        } else if (info.cron.present) {
+            html += esc(UT_STR.cronOn);
+            html += ' <button class="ut-btn small secondary" type="button" data-cronrm="' + idx + '">'
+                + esc(UT_STR.cronRemove) + "</button>";
+        } else {
+            html += esc(UT_STR.cronOff);
+            html += ' <button class="ut-btn small secondary" type="button" data-cronadd="' + idx + '">'
+                + esc(UT_STR.cronAdd) + "</button>";
+        }
+        html += "</p>";
+        html += "<p>";
+        if (info.maintenance && info.maintenance.down) {
+            html += '<button class="ut-btn small" type="button" data-maint="' + idx + '" data-how="up">'
+                + esc(UT_STR.maintUp) + "</button>";
+        } else {
+            html += '<button class="ut-btn small" type="button" data-maint="' + idx + '" data-how="down">'
+                + esc(UT_STR.maintDown) + "</button>";
+        }
+        html += "</p>";
+        html += '<div class="ut-out" id="ut-maint-' + idx + '"></div>';
+        box.innerHTML = html;
+        bindDeployPanel(idx, app);
+    }
+    function selectedLog(idx) {
+        var sel = document.getElementById("ut-log-" + idx);
+        return sel ? sel.value : "";
+    }
+    function bindDeployPanel(idx, app) {
+        function q(sel) { return document.querySelector(sel); }
+        var b;
+        b = q('[data-readiness="' + idx + '"]');
+        if (b) { b.addEventListener("click", function () { checkReadiness(idx); }); }
+        b = q('[data-composer="' + idx + '"]');
+        if (b) {
+            b.addEventListener("click", function () {
+                UserTools.callApi("app_helper_composer_start", { app: app.path }, "POST").then(function (data) {
+                    if (data.state === "busy") { setBanner("warn", UT_STR.jobRunning); return; }
+                    pollDeploy(idx, data.job_id);
+                }).catch(function (err) { deployFail(idx, err); });
+            });
+        }
+        b = q('[data-npm="' + idx + '"]');
+        if (b) {
+            b.addEventListener("click", function () {
+                var rm = document.getElementById("ut-rmnm-" + idx);
+                UserTools.callApi("app_helper_npm_start",
+                    { app: app.path, keep_node_modules: (rm && rm.checked) ? "1" : "0" }, "POST").then(function (data) {
+                        if (data.state === "busy") { setBanner("warn", UT_STR.jobRunning); return; }
+                        if (data.installer === "install") {
+                            var note = document.getElementById("ut-job-" + idx);
+                            if (note) { note.innerHTML = '<div class="ut-note">' + esc(UT_STR.lockCreated) + "</div>"; }
+                        }
+                        pollDeploy(idx, data.job_id);
+                    }).catch(function (err) { deployFail(idx, err); });
+            });
+        }
+        b = q('[data-logview="' + idx + '"]');
+        if (b) {
+            b.addEventListener("click", function () {
+                UserTools.callApi("app_helper_log_view", { app: app.path, name: selectedLog(idx) }, "POST").then(function (data) {
+                    showPre("ut-logview-" + idx, data.tail || "", "ok");
+                }).catch(function (err) { deployFail(idx, err); });
+            });
+        }
+        b = q('[data-logclear="' + idx + '"]');
+        if (b) {
+            b.addEventListener("click", function () {
+                openDialog(UT_STR.logClear, UT_STR.logClearTitle, UT_STR.apply, function () {
+                    UserTools.callApi("app_helper_log_clear", { app: app.path, name: selectedLog(idx) }, "POST").then(function () {
+                        setBanner("ok", UT_STR.logCleared);
+                        loadDeployPanel(idx);
+                    }).catch(function (err) { deployFail(idx, err); });
+                });
+            });
+        }
+        b = q('[data-cronadd="' + idx + '"]');
+        if (b) {
+            b.addEventListener("click", function () {
+                UserTools.callApi("app_helper_cron_add", { app: app.path }, "POST").then(function () {
+                    loadDeployPanel(idx);
+                }).catch(function (err) { deployFail(idx, err); });
+            });
+        }
+        b = q('[data-cronrm="' + idx + '"]');
+        if (b) {
+            b.addEventListener("click", function () {
+                UserTools.callApi("app_helper_cron_remove", { app: app.path }, "POST").then(function () {
+                    loadDeployPanel(idx);
+                }).catch(function (err) { deployFail(idx, err); });
+            });
+        }
+        b = q('[data-maint="' + idx + '"]');
+        if (b) {
+            b.addEventListener("click", function () {
+                var how = b.getAttribute("data-how");
+                UserTools.callApi("app_helper_maintenance", { app: app.path, action: how }, "POST").then(function (data) {
+                    var mbox = document.getElementById("ut-maint-" + idx);
+                    if (how === "down" && data.secret) {
+                        mbox.innerHTML = '<div class="ut-banner warn">'
+                            + esc(UT_STR.maintBypass + (data.bypass_url || data.secret)) + "</div>";
+                    } else {
+                        setBanner("ok", UT_STR.jobDone);
+                    }
+                    loadDeployPanel(idx);
+                }).catch(function (err) { deployFail(idx, err); });
+            });
+        }
+    }
+    function pollDeploy(idx, jobId) {
+        if (deployTimers[idx]) { clearInterval(deployTimers[idx]); }
+        deployTimers[idx] = setInterval(function () {
+            UserTools.callApi("app_helper_deploy_status", { job_id: jobId }, "POST").then(function (data) {
+                var box = document.getElementById("ut-job-" + idx);
+                var text = UT_STR.jobRunning + ((data.progress && data.progress.name) || "");
+                if (data.state === "done") { text = UT_STR.jobDone; }
+                else if (data.state === "failed") { text = UT_STR.jobFailed; }
+                else if (data.state === "cancelled") { text = UT_STR.jobCancelled; }
+                var html = '<div class="ut-banner">' + esc(text) + "</div>";
+                if (data.resource_hint) { html += '<div class="ut-banner warn">' + esc(data.resource_hint) + "</div>"; }
+                if (data.log) { html += "<pre></pre>"; }
+                if ((data.state === "done" || data.state === "failed") && data.node_modules) {
+                    var nmNote = {
+                        removed: UT_STR.nmRemoved,
+                        "removed-cleanup": UT_STR.nmRemovedCleanup,
+                        kept: UT_STR.nmKept
+                    }[data.node_modules];
+                    if (nmNote) { html += '<div class="ut-note">' + esc(nmNote) + "</div>"; }
+                }
+                if (data.state === "running") {
+                    html += '<p><button class="ut-btn small secondary" type="button" id="ut-cancel-' + idx + '">'
+                        + esc(UT_STR.jobCancel) + "</button></p>";
+                }
+                box.innerHTML = html;
+                var pre = box.querySelector("pre");
+                if (pre) { pre.textContent = data.log || ""; }
+                var cancel = document.getElementById("ut-cancel-" + idx);
+                if (cancel) {
+                    cancel.addEventListener("click", function () {
+                        UserTools.callApi("app_helper_deploy_cancel", { job_id: jobId }, "POST").then(function () {
+                            setBanner("ok", UT_STR.jobCancelled);
+                        }).catch(function (err) { deployFail(idx, err); });
+                    });
+                }
+                if (data.state === "done" || data.state === "failed" || data.state === "cancelled") {
+                    clearInterval(deployTimers[idx]);
+                    deployTimers[idx] = null;
+                }
+            }).catch(function (err) { deployFail(idx, err); });
+        }, 2000);
+    }
+    function checkReadiness(idx) {
+        var app = apps[idx];
+        var box = document.getElementById("ut-ready-" + idx);
+        box.textContent = UT_STR.loading || "";
+        UserTools.callApi("app_helper_readiness", { app: app.path }, "POST").then(function (data) {
+            var items = [];
+            if (!data.live) { items.push(UT_STR.readinessLive); }
+            if (data.debug_true) { items.push(UT_STR.readinessDebug); }
+            if (!data.env_production) { items.push(UT_STR.readinessProduction); }
+            if (data.key_empty) { items.push(UT_STR.readinessKey); }
+            if (!data.storage_link) { items.push(UT_STR.readinessStorage); }
+            if (data.env_exposed) { items.push(UT_STR.readinessEnv); }
+            if (data.config_cache !== "fresh") { items.push(UT_STR.readinessCache); }
+            if (data.big_log_mb > 200) { items.push(UT_STR.readinessLog + data.big_log_mb); }
+            if (data.proc_open_disabled) { items.push(UT_STR.readinessProcOpen); }
+            if (data.missing_extensions && data.missing_extensions.length) {
+                items.push(UT_STR.readinessExt + data.missing_extensions.join(", "));
+            }
+            var html = items.length
+                ? '<ul><li>' + items.map(function (t) { return esc(t); }).join("</li><li>") + "</li></ul>"
+                : '<div class="ut-banner ok">' + esc(UT_STR.ranOk) + "</div>";
+            html += '<p><button class="ut-btn small secondary" type="button" data-prodprev="' + idx + '">'
+                + esc(UT_STR.prodPreview) + "</button> ";
+            html += '<button class="ut-btn small secondary" type="button" data-produndo="' + idx + '">'
+                + esc(UT_STR.prodUndo) + "</button> ";
+            if (data.key_empty) {
+                html += '<button class="ut-btn small secondary" type="button" data-keygen="' + idx + '">'
+                    + esc(UT_STR.keyGenerate) + "</button>";
+            }
+            html += "</p>";
+            html += '<div class="ut-out" id="ut-prod-' + idx + '"></div>';
+            box.innerHTML = html;
+            bindReadiness(idx, app);
+        }).catch(function (err) { deployFail(idx, err); });
+    }
+    function bindReadiness(idx, app) {
+        function q(sel) { return document.querySelector(sel); }
+        var b = q('[data-prodprev="' + idx + '"]');
+        if (b) {
+            b.addEventListener("click", function () {
+                UserTools.callApi("app_helper_production_preview", { app: app.path }, "POST").then(function (data) {
+                    var text = "";
+                    if (data.unchanged) {
+                        text = UT_STR.prodNoChanges || "(no changes)";
+                    } else {
+                        (data.changes || []).forEach(function (c) {
+                            text += c.key + ": " + (c.from || "(not set)") + " -> " + c.to + "\n";
+                        });
+                    }
+                    showPre("ut-prod-" + idx, text, "ok");
+                    openDialog(UT_STR.prodApply, UT_STR.prodApply + "?", UT_STR.apply, function () {
+                        UserTools.callApi("app_helper_production_apply", { app: app.path }, "POST").then(function () {
+                            setBanner("ok", UT_STR.prodDone);
+                            checkReadiness(idx);
+                        }).catch(function (err) { deployFail(idx, err); });
+                    });
+                }).catch(function (err) { deployFail(idx, err); });
+            });
+        }
+        b = q('[data-produndo="' + idx + '"]');
+        if (b) {
+            b.addEventListener("click", function () {
+                UserTools.callApi("app_helper_production_undo", { app: app.path }, "POST").then(function () {
+                    setBanner("ok", UT_STR.prodUndone);
+                    checkReadiness(idx);
+                }).catch(function (err) { deployFail(idx, err); });
+            });
+        }
+        b = q('[data-keygen="' + idx + '"]');
+        if (b) {
+            b.addEventListener("click", function () {
+                openDialog(UT_STR.keyGenerate, UT_STR.keyGenerate + "?", UT_STR.apply, function () {
+                    UserTools.callApi("app_helper_key_generate", { app: app.path }, "POST").then(function () {
+                        setBanner("ok", UT_STR.keyDone);
+                        checkReadiness(idx);
+                    }).catch(function (err) { deployFail(idx, err); });
+                });
+            });
+        }
+    }
+    function selectedDomain(idx) {
+        var sel = document.getElementById("ut-domain-" + idx);
+        return sel ? sel.value : "";
+    }
+    function previewDocroot(idx, then) {
+        var app = apps[idx];
+        var box = document.getElementById("ut-docroot-" + idx);
+        box.textContent = UT_STR.loading || "";
+        UserTools.callApi("app_helper_docroot_preview",
+            { app: app.path, domain: selectedDomain(idx) }, "POST").then(function (data) {
+                if (!data.allowed) {
+                    box.innerHTML = '<div class="ut-banner warn">'
+                        + esc(UT_STR.docrootBlocked + (data.reason || "")) + "</div>";
+                } else {
+                    box.innerHTML = '<div class="ut-banner ok">'
+                        + esc(tok(tok(tok(UT_STR.docrootGoes, "DOMAIN", data.domain),
+                            "OLD", data.old_docroot), "NEW", data.new_docroot)) + "</div>";
+                }
+                if (then) { then(data); }
+            }).catch(function (err) {
+                box.innerHTML = '<div class="ut-banner err">'
+                    + esc(UT_STR.docrootFailed + err.message) + "</div>";
+            });
+    }
+    function lockButton(idx) {
+        return '<p><button class="ut-btn small" type="button" id="ut-lock-' + idx + '">'
+            + esc(UT_STR.lockRoot) + "</button></p>";
+    }
+    function bindLock(idx) {
+        var lock = document.getElementById("ut-lock-" + idx);
+        if (lock) {
+            lock.addEventListener("click", function () { applyHtaccess(idx); });
+        }
+    }
+    function previewHtaccess(idx, confirmApply) {
+        var app = apps[idx];
+        var params = htOptions(idx);
+        params.app = app.path;
+        UserTools.callApi("app_helper_htaccess_preview", params, "POST").then(function (data) {
+            var t = "=== " + data.root.file + " ===\n" + data.root.diff
+                + "\n\n=== " + data.public.file + " ===\n" + data.public.diff;
+            var warns = (data.root.warnings || []).concat(data.public.warnings || []);
+            if (warns.length) { t += "\n\nWarnings:\n- " + warns.join("\n- "); }
+            showPre("ut-ht-" + idx, t, warns.length ? "bad" : "ok");
+            if (confirmApply) {
+                openDialog(UT_STR.htaccessTitle, t.length > 400 ? t.slice(0, 400) + "…" : t,
+                    UT_STR.apply, function () { applyHtaccess(idx); });
+            }
+        }).catch(function (err) {
+            showPre("ut-ht-" + idx, UT_STR.htaccessFailed + err.message, "bad");
+        });
+    }
+    function applyHtaccess(idx) {
+        var app = apps[idx];
+        var params = htOptions(idx);
+        params.app = app.path;
+        UserTools.callApi("app_helper_htaccess_apply", params, "POST").then(function (data) {
+            var crit = (data.checked || []).filter(function (c) { return c.verdict === "critical"; });
+            var extra = "";
+            if (data.root_note) {
+                extra = '<div class="ut-banner warn">' + esc(data.root_note) + "</div>";
+            }
+            if (data.restored) {
+                showPre("ut-ht-" + idx, UT_STR.htaccessRestored + (data.reason || ""), "bad");
+                setBanner("warn", UT_STR.htaccessRestored + (data.reason || ""));
+            } else if (crit.length) {
+                showPre("ut-ht-" + idx, UT_STR.envCritical, "bad");
+                setBanner("warn", UT_STR.envCritical);
+            } else {
+                setBanner("ok", UT_STR.htaccessDone);
+            }
+            if (extra) {
+                var box = document.getElementById("ut-ht-" + idx);
+                box.innerHTML = extra + box.innerHTML;
+            }
+        }).catch(function (err) {
+            setBanner("err", UT_STR.htaccessFailed + err.message);
+        });
+    }
+    function checkPrimary(idx) {
+        var app = apps[idx];
+        var box = document.getElementById("ut-primary-" + idx);
+        box.textContent = UT_STR.loading || "";
+        UserTools.callApi("app_helper_primary_check", { app: app.path }, "POST").then(function (data) {
+            var html = "";
+            if (!data.eligible) {
+                html = '<div class="ut-banner warn">' + esc(data.reason || "") + "</div>";
+            } else if (!data.policy_allowed) {
+                html = '<div class="ut-banner warn">' + esc(UT_STR.primaryAsk) + ": "
+                    + esc(data.host_command) + "</div>";
+                html += '<p><button class="ut-btn small secondary" type="button" id="ut-copy-' + idx + '">'
+                    + esc(UT_STR.primaryCopy) + "</button></p>";
+            } else {
+                var servingApp = data.current_docroot
+                    && data.current_docroot.indexOf("public_html/public") !== -1;
+                html = '<p><button class="ut-btn small" type="button" id="ut-toggle-' + idx + '">'
+                    + esc(servingApp ? UT_STR.primaryRevert : UT_STR.primaryServe) + "</button> "
+                    + '<button class="ut-btn small secondary" type="button" id="ut-lock-' + idx + '">'
+                    + esc(UT_STR.lockRoot) + "</button></p>";
+            }
+            box.innerHTML = html;
+            bindLock(idx);
+            var copy = document.getElementById("ut-copy-" + idx);
+            if (copy) {
+                copy.addEventListener("click", function () { copyText(data.host_command); });
+            }
+            var tog = document.getElementById("ut-toggle-" + idx);
+            if (tog) {
+                tog.addEventListener("click", function () {
+                    var serving = data.current_docroot
+                        && data.current_docroot.indexOf("public_html/public") !== -1;
+                    openDialog(UT_STR.primaryTitle,
+                        serving ? UT_STR.primaryRevert : UT_STR.primaryServe,
+                        UT_STR.apply, function () {
+                            UserTools.callApi("app_helper_primary_set",
+                                { app: app.path, enable: serving ? "0" : "1" }, "POST").then(function (data) {
+                                    setBanner("ok", data && data.changed === 0
+                                        ? UT_STR.primaryAlready : UT_STR.primaryDone);
+                                    checkPrimary(idx);
+                                }).catch(function (err) {
+                                    setBanner("err", UT_STR.primaryFailed + err.message);
+                                });
+                        });
+                });
+            }
+        }).catch(function (err) {
+            box.innerHTML = '<div class="ut-banner err">'
+                + esc(UT_STR.primaryFailed + err.message) + "</div>";
+        });
+    }
+    function runArtisan(app, cmd) {
+        var idx = apps.indexOf(app);
+        UserTools.callApi("app_helper_artisan", { app: app.path, command: cmd }, "POST").then(function (data) {
+            var text = "";
+            if (data.php_bin) { text += "php: " + data.php_bin + (data.php_source ? " (" + data.php_source + ")" : "") + "\n"; }
+            if (data.resource_hint) { text += data.resource_hint + "\n"; }
+            if (data.detail) { text += data.detail + "\n"; }
+            if (data.fallback) { text += (data.fallback.detail || "") + "\n"; }
+            text += "exit: " + data.exit + (data.timed_out ? " (timed out)" : "") + "\n" + (data.output || "");
+            showOut(idx, text, data.ok ? "ok" : "bad");
+            setBanner(data.ok ? "ok" : "warn", data.ok ? UT_STR.ranOk
+                : (data.timed_out ? UT_STR.timedOut : UT_STR.runFailed + (data.detail || "")));
+        }).catch(function (err) {
+            setBanner("err", UT_STR.runFailed + err.message);
+        });
+    }
+    function load() {
+        setBanner("warn", UT_STR.loading || "Loading.");
+        UserTools.callApi("app_helper_list", {}, "GET").then(function (data) {
+            apps = data.apps || [];
+            render();
+        }).catch(function (err) {
+            setBanner("err", UT_STR.loadFailed + err.message);
+        });
+    }
+    addBtn.addEventListener("click", function () {
+        var p = addInput.value.replace(/^\s+|\s+$/g, "");
+        if (!p) { return; }
+        UserTools.callApi("app_helper_add", { path: p }, "POST").then(function () {
+            addInput.value = "";
+            setBanner("ok", UT_STR.added);
+            load();
+        }).catch(function (err) {
+            setBanner("err", UT_STR.addFailed + err.message);
+        });
+    });
+    reloadBtn.addEventListener("click", load);
+    load();
+});
+</script>

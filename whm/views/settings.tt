@@ -1,0 +1,152 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    UserTools Settings — WHM page template (root only).
+    Rendered server-side through Cpanel::Template::process_template
+    (Guide to WHM Plugins - Plugin Files) inside WHM's master template, so
+    there is no <html>/<head>/<body> here and no external CSS/JS — only
+    WHM's own classes. %]
+[% WRAPPER 'master_templates/master.tmpl' header='UserTools Settings' %]
+<h1>UserTools Settings</h1>
+<p>Installed version: [% version | html %]</p>
+[% IF errors.size %]
+<div class="alert alert-danger" role="alert"><ul>
+[% FOREACH e IN errors %]<li>[% e | html %]</li>[% END %]
+</ul></div>
+[% END %]
+[% IF message %]<p role="status">[% message | html %]</p>[% END %]
+<h2>Policy</h2>
+<form method="post" action="">
+[% IF token %]<input type="hidden" name="token" value="[% token | html %]">[% END %]
+<input type="hidden" name="action" value="save">
+<table class="table table-striped">
+<tr><th>Setting</th><th>Value</th></tr>
+<tr><td><label for="f_enable_shell">Shell tool enabled</label></td>
+<td><select id="f_enable_shell" name="enable_shell" class="form-control">
+<option value="1"[% IF settings.enable_shell == '1' %] selected[% END %]>On</option>
+<option value="0"[% IF settings.enable_shell != '1' %] selected[% END %]>Off</option>
+</select></td></tr>
+<tr><td><label for="f_modes">Allowed shell modes (comma list: disabled, jailed, normal)</label></td>
+<td><input id="f_modes" name="allowed_shell_modes" class="form-control" value="[% settings.allowed_shell_modes | html %]" size="30"></td></tr>
+<tr><td><label for="f_normal">Users allowed normal shell (comma list)</label></td>
+<td><input id="f_normal" name="normal_shell_users" class="form-control" value="[% settings.normal_shell_users | html %]" size="30"></td></tr>
+<tr><td><label for="f_fix">Fix Home enabled</label></td>
+<td><select id="f_fix" name="enable_fix_home" class="form-control">
+<option value="1"[% IF settings.enable_fix_home == '1' %] selected[% END %]>On</option>
+<option value="0"[% IF settings.enable_fix_home != '1' %] selected[% END %]>Off</option>
+</select></td></tr>
+<tr><td><label for="f_bulk">Bulk Permissions enabled</label></td>
+<td><select id="f_bulk" name="enable_bulk_perms" class="form-control">
+<option value="1"[% IF settings.enable_bulk_perms == '1' %] selected[% END %]>On</option>
+<option value="0"[% IF settings.enable_bulk_perms != '1' %] selected[% END %]>Off</option>
+</select></td></tr>
+<tr><td><label for="f_rep">Ownership Report enabled</label></td>
+<td><select id="f_rep" name="enable_ownership_report" class="form-control">
+<option value="1"[% IF settings.enable_ownership_report == '1' %] selected[% END %]>On</option>
+<option value="0"[% IF settings.enable_ownership_report != '1' %] selected[% END %]>Off</option>
+</select></td></tr>
+<tr><td><label for="f_app">App Helper enabled</label></td>
+<td><select id="f_app" name="enable_app_helper" class="form-control">
+<option value="1"[% IF settings.enable_app_helper == '1' %] selected[% END %]>On</option>
+<option value="0"[% IF settings.enable_app_helper != '1' %] selected[% END %]>Off</option>
+</select></td></tr>
+<tr><td><label for="f_docroot">Users may switch their main domain to public_html/public</label></td>
+<td><select id="f_docroot" name="allow_user_app_docroot" class="form-control">
+<option value="1"[% IF settings.allow_user_app_docroot == '1' %] selected[% END %]>On</option>
+<option value="0"[% IF settings.allow_user_app_docroot != '1' %] selected[% END %]>Off</option>
+</select></td></tr>
+<tr><td><label for="f_pkgs">App packages (comma list)</label></td>
+<td><input id="f_pkgs" name="app_packages" class="form-control" value="[% settings.app_packages | html %]" size="30"></td></tr>
+<tr><td><label for="f_max">Max job seconds (60–86400)</label></td>
+<td><input id="f_max" name="max_job_seconds" class="form-control" value="[% settings.max_job_seconds | html %]" size="10"></td></tr>
+<tr><td><label for="f_composer">Composer path (absolute path; empty = auto-discover)</label></td>
+<td><input id="f_composer" name="composer_path" class="form-control" value="[% settings.composer_path | html %]" size="40"></td></tr>
+<tr><td><label for="f_lift">Run Composer with host disable_functions lifted (your explicit choice)</label></td>
+<td><select id="f_lift" name="composer_lift_disable_functions" class="form-control">
+<option value="1"[% IF settings.composer_lift_disable_functions == '1' %] selected[% END %]>On (only this Composer process)</option>
+<option value="0"[% IF settings.composer_lift_disable_functions != '1' %] selected[% END %]>Off (keep host hardening)</option>
+</select></td></tr>
+<tr><td>SSH port (auto-detected, read-only)</td>
+<td>[% settings.ssh_port | html %]</td></tr>
+<tr><td><label for="f_upd">Update check (opt-in)</label></td>
+<td><select id="f_upd" name="enable_update_check" class="form-control">
+<option value="1"[% IF settings.enable_update_check == '1' %] selected[% END %]>On</option>
+<option value="0"[% IF settings.enable_update_check != '1' %] selected[% END %]>Off</option>
+</select></td></tr>
+<tr><td><label for="f_repo">Release repo (owner/repo)</label></td>
+<td><input id="f_repo" name="update_repo" class="form-control" value="[% settings.update_repo | html %]" size="30"></td></tr>
+<tr><td><label for="f_auto">Automatic updates (daily, verified)</label></td>
+<td><select id="f_auto" name="auto_update" class="form-control">
+<option value="1"[% IF settings.auto_update == '1' %] selected[% END %]>On</option>
+<option value="0"[% IF settings.auto_update != '1' %] selected[% END %]>Off</option>
+</select></td></tr>
+<tr><td><label for="f_scope">Automatic updates cover</label></td>
+<td><select id="f_scope" name="auto_update_scope" class="form-control">
+<option value="patch"[% IF settings.auto_update_scope != 'minor' %] selected[% END %]>Patch releases only</option>
+<option value="minor"[% IF settings.auto_update_scope == 'minor' %] selected[% END %]>Minor and patch releases</option>
+</select> (never major releases)</td></tr>
+<tr><td>Shell readiness</td>
+<td>[% IF jail_default_off %]<div class="alert alert-warning" role="alert">Jailed shell needs WHM › Tweak Settings › <em>Use cPanel jailshell by default</em> (jaildefaultshell). Currently off. See the <a href="https://docs.cpanel.net/whm/server-configuration/tweak-settings/">Tweak Settings docs</a>.</div>[% ELSE %]Jailed-shell tweak on (or unreadable).[% END %]</td></tr>
+</table>
+<p><button type="submit" class="btn btn-primary">Save settings</button></p>
+</form>
+[% IF composer %]
+<h2>Composer (used by App Helper)</h2>
+<p>[% IF composer.found %]Found: <code>[% composer.path | html %]</code> — [% composer.source | html %].
+[% ELSIF composer.cagefs %]<strong>Found, but not visible to caged users:</strong> <code>[% composer.path | html %]</code> — [% composer.reason | html %].
+[% ELSIF composer.path %]<strong>Not usable:</strong> <code>[% composer.path | html %]</code> — [% composer.reason | html %] (the search stops here until it is fixed).
+[% ELSE %]<strong>None found.</strong>[% END %]</p>
+[% IF composer.cagefs %]
+<p>Expose it to CageFS with a conf.d INI entry for the Composer path, for example <code>/etc/cagefs/conf.d/usertools-composer.cfg</code>:</p>
+<pre>[usertools-composer]
+comment=Composer for UserTools
+paths=[% composer.path | html %]</pre>
+<p>Then run <code>cagefsctl --force-update</code> (see the <a href="https://docs.cloudlinux.com/cloudlinux_os_components/">CloudLinux CageFS docs</a>).</p>
+[% END %]
+[% UNLESS composer.found %]
+<p>Install a global composer to the standard location with:
+<code>curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer</code>
+— or set an absolute Composer path above. Whichever is used must be root-owned and not writable by group or others, or App Helper refuses it.</p>
+[% END %]
+[% END %]
+<h2>Enable a tool for a feature list</h2>
+<form method="post" action="">
+[% IF token %]<input type="hidden" name="token" value="[% token | html %]">[% END %]
+<input type="hidden" name="action" value="feature_help">
+<p><label>Feature list name: <input name="list" class="form-control" size="20"></label>
+<label>Feature: <input name="feature" class="form-control" size="30"></label>
+<button type="submit" class="btn btn-primary">Show steps</button></p>
+</form>
+<p>Tool features: usertools_shell, usertools_fix_home, usertools_bulk_perms, usertools_ownership_report, usertools_app_helper.</p>
+<h2>Updates</h2>
+[% IF cosign && cosign.found %]
+<p>Release verification: <strong>cosign found</strong> (<code>[% cosign.path | html %]</code>).</p>
+[% ELSE %]
+<div class="alert alert-danger" role="alert">Updates need cosign to verify releases.
+Install it to <code>/usr/local/bin/cosign</code> (root-owned, no group/other write), for example:
+<code>curl -fsSLO https://github.com/sigstore/cosign/releases/download/v2.4.0/cosign-linux-amd64 && install -m 0755 cosign-linux-amd64 /usr/local/bin/cosign</code>
+(see the <a href="https://docs.sigstore.dev/cosign/installation/">cosign install docs</a>).</div>
+[% END %]
+[% IF auto_status && auto_status.ok != '1' %]
+<div class="alert alert-danger" role="alert">Last automatic update failed ([% auto_status.at | html %]): [% auto_status.reason | html %] The current install is unchanged.</div>
+[% END %]
+<form method="post" action="">
+[% IF token %]<input type="hidden" name="token" value="[% token | html %]">[% END %]
+<input type="hidden" name="action" value="check_updates">
+<p><button type="submit" class="btn btn-primary">Check for updates</button> (reports only; never installs)</p>
+</form>
+[% IF update %]
+<p>Latest release: <a href="[% update.url | html %]">[% update.latest | html %]</a>
+[% IF update.update_available %](an update is available)[% ELSE %](up to date)[% END %]</p>
+[% IF update.update_available %]
+<form method="post" action="">
+[% IF token %]<input type="hidden" name="token" value="[% token | html %]">[% END %]
+<input type="hidden" name="action" value="update_now">
+<p><button type="submit" class="btn btn-primary"[% UNLESS cosign && cosign.found %] disabled[% END %]>Update now</button> (downloads the verified release and runs the upgrade)</p>
+</form>
+[% END %]
+[% END %]
+<h2>Recent audit log (last 200 lines, read-only)</h2>
+<pre>[% FOREACH line IN audit %][% line | html %]
+[% END %]</pre>
+<p>UserTools for cPanel © 2026 Amir Sibaee · as86.pro — Apache License, Version 2.0.</p>
+[% END %]

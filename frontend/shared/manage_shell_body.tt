@@ -1,0 +1,261 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    Shared Manage Shell page body (tool A). Changing the shell goes through
+    the privileged Admin module (no paths, caller identity only); this page
+    only calls shell_status/shell_set and reads ~/.ssh/authorized_keys state
+    from the status reply. Included once by each theme adapter. %]
+<div class="ut-wrap">
+  <p class="ut-lead">[% locale.maketext('Turn command-line (SSH) access for your account on or off.') %]</p>
+  <details class="ut-learn">
+    <summary>[% locale.maketext('Learn more') %]</summary>
+    <p>[% locale.maketext('With access on, you log in with an SSH key, not a password. Turning it on is only half the job: you also need an authorized key below.') %]</p>
+    <p>[% locale.maketext('Jailed access limits which commands can run. Full access is only offered when your hosting provider allows it.') %]</p>
+  </details>
+  <div class="ut-banner warn" id="ut-banner" role="status" aria-live="polite">[% locale.maketext('Loading.') %]</div>
+  <div class="ut-state" id="ut-state" aria-live="polite"></div>
+  <fieldset class="ut-fieldset" id="ut-controls" hidden>
+    <legend>[% locale.maketext('SSH access') %]</legend>
+    <label class="ut-check"><input type="checkbox" id="ut-enable"> [% locale.maketext('Enable SSH access') %]</label>
+    <div id="ut-kindrow" hidden>
+      <label class="ut-radio"><input type="radio" name="ut-kind" value="jailed" checked> [% locale.maketext('Jailed (limited commands, recommended)') %]</label>
+      <label class="ut-radio"><input type="radio" name="ut-kind" value="normal"> [% locale.maketext('Normal (full access)') %]</label>
+    </div>
+    <div class="ut-controls">
+      <button class="ut-btn" id="ut-apply" type="button">[% locale.maketext('Apply') %]</button>
+    </div>
+  </fieldset>
+  <div class="ut-card" id="ut-keys" hidden>
+    <h2>[% locale.maketext('Login keys') %]</h2>
+    <div id="ut-keys-body"></div>
+  </div>
+  <dialog class="ut-dialog" id="ut-dialog" aria-labelledby="ut-dialog-title">
+    <h2 id="ut-dialog-title"></h2>
+    <p id="ut-dialog-body"></p>
+    <div class="ut-dialog-actions">
+      <button class="ut-btn" id="ut-dialog-apply" type="button"></button>
+      <button class="ut-btn secondary" id="ut-dialog-cancel" type="button">[% locale.maketext('Cancel') %]</button>
+    </div>
+  </dialog>
+[% PROCESS 'shared/footer.tt' -%]
+</div>
+<script>
+var UT_STR = {
+    apply: "[% locale.maketext('Apply changes') %]",
+    copied: "[% locale.maketext('Copied') %]",
+    loading: "[% locale.maketext('Loading.') %]",
+    loadFailed: "[% locale.maketext('Could not load shell state: ') %]",
+    applyFailed: "[% locale.maketext('Change failed: ') %]",
+    stateOff: "[% locale.maketext('SSH access is off.') %]",
+    stateJailed: "[% locale.maketext('SSH access is on (jailed).') %]",
+    stateNormal: "[% locale.maketext('SSH access is on (full).') %]",
+    stateNormalHost: "[% locale.maketext('Full shell access, set by your host.') %]",
+    stateOther: "[% locale.maketext('Shell state is unusual. Ask your host before changing it.') %]",
+    confirmOffTitle: "[% locale.maketext('Turn off SSH access?') %]",
+    confirmOffBody: "[% locale.maketext('SSH logins will stop working for this account.') %]",
+    confirmOnTitle: "[% locale.maketext('Turn on SSH access?') %]",
+    confirmOnJailed: "[% locale.maketext('This enables a jailed shell with limited commands.') %]",
+    confirmOnNormal: "[% locale.maketext('This enables a full shell with no command limits.') %]",
+    confirmDowngrade: "[% locale.maketext('Switching back on gives a jailed shell, not full access.') %]",
+    hasKeys: "[% locale.maketext('At least one key is authorized. Log in with:') %]",
+    copyCmd: "[% locale.maketext('Copy command') %]",
+    noKeysTitle: "[% locale.maketext('No authorized key yet.') %]",
+    noKeysBody: "[% locale.maketext('Password login is disabled on this server. Generate or import a key and click Authorize.') %]",
+    openSsh: "[% locale.maketext('Open SSH Access') %]",
+    recheck: "[% locale.maketext('Check again') %]",
+    portUnknown: "[% locale.maketext('The SSH port is not configured on this server. Ask your host for the port.') %]",
+    blockedAllowUsers: "[% locale.maketext('The server allow-list does not include your account, so login may still fail. Ask your host.') %]",
+    blockedDenyUsers: "[% locale.maketext('Your account is on the server deny-list, so login may still fail. Ask your host.') %]",
+    blockedAllowGroups: "[% locale.maketext('Your groups are not on the server allow-list, so login may still fail. Ask your host.') %]",
+    blockedDenyGroups: "[% locale.maketext('Your groups are on the server deny-list, so login may still fail. Ask your host.') %]",
+    jailedUnavailable: "[% locale.maketext('Jailed shell is unavailable until your host enables Use cPanel jailshell by default in WHM Tweak Settings.') %]",
+    notEnabled: "[% locale.maketext('Your host has not enabled SSH access for this account. Ask your host if you need it.') %]",
+    jailedOnlyOff: "[% locale.maketext('SSH is available only in jailed mode, and your host has not turned jailed shells on. Ask your host.') %]"
+};
+</script>
+<script>
+"use strict";
+window.addEventListener("DOMContentLoaded", function () {
+    if (!window.UserTools) {
+        document.getElementById("ut-banner").textContent = "UserTools failed to load.";
+        return;
+    }
+    var bannerEl = document.getElementById("ut-banner");
+    var stateEl = document.getElementById("ut-state");
+    var controlsEl = document.getElementById("ut-controls");
+    var enableBox = document.getElementById("ut-enable");
+    var kindRow = document.getElementById("ut-kindrow");
+    var applyBtn = document.getElementById("ut-apply");
+    var keysCard = document.getElementById("ut-keys");
+    var keysBody = document.getElementById("ut-keys-body");
+    var dlg = document.getElementById("ut-dialog");
+    var dlgTitle = document.getElementById("ut-dialog-title");
+    var dlgBody = document.getElementById("ut-dialog-body");
+    var dlgApply = document.getElementById("ut-dialog-apply");
+    var dlgCancel = document.getElementById("ut-dialog-cancel");
+    var last = null;
+    var lastApply = null;
+    var lastFocus = null;
+
+    function tok(s, name, value) { return String(s).split(name).join(value); }
+    function setBanner(kind, text) {
+        bannerEl.className = "ut-banner " + kind;
+        bannerEl.textContent = text;
+    }
+    function openDialog(title, body, onApply) {
+        lastFocus = document.activeElement;
+        dlgTitle.textContent = title;
+        dlgBody.textContent = body;
+        dlgApply.textContent = UT_STR.apply;
+        lastApply = onApply;
+        if (dlg.showModal) { dlg.showModal(); } else { dlg.setAttribute("open", ""); }
+        dlgCancel.focus();
+    }
+    function closeDialog() {
+        if (dlg.close) { dlg.close(); } else { dlg.removeAttribute("open"); }
+        lastApply = null;
+        if (lastFocus && lastFocus.focus) { lastFocus.focus(); }
+    }
+    dlgApply.addEventListener("click", function () {
+        var fn = lastApply;
+        closeDialog();
+        if (fn) { fn(); }
+    });
+    dlgCancel.addEventListener("click", closeDialog);
+
+    function renderKeys(st) {
+        keysCard.hidden = false;
+        var html = "";
+        if (st.has_authorized_keys) {
+            html += "<p>" + UserTools.escHtml(UT_STR.hasKeys) + "</p>";
+            var cmd = st.ssh_port ? ("ssh -p " + st.ssh_port + " " + st.user + "@" + window.location.hostname)
+                : ("ssh " + st.user + "@" + window.location.hostname);
+            html += '<div class="ut-path" id="ut-sshcmd">' + UserTools.escHtml(cmd) + "</div>";
+            html += '<p><button class="ut-btn small" type="button" id="ut-copycmd">'
+                + UserTools.escHtml(UT_STR.copyCmd) + "</button></p>";
+            if (!st.ssh_port) {
+                html += '<div class="ut-note">' + UserTools.escHtml(UT_STR.portUnknown) + "</div>";
+            }
+        } else {
+            html += "<p><strong>" + UserTools.escHtml(UT_STR.noKeysTitle) + "</strong></p>";
+            html += "<p>" + UserTools.escHtml(UT_STR.noKeysBody) + "</p>";
+            html += '<p><a class="ut-btn secondary" href="../security/ssh_access/">'
+                + UserTools.escHtml(UT_STR.openSsh) + "</a> ";
+            html += '<button class="ut-btn small secondary" type="button" id="ut-recheck">'
+                + UserTools.escHtml(UT_STR.recheck) + "</button></p>";
+        }
+        var block = st.ssh_login_blocked || {};
+        if (block.blocked) {
+            var w = {
+                allowusers: UT_STR.blockedAllowUsers,
+                denyusers: UT_STR.blockedDenyUsers,
+                allowgroups: UT_STR.blockedAllowGroups,
+                denygroups: UT_STR.blockedDenyGroups
+            }[block.reason] || UT_STR.blockedDenyUsers;
+            html += '<div class="ut-note">' + UserTools.escHtml(w) + "</div>";
+        }
+        keysBody.innerHTML = html;
+        var copyBtn = document.getElementById("ut-copycmd");
+        if (copyBtn) {
+            copyBtn.addEventListener("click", function () {
+                UserTools.copyText(document.getElementById("ut-sshcmd").textContent, copyBtn);
+            });
+        }
+        var recheck = document.getElementById("ut-recheck");
+        if (recheck) { recheck.addEventListener("click", load); }
+    }
+    function render(st) {
+        last = st;
+        var badge, kind;
+        if (st.mode === "disabled") {
+            badge = "err"; kind = UT_STR.stateOff;
+        } else if (st.mode === "jailed") {
+            badge = "ok"; kind = UT_STR.stateJailed;
+        } else if (st.mode === "normal" && st.normal_allowed) {
+            badge = "ok"; kind = UT_STR.stateNormal;
+        } else if (st.mode === "normal") {
+            badge = "warn"; kind = UT_STR.stateNormalHost;
+        } else {
+            badge = "warn"; kind = UT_STR.stateOther;
+        }
+        setBanner(badge, kind);
+        var allowed = st.allowed_modes || [];
+        var canJailed = allowed.indexOf("jailed") >= 0;
+        var canNormal = allowed.indexOf("normal") >= 0 && !!st.normal_allowed;
+        if (!canJailed && !canNormal && st.mode === "disabled") {
+            // Policy allows only "disabled" and access is already off —
+            // hide the dead-end switch and Apply button instead of showing
+            // controls that do nothing. (When access is on despite policy,
+            // controls stay so the user can still turn it off.)
+            // Name the actual reason — a host may allow SSH while the
+            // jailed mode alone is unavailable.
+            controlsEl.hidden = true;
+            stateEl.textContent = (st.jailed_available === 0) ? UT_STR.jailedOnlyOff : UT_STR.notEnabled;
+            renderKeys(st);
+            return;
+        }
+        if (st.jailed_available === 0) {
+            stateEl.textContent = UT_STR.jailedUnavailable;
+        } else {
+            stateEl.textContent = "";
+        }
+        controlsEl.hidden = false;
+        enableBox.checked = st.mode !== "disabled";
+        enableBox.disabled = (!canJailed && !canNormal && st.mode === "disabled");
+        kindRow.hidden = !(enableBox.checked && canJailed && canNormal);
+        if (canJailed || canNormal) {
+            var wantNormal = !canJailed || (canNormal && st.mode === "normal");
+            var radios = document.querySelectorAll('[name="ut-kind"]');
+            Array.prototype.forEach.call(radios, function (r) {
+                r.checked = (r.value === "normal") ? wantNormal : !wantNormal;
+            });
+        }
+        renderKeys(st);
+    }
+    function load() {
+        setBanner("warn", UT_STR.loading);
+        UserTools.callApi("shell_status", {}, "GET").then(render).catch(function (err) {
+            setBanner("err", UT_STR.loadFailed + err.message);
+        });
+    }
+    enableBox.addEventListener("change", function () {
+        var allowed = last.allowed_modes || [];
+        var canJailed = allowed.indexOf("jailed") >= 0;
+        var canNormal = allowed.indexOf("normal") >= 0 && !!last.normal_allowed;
+        kindRow.hidden = !(enableBox.checked && canJailed && canNormal);
+    });
+    applyBtn.addEventListener("click", function () {
+        var target, title, body;
+        if (!enableBox.checked) {
+            target = "disabled";
+            title = UT_STR.confirmOffTitle;
+            body = UT_STR.confirmOffBody;
+        } else {
+            var allowed = (last && last.allowed_modes) || [];
+            var canJailed = allowed.indexOf("jailed") >= 0;
+            var kind = canJailed ? "jailed" : "normal";
+            var sel = document.querySelector('[name="ut-kind"]:checked');
+            if (sel && sel.value === "normal" && allowed.indexOf("normal") >= 0 && last && last.normal_allowed) {
+                kind = "normal";
+            }
+            target = kind;
+            title = UT_STR.confirmOnTitle;
+            if (kind === "normal") {
+                body = UT_STR.confirmOnNormal;
+            } else if (last.mode === "normal" && !last.normal_allowed) {
+                body = UT_STR.confirmDowngrade;
+            } else {
+                body = UT_STR.confirmOnJailed;
+            }
+        }
+        openDialog(title, body, function () {
+            setBanner("warn", UT_STR.loading);
+            UserTools.callApi("shell_set", { mode: target }, "POST").then(function () {
+                load();
+            }).catch(function (err) {
+                setBanner("err", UT_STR.applyFailed + err.message);
+            });
+        });
+    });
+    load();
+});
+</script>

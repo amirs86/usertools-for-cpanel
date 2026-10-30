@@ -1,0 +1,13 @@
+# Copyright 2026 Amir Sibaee (https://as86.pro)
+# SPDX-License-Identifier: Apache-2.0
+# UserTools for cPanel — log rotation for /var/log/usertools.log.
+# Installed as /etc/logrotate.d/usertools (0644) by install.sh and refreshed
+# on upgrade; removed by uninstall.sh (even without --purge).
+/var/log/usertools.log {
+    weekly
+    rotate 12
+    compress
+    missingok
+    notifempty
+    create 0600 root root
+}

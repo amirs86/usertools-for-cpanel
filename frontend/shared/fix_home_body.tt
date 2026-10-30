@@ -1,0 +1,310 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    Shared Fix Home Permissions page body (tool B). Included once by each
+    theme adapter. All user-visible strings go
+    through locale.maketext (static) or the UT_STR table below (dynamic).
+    No page shell here: the adapter provides the theme wrapper. %]
+<div class="ut-wrap">
+  <p class="ut-lead">[% locale.maketext('Check the important paths in your home directory and fix their file modes.') %]</p>
+  <details class="ut-learn">
+    <summary>[% locale.maketext('Learn more') %]</summary>
+    <p>[% locale.maketext('Some problems on a hosting account come from wrong file modes. This page compares each important path with the mode, owner and group it should have.') %]</p>
+    <p>[% locale.maketext('Fix Modes repairs file modes only. It never changes owners or groups. If a path needs your hosting provider, copy the details and send them to support.') %]</p>
+    <p>[% locale.maketext('Symlinks are always left alone, and only tmp and .ssh are created when missing.') %]</p>
+  </details>
+  <div class="ut-banner warn" id="ut-banner" role="status" aria-live="polite">[% locale.maketext('Checking.') %]</div>
+  <div class="ut-controls">
+    <button class="ut-btn secondary" id="ut-recheck" type="button">[% locale.maketext('Check Again') %]</button>
+    <button class="ut-btn" id="ut-fix" type="button" hidden>[% locale.maketext('Fix Modes') %]</button>
+    <button class="ut-btn secondary" id="ut-undo" type="button" hidden>[% locale.maketext('Undo last change') %]</button>
+  </div>
+  <div class="ut-grid" id="ut-cards" aria-live="polite"></div>
+  <details class="ut-history" id="ut-history-wrap" hidden>
+    <summary>[% locale.maketext('Change history') %]</summary>
+    <ul id="ut-history"></ul>
+  </details>
+  <dialog class="ut-dialog" id="ut-dialog" aria-labelledby="ut-dialog-title">
+    <h2 id="ut-dialog-title"></h2>
+    <p id="ut-dialog-body"></p>
+    <ul id="ut-dialog-list"></ul>
+    <div class="ut-dialog-actions">
+      <button class="ut-btn" id="ut-dialog-apply" type="button"></button>
+      <button class="ut-btn secondary" id="ut-dialog-cancel" type="button">[% locale.maketext('Cancel') %]</button>
+    </div>
+  </dialog>
+[% PROCESS 'shared/footer.tt' -%]
+</div>
+<script>
+var UT_STR = {
+    apply: "[% locale.maketext('Apply changes') %]",
+    copied: "[% locale.maketext('Copied') %]",
+    copyDetails: "[% locale.maketext('Copy details') %]",
+    ok: "[% locale.maketext('OK') %]",
+    modeDiffers: "[% locale.maketext('Mode differs') %]",
+    needsProvider: "[% locale.maketext('Needs your hosting provider') %]",
+    missing: "[% locale.maketext('Missing') %]",
+    symlinkLeft: "[% locale.maketext('Symlink - left alone') %]",
+    current: "[% locale.maketext('Current') %]",
+    required: "[% locale.maketext('Required') %]",
+    mode: "[% locale.maketext('Mode') %]",
+    owner: "[% locale.maketext('Owner') %]",
+    group: "[% locale.maketext('Group') %]",
+    confirmFixTitle: "[% locale.maketext('Confirm changes') %]",
+    confirmFixBodyOne: "[% locale.maketext('This will change 1 path.') %]",
+    confirmFixBodyMany: "[% locale.maketext('This will change COUNT paths.') %]",
+    confirmUndoTitle: "[% locale.maketext('Undo last change') %]",
+    confirmUndoBodyOne: "[% locale.maketext('This will restore 1 path to its previous mode.') %]",
+    confirmUndoBodyMany: "[% locale.maketext('This will restore COUNT paths to their previous modes.') %]",
+    andMoreOne: "[% locale.maketext('and 1 more.') %]",
+    andMoreMany: "[% locale.maketext('and COUNT more.') %]",
+    allGood: "[% locale.maketext('Everything matches the required permissions.') %]",
+    needAttentionOne: "[% locale.maketext('1 path needs attention. See the card below.') %]",
+    needAttentionMany: "[% locale.maketext('COUNT paths need attention. See the cards below.') %]",
+    noData: "[% locale.maketext('No data returned. Please try Check Again.') %]",
+    checking: "[% locale.maketext('Checking.') %]",
+    fixing: "[% locale.maketext('Fixing modes.') %]",
+    undoing: "[% locale.maketext('Undoing.') %]",
+    checkFailed: "[% locale.maketext('Check failed: ') %]",
+    fixFailed: "[% locale.maketext('Fix failed: ') %]",
+    undoFailed: "[% locale.maketext('Undo failed: ') %]",
+    undone: "[% locale.maketext('Undo finished.') %]",
+    providerNote: "[% locale.maketext('Needs your hosting provider: owner and group should be WANT.') %]",
+    missingText: "[% locale.maketext('This path does not exist.') %]",
+    missingCreated: "[% locale.maketext('It will be created when you run Fix Modes.') %]",
+    missingNotCreated: "[% locale.maketext('Only tmp and .ssh are created automatically.') %]",
+    informational: "[% locale.maketext('No SSH key on this account, so nothing to fix here.') %]",
+    symlinkText: "[% locale.maketext('This path is a symlink and is left alone.') %]",
+    noHistory: "[% locale.maketext('No changes have been made yet.') %]",
+    support1: "[% locale.maketext('UserTools for cPanel - Fix Home Permissions') %]",
+    support2: "[% locale.maketext('Path: PATH') %]",
+    support3: "[% locale.maketext('Required owner and group: WANT') %]",
+    support4: "[% locale.maketext('Current owner and group: HAVE') %]",
+    support5: "[% locale.maketext('Please fix the owner and group. This plugin repairs file modes only.') %]"
+};
+</script>
+<script>
+"use strict";
+window.addEventListener("DOMContentLoaded", function () {
+    if (!window.UserTools) {
+        document.getElementById("ut-banner").textContent = "UserTools failed to load.";
+        return;
+    }
+    var cardsEl = document.getElementById("ut-cards");
+    var bannerEl = document.getElementById("ut-banner");
+    var fixBtn = document.getElementById("ut-fix");
+    var undoBtn = document.getElementById("ut-undo");
+    var recheckBtn = document.getElementById("ut-recheck");
+    var histWrap = document.getElementById("ut-history-wrap");
+    var histEl = document.getElementById("ut-history");
+    var dlg = document.getElementById("ut-dialog");
+    var dlgTitle = document.getElementById("ut-dialog-title");
+    var dlgBody = document.getElementById("ut-dialog-body");
+    var dlgList = document.getElementById("ut-dialog-list");
+    var dlgApply = document.getElementById("ut-dialog-apply");
+    var dlgCancel = document.getElementById("ut-dialog-cancel");
+    var lastRows = [];
+    var lastUndoCount = 0;
+    var lastApply = null;
+    var lastFocus = null;
+
+    function tok(s, name, value) { return String(s).split(name).join(value); }
+    function setBanner(kind, text) {
+        bannerEl.className = "ut-banner " + kind;
+        bannerEl.textContent = text;
+    }
+    function setBusy(busy) {
+        fixBtn.disabled = busy;
+        undoBtn.disabled = busy;
+        recheckBtn.disabled = busy;
+    }
+    function openDialog(title, body, items, applyLabel, onApply) {
+        lastFocus = document.activeElement;
+        dlgTitle.textContent = title;
+        dlgBody.textContent = body;
+        dlgList.innerHTML = "";
+        items.slice(0, 10).forEach(function (p) {
+            var li = document.createElement("li");
+            li.textContent = p;
+            dlgList.appendChild(li);
+        });
+        if (items.length > 10) {
+            var more = document.createElement("li");
+            more.textContent = UserTools.plural(items.length - 10, UT_STR.andMoreOne, UT_STR.andMoreMany);
+            dlgList.appendChild(more);
+        }
+        dlgApply.textContent = applyLabel;
+        lastApply = onApply;
+        if (dlg.showModal) { dlg.showModal(); } else { dlg.setAttribute("open", ""); }
+        dlgCancel.focus();
+    }
+    function closeDialog() {
+        if (dlg.close) { dlg.close(); } else { dlg.removeAttribute("open"); }
+        lastApply = null;
+        if (lastFocus && lastFocus.focus) { lastFocus.focus(); }
+    }
+    dlgApply.addEventListener("click", function () {
+        var fn = lastApply;
+        closeDialog();
+        if (fn) { fn(); }
+    });
+    dlgCancel.addEventListener("click", closeDialog);
+    function statusBadge(row) {
+        if (row.status === "ok") {
+            return '<span class="ut-badge ok">\u2713 ' + UserTools.escHtml(UT_STR.ok) + "</span>";
+        }
+        if (row.informational) {
+            return '<span class="ut-badge info">i ' + UserTools.escHtml(UT_STR.informational) + "</span>";
+        }
+        var label = {
+            mode_mismatch: UT_STR.modeDiffers,
+            owner_mismatch: UT_STR.needsProvider,
+            missing: UT_STR.missing,
+            symlink: UT_STR.symlinkLeft
+        }[row.status] || row.status;
+        return '<span class="ut-badge bad">! ' + UserTools.escHtml(label) + "</span>";
+    }
+    function supportText(row) {
+        return [
+            UT_STR.support1,
+            tok(UT_STR.support2, "PATH", row.path),
+            tok(UT_STR.support3, "WANT", row.required_owner + ":" + row.required_group),
+            tok(UT_STR.support4, "HAVE", (row.current_owner || "?") + ":" + (row.current_group || "?")),
+            UT_STR.support5
+        ].join("\n");
+    }
+    function renderHistory(list) {
+        histEl.innerHTML = "";
+        if (!list || !list.length) {
+            histWrap.hidden = true;
+            return;
+        }
+        histWrap.hidden = false;
+        list.forEach(function (h) {
+            var li = document.createElement("li");
+            li.textContent = h.journal + " (" + h.changes + ")";
+            histEl.appendChild(li);
+        });
+    }
+    function render(data) {
+        var rows = data.rows || [];
+        lastRows = rows;
+        var html = "";
+        var fixable = false;
+        rows.forEach(function (row) {
+            var cls = (row.status === "ok" || row.informational) ? "ok" : "bad";
+            if (row.status === "mode_mismatch") { fixable = true; }
+            if (row.status === "missing" && row.creatable && !row.informational) { fixable = true; }
+            html += '<div class="ut-card ' + cls + '"><h2>'
+                + UserTools.escHtml(row.label) + statusBadge(row) + "</h2>"
+                + '<div class="ut-path">' + UserTools.escHtml(row.path) + "</div>";
+            if (row.status === "missing") {
+                if (row.informational) {
+                    html += "<p>" + UserTools.escHtml(UT_STR.informational) + "</p>";
+                } else {
+                    html += "<p>" + UserTools.escHtml(UT_STR.missingText) + " "
+                        + UserTools.escHtml(row.creatable ? UT_STR.missingCreated : UT_STR.missingNotCreated) + "</p>";
+                }
+            } else if (row.status === "symlink") {
+                html += "<p>" + UserTools.escHtml(UT_STR.symlinkText) + "</p>";
+            } else {
+                html += '<table class="ut-table"><tr><th></th><th>'
+                    + UserTools.escHtml(UT_STR.mode) + "</th><th>"
+                    + UserTools.escHtml(UT_STR.owner) + "</th><th>"
+                    + UserTools.escHtml(UT_STR.group) + "</th></tr><tr><td>"
+                    + UserTools.escHtml(UT_STR.current) + "</td><td>"
+                    + UserTools.escHtml(row.current_mode) + "</td><td>"
+                    + UserTools.escHtml(row.current_owner) + "</td><td>"
+                    + UserTools.escHtml(row.current_group) + "</td></tr>"
+                    + "<tr><td>" + UserTools.escHtml(UT_STR.required) + "</td><td>"
+                    + UserTools.escHtml(row.required_mode) + "</td><td>"
+                    + UserTools.escHtml(row.required_owner) + "</td><td>"
+                    + UserTools.escHtml(row.required_group) + "</td></tr></table>";
+            }
+            if (row.status === "owner_mismatch") {
+                html += '<div class="ut-note">'
+                    + UserTools.escHtml(tok(UT_STR.providerNote, "WANT",
+                        row.required_owner + ":" + row.required_group)) + " "
+                    + '<button class="ut-btn small" type="button" data-copy="'
+                    + UserTools.escHtml(row.key) + '">'
+                    + UserTools.escHtml(UT_STR.copyDetails) + "</button></div>";
+            }
+            html += "</div>";
+        });
+        cardsEl.innerHTML = html;
+        Array.prototype.forEach.call(cardsEl.querySelectorAll("[data-copy]"), function (btn) {
+            btn.addEventListener("click", function () {
+                var key = btn.getAttribute("data-copy");
+                var row = null;
+                lastRows.forEach(function (r) { if (r.key === key) { row = r; } });
+                if (row) { UserTools.copyText(supportText(row), btn); }
+            });
+        });
+        fixBtn.hidden = !fixable;
+        var showUndo = !!data.undo_available;
+        undoBtn.hidden = !showUndo;
+        lastUndoCount = 0;
+        if (data.undo_history && data.undo_history.length) {
+            lastUndoCount = data.undo_history[data.undo_history.length - 1].changes || 0;
+        }
+        renderHistory(data.undo_history);
+        var bad = rows.filter(function (r) { return r.status !== "ok" && !r.informational; }).length;
+        if (!rows.length) {
+            setBanner("err", UT_STR.noData);
+        } else if (!bad) {
+            setBanner("ok", UT_STR.allGood);
+        } else {
+            setBanner("warn", UserTools.plural(bad, UT_STR.needAttentionOne, UT_STR.needAttentionMany));
+        }
+    }
+    function check() {
+        setBanner("warn", UT_STR.checking);
+        cardsEl.innerHTML = "";
+        fixBtn.hidden = true;
+        setBusy(true);
+        UserTools.callApi("home_permissions_check").then(function (data) {
+            setBusy(false);
+            render(data);
+        }).catch(function (err) {
+            setBusy(false);
+            setBanner("err", UT_STR.checkFailed + err.message);
+        });
+    }
+    fixBtn.addEventListener("click", function () {
+        var targets = lastRows.filter(function (r) { return r.status === "mode_mismatch"; });
+        openDialog(UT_STR.confirmFixTitle,
+            UserTools.plural(targets.length, UT_STR.confirmFixBodyOne, UT_STR.confirmFixBodyMany),
+            targets.map(function (r) { return r.path; }),
+            UT_STR.apply, function () {
+                setBusy(true);
+                setBanner("warn", UT_STR.fixing);
+                UserTools.callApi("home_permissions_fix", {}, "POST").then(function (data) {
+                    setBusy(false);
+                    if (data.undo_journal) { undoBtn.hidden = false; }
+                    check();
+                }).catch(function (err) {
+                    setBusy(false);
+                    setBanner("err", UT_STR.fixFailed + err.message);
+                });
+            });
+    });
+    undoBtn.addEventListener("click", function () {
+        openDialog(UT_STR.confirmUndoTitle,
+            UserTools.plural(lastUndoCount, UT_STR.confirmUndoBodyOne, UT_STR.confirmUndoBodyMany),
+            [],
+            UT_STR.apply, function () {
+                setBusy(true);
+                setBanner("warn", UT_STR.undoing);
+                UserTools.callApi("home_permissions_undo", {}, "POST").then(function (data) {
+                    setBusy(false);
+                    setBanner("ok", UT_STR.undone);
+                    check();
+                }).catch(function (err) {
+                    setBusy(false);
+                    setBanner("err", UT_STR.undoFailed + err.message);
+                });
+            });
+    });
+    recheckBtn.addEventListener("click", check);
+    check();
+});
+</script>

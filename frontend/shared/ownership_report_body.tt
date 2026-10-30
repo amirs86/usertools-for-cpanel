@@ -1,0 +1,258 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    Shared Ownership Report page body (tool D). Read-only: it lists files
+    not owned by the account and never changes anything. Included once by
+    each theme adapter. %]
+<div class="ut-wrap">
+  <p class="ut-lead">[% locale.maketext('See which files are not owned by your account. This page changes nothing.') %]</p>
+  <details class="ut-learn">
+    <summary>[% locale.maketext('Learn more') %]</summary>
+    <p>[% locale.maketext('Files owned by someone else, such as the server administrator, cannot be fixed by this plugin. Send the list to your host if you need ownership fixed.') %]</p>
+    <p>[% locale.maketext('Only the first 500 entries per owner are listed. Download the CSV for the full list.') %]</p>
+  </details>
+  <fieldset class="ut-fieldset">
+    <legend>[% locale.maketext('Where') %]</legend>
+    <label class="ut-radio"><input type="radio" name="ut-scope" value="public_html" checked> [% locale.maketext('Website files (public_html)') %]</label>
+    <label class="ut-radio"><input type="radio" name="ut-scope" value="docroot"> [% locale.maketext('One website:') %]
+      <select id="ut-docroot" aria-label="[% locale.maketext('Website') %]"></select></label>
+    <label class="ut-radio"><input type="radio" name="ut-scope" value="home"> [% locale.maketext('Whole home folder') %]</label>
+  </fieldset>
+  <div class="ut-banner warn" id="ut-banner" role="status" aria-live="polite">[% locale.maketext('Choose where, then run a scan.') %]</div>
+  <div class="ut-controls">
+    <button class="ut-btn" id="ut-scan" type="button">[% locale.maketext('Scan') %]</button>
+    <button class="ut-btn secondary" id="ut-csv" type="button" hidden>[% locale.maketext('Download CSV') %]</button>
+    <button class="ut-btn secondary" id="ut-copy" type="button" hidden>[% locale.maketext('Copy summary for support') %]</button>
+  </div>
+  <div class="ut-progress" id="ut-progress" hidden>
+    <progress id="ut-bar" aria-label="[% locale.maketext('Progress') %]"></progress>
+    <div class="ut-path" id="ut-progtext" aria-live="polite"></div>
+    <button class="ut-btn secondary" id="ut-cancel" type="button">[% locale.maketext('Cancel') %]</button>
+  </div>
+  <div class="ut-counts" id="ut-counts" aria-live="polite"></div>
+  <div class="ut-listnav" id="ut-listnav" hidden>
+    <button class="ut-btn small secondary" id="ut-prev" type="button">&larr;</button>
+    <span class="ut-path" id="ut-pageinfo"></span>
+    <button class="ut-btn small secondary" id="ut-next" type="button">&rarr;</button>
+  </div>
+  <div class="ut-grid" id="ut-cards"></div>
+  <div class="ut-path" id="ut-omitted"></div>
+[% PROCESS 'shared/footer.tt' -%]
+</div>
+<script>
+var UT_STR = {
+    scanFailed: "[% locale.maketext('Scan failed: ') %]",
+    scanning: "[% locale.maketext('Scanning.') %]",
+    progtextOne: "[% locale.maketext('Scanned 1 entry.') %]",
+    progtextMany: "[% locale.maketext('Scanned COUNT entries.') %]",
+    cancelling: "[% locale.maketext('Cancelling.') %]",
+    allOwned: "[% locale.maketext('Everything is owned by your account.') %]",
+    foundSomeOne: "[% locale.maketext('1 file is not owned by you. Nothing was changed.') %]",
+    foundSomeMany: "[% locale.maketext('COUNT files are not owned by you. Nothing was changed.') %]",
+    failed: "[% locale.maketext('The scan failed. Please try again.') %]",
+    pageInfo: "[% locale.maketext('Showing A to B of N.') %]",
+    moreNotShownOne: "[% locale.maketext('1 more not shown (first 500 listed).') %]",
+    moreNotShownMany: "[% locale.maketext('COUNT more not shown (first 500 listed).') %]",
+    prev: "[% locale.maketext('Previous') %]",
+    next: "[% locale.maketext('Next') %]",
+    noDocroots: "[% locale.maketext('No single websites found; pick another scope.') %]",
+    repTitle: "[% locale.maketext('UserTools for cPanel - Ownership Report') %]",
+    repAccount: "[% locale.maketext('Account: NAME') %]",
+    repCounts: "[% locale.maketext('Files not owned by you:') %]",
+    repTop: "[% locale.maketext('Top folders:') %]",
+    repExplain: "[% locale.maketext('These files are not owned by your account, so the plugin left them alone. Your hosting provider can fix ownership from the server.') %]",
+    copied: "[% locale.maketext('Copied') %]"
+};
+</script>
+<script>
+"use strict";
+window.addEventListener("DOMContentLoaded", function () {
+    if (!window.UserTools) {
+        document.getElementById("ut-banner").textContent = "UserTools failed to load.";
+        return;
+    }
+    var bannerEl = document.getElementById("ut-banner");
+    var scanBtn = document.getElementById("ut-scan");
+    var csvBtn = document.getElementById("ut-csv");
+    var copyBtn = document.getElementById("ut-copy");
+    var cancelBtn = document.getElementById("ut-cancel");
+    var progWrap = document.getElementById("ut-progress");
+    var progText = document.getElementById("ut-progtext");
+    var countsEl = document.getElementById("ut-counts");
+    var cardsEl = document.getElementById("ut-cards");
+    var omittedEl = document.getElementById("ut-omitted");
+    var navEl = document.getElementById("ut-listnav");
+    var prevBtn = document.getElementById("ut-prev");
+    var nextBtn = document.getElementById("ut-next");
+    var pageInfo = document.getElementById("ut-pageinfo");
+    var docrootSel = document.getElementById("ut-docroot");
+    var pollTimer = null;
+    var currentJob = null;
+    var lastList = [];
+    var lastOmitted = 0;
+    var lastUser = "";
+    var page = 0;
+    var PAGE_SIZE = 50;
+    var JOB_KEY = "ut_report_last_job";
+
+    function tok(s, name, value) { return String(s).split(name).join(value); }
+    function setBanner(kind, text) {
+        bannerEl.className = "ut-banner " + kind;
+        bannerEl.textContent = text;
+    }
+    function setBusy(busy) {
+        scanBtn.disabled = busy;
+        var scopes = document.querySelectorAll('[name="ut-scope"]');
+        Array.prototype.forEach.call(scopes, function (r) { r.disabled = busy; });
+    }
+    function scopeValue() {
+        var checked = document.querySelector('[name="ut-scope"]:checked');
+        if (!checked) { return "public_html"; }
+        if (checked.value === "docroot") { return docrootSel.value || "public_html"; }
+        return checked.value;
+    }
+    function startScan() {
+        setBusy(true);
+        cardsEl.innerHTML = "";
+        countsEl.innerHTML = "";
+        omittedEl.textContent = "";
+        navEl.hidden = true;
+        csvBtn.hidden = true;
+        copyBtn.hidden = true;
+        UserTools.callApi("ownership_report_start", { scope: scopeValue() }, "POST").then(function (data) {
+            currentJob = data.job_id;
+            try { window.localStorage.setItem(JOB_KEY, data.job_id); } catch (e) { /* ignore */ }
+            pollJob();
+        }).catch(function (err) {
+            setBusy(false);
+            setBanner("err", UT_STR.scanFailed + err.message);
+        });
+    }
+    function pollJob() {
+        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+        if (!currentJob) { return; }
+        UserTools.callApi("ownership_report_status", { job_id: currentJob }, "GET").then(function (data) {
+            if (data.state === "running") {
+                progWrap.hidden = false;
+                var p = data.progress || {};
+                progText.textContent = UserTools.plural(p.scanned || 0, UT_STR.progtextOne, UT_STR.progtextMany);
+                setBanner("warn", UT_STR.scanning);
+                pollTimer = setTimeout(pollJob, 1000);
+            } else {
+                progWrap.hidden = true;
+                setBusy(false);
+                if (data.state === "done") {
+                    renderResult(data.summary || {}, data.user || "");
+                } else {
+                    setBanner("err", UT_STR.failed);
+                }
+            }
+        }).catch(function (err) {
+            setBusy(false);
+            progWrap.hidden = true;
+            setBanner("err", UT_STR.scanFailed + err.message);
+        });
+    }
+    function renderResult(summary, user) {
+        var byOwner = summary.not_owned_by || {};
+        var owners = Object.keys(byOwner).sort();
+        var total = 0;
+        owners.forEach(function (o) { total += byOwner[o]; });
+        lastUser = user;
+        lastList = (summary.paths && summary.paths.not_owned) || [];
+        lastOmitted = ((summary.omitted || {}).not_owned) || 0;
+        page = 0;
+        if (!total) {
+            setBanner("ok", UT_STR.allOwned);
+            countsEl.innerHTML = "";
+        } else {
+            setBanner("warn", UserTools.plural(total, UT_STR.foundSomeOne, UT_STR.foundSomeMany));
+            var html = "<ul>";
+            owners.forEach(function (o) {
+                html += "<li>" + UserTools.escHtml(o) + ": " + byOwner[o] + "</li>";
+            });
+            countsEl.innerHTML = html + "</ul>";
+        }
+        renderPage();
+        csvBtn.hidden = !total;
+        copyBtn.hidden = !total;
+        if (lastOmitted > 0) {
+            omittedEl.textContent = UserTools.plural(lastOmitted, UT_STR.moreNotShownOne, UT_STR.moreNotShownMany);
+        } else {
+            omittedEl.textContent = "";
+        }
+    }
+    function renderPage() {
+        var total = lastList.length;
+        var pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+        if (page >= pages) { page = pages - 1; }
+        var start = page * PAGE_SIZE;
+        var slice = lastList.slice(start, start + PAGE_SIZE);
+        var html = "";
+        slice.forEach(function (it) {
+            html += '<div class="ut-card"><h2>'
+                + UserTools.escHtml(it.owner) + "</h2>"
+                + '<div class="ut-path">' + UserTools.escHtml(it.path) + "</div></div>";
+        });
+        cardsEl.innerHTML = html;
+        if (total > PAGE_SIZE) {
+            navEl.hidden = false;
+            var info = UT_STR.pageInfo.replace("A", start + 1).replace("B", start + slice.length).replace("N", total);
+            pageInfo.textContent = info;
+            prevBtn.disabled = page === 0;
+            nextBtn.disabled = page >= pages - 1;
+            prevBtn.textContent = "\u2190 " + UT_STR.prev;
+            nextBtn.textContent = UT_STR.next + " \u2192";
+        } else {
+            navEl.hidden = true;
+        }
+    }
+    prevBtn.addEventListener("click", function () {
+        if (page > 0) { page -= 1; renderPage(); }
+    });
+    nextBtn.addEventListener("click", function () {
+        page += 1;
+        renderPage();
+    });
+    csvBtn.addEventListener("click", function () {
+        var rows = lastList.map(function (it) { return [it.path, it.owner]; });
+        UserTools.downloadCsv("ownership-report.csv",
+            UserTools.buildCsv(["Path", "Owner"], rows));
+    });
+    copyBtn.addEventListener("click", function (ev) {
+        var byOwner = {};
+        lastList.forEach(function (it) {
+            byOwner[it.owner] = (byOwner[it.owner] || 0) + 1;
+        });
+        var lines = [UT_STR.repTitle, tok(UT_STR.repAccount, "NAME", lastUser), UT_STR.repCounts];
+        Object.keys(byOwner).sort().forEach(function (o) {
+            lines.push("  " + o + ": " + byOwner[o]);
+        });
+        lines.push(UT_STR.repTop);
+        UserTools.topDirs(lastList, 10).forEach(function (t) {
+            lines.push("  " + t.dir + ": " + t.count);
+        });
+        lines.push(UT_STR.repExplain);
+        UserTools.copyText(lines.join("\n"), ev.target);
+    });
+    scanBtn.addEventListener("click", startScan);
+    cancelBtn.addEventListener("click", function () {
+        if (!currentJob) { return; }
+        setBanner("warn", UT_STR.cancelling);
+        UserTools.callApi("ownership_report_cancel", { job_id: currentJob }, "POST").then(function () {
+            if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+            pollJob();
+        }).catch(function (err) {
+            setBanner("err", UT_STR.scanFailed + err.message);
+        });
+    });
+    UserTools.populateDocroots(docrootSel, UT_STR.noDocroots);
+    try {
+        var last = window.localStorage.getItem(JOB_KEY);
+        if (last) {
+            currentJob = last;
+            setBusy(true);
+            pollJob();
+        }
+    } catch (e) { /* ignore */ }
+});
+</script>

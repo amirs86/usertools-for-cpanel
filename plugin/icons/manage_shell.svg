@@ -1,0 +1,10 @@
+<!-- Copyright 2026 Amir Sibaee (https://as86.pro)
+     SPDX-License-Identifier: Apache-2.0
+     Original icon for Manage Shell: a terminal window with a prompt.
+     48x48 as required for Jupiter feature icons. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <rect x="2" y="2" width="44" height="44" rx="8" fill="#e8f0fe"/>
+  <rect x="9" y="11" width="30" height="26" rx="3" fill="#1a73e8"/>
+  <path d="M14 19 L20 23 L14 27" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M23 28 H32" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

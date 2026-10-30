@@ -1,0 +1,28 @@
+# Copyright 2026 Amir Sibaee (https://as86.pro)
+# SPDX-License-Identifier: Apache-2.0
+#
+# Perl::Critic profile for the shipped code (severity 4 = gentle).
+# Each exclusion below is deliberate and documented; everything else at
+# severity 4 still fails the gate. Scope (see ci.yml): admin/ Cpanel/
+# hooks/ whm/ — the code that runs on the server. tests/ are dev-only
+# fixtures (mock packages, string require of stubs, fork-test idioms) and
+# are covered by prove instead.
+severity = 4
+theme = core
+
+# use constant is core-only. Readonly/Const::Fast are not on cPanel
+# servers and add a dependency for no benefit.
+[-ValuesAndExpressions::ProhibitConstantPragma]
+
+# File modes are octal literals by design (0644/0700/0600 everywhere,
+# install manifest, chmod calls, stat comparisons).
+[-ValuesAndExpressions::ProhibitLeadingZeros]
+
+# Dual-value (value, error-string) returns use explicit undef and callers
+# test definedness first; bare return would be ambiguous here.
+[-Subroutines::ProhibitExplicitReturnUndef]
+
+# Handles stay open across flock-held audit/ratelimit writes (the lock
+# must cover the whole read-modify-write) and linear config reads; every
+# handle is closed in the same block that opened it.
+[-InputOutput::RequireBriefOpen]

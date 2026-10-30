@@ -1,0 +1,24 @@
+# Copyright 2026 Amir Sibaee (https://as86.pro)
+# SPDX-License-Identifier: Apache-2.0
+# Normalize every text file to LF in the repo (Linux servers, shebangs,
+# release tarballs). Windows checkouts may use CRLF; that never leaks in.
+* text=auto eol=lf
+# Keep Unix line endings on files that run on the cPanel server,
+# regardless of the developer's platform (shebang + CRLF breaks).
+*.py text eol=lf
+*.sh text eol=lf
+*.pm text eol=lf
+*.tt text eol=lf
+*.conf.example text eol=lf
+install.json text eol=lf
+*.svg text eol=lf
+# Screenshots are binary release assets, never text.
+*.png binary
+# Release tarballs (git archive) exclude dev-only paths the server
+# install never needs. tests/ stays in the repo but out of the tarball.
+tests/ export-ignore
+.github/ export-ignore
+ruff.toml export-ignore
+.perlcriticrc export-ignore
+.gitignore export-ignore
+CONTRIBUTING.md export-ignore

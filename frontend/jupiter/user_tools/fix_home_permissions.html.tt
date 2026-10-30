@@ -1,0 +1,25 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    Jupiter adapter for Fix Home Permissions (tool B): thin wrapper around
+    the shared body. The master template provides Jupiter header, sidebar,
+    search, user menu and theme. app_key should match this page's file value
+    in dynamicui.conf; page asset paths are relative to the
+    jupiter theme directory. %]
+[% WRAPPER '_assets/master.html.tt'
+    app_key = 'usertools_fix_home'
+    page_title = locale.maketext('Fix Home Permissions')
+    page_stylesheets = [
+        'user_tools/assets/usertools.css'
+    ]
+    page_scripts = [
+        'user_tools/assets/usertools.js'
+    ]
+    include_legacy_stylesheets = 0
+    include_legacy_scripts = 0
+    include_cjt = 0
+-%]
+[% SET CPANEL.CPVAR.dprefix = "../" %]
+[%# The shared body is copied to user_tools/shared/ by install.sh,
+    so this stays a plain sub-directory include with no parent traversal. %]
+[% INCLUDE 'shared/fix_home_body.tt' -%]
+[% END %]

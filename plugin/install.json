@@ -1,0 +1,67 @@
+[
+    {
+        "icon": "fix_home.svg",
+        "group_id": "security",
+        "order": 1,
+        "name": "Fix Home Permissions",
+        "type": "link",
+        "id": "usertools_fix_home_page",
+        "key": "usertools_fix_home",
+        "uri": "user_tools/fix_home_permissions.html.tt",
+        "featuremanager": 1,
+        "feature": "usertools_fix_home",
+        "description": "Check home directory permissions and fix file modes (chmod 644/755). Owners and groups are reported, never changed."
+    },
+    {
+        "icon": "bulk_perms.svg",
+        "group_id": "security",
+        "order": 2,
+        "name": "Bulk Permissions",
+        "type": "link",
+        "id": "usertools_bulk_perms_page",
+        "key": "usertools_bulk_perms",
+        "uri": "user_tools/bulk_permissions.html.tt",
+        "featuremanager": 1,
+        "feature": "usertools_bulk_perms",
+        "description": "Preview then set files to 644 and folders to 755 (chmod) across your website or home folder, with undo."
+    },
+    {
+        "icon": "ownership_report.svg",
+        "group_id": "security",
+        "order": 3,
+        "name": "Ownership Report",
+        "type": "link",
+        "id": "usertools_ownership_report_page",
+        "key": "usertools_ownership_report",
+        "uri": "user_tools/ownership_report.html.tt",
+        "featuremanager": 1,
+        "feature": "usertools_ownership_report",
+        "description": "List files not owned by your account (read-only) with CSV download for your host."
+    },
+    {
+        "icon": "manage_shell.svg",
+        "group_id": "security",
+        "order": 4,
+        "name": "Manage Shell",
+        "type": "link",
+        "id": "usertools_shell_page",
+        "key": "usertools_shell",
+        "uri": "user_tools/manage_shell.html.tt",
+        "featuremanager": 1,
+        "feature": "usertools_shell",
+        "description": "Turn SSH access on or off (jailed shell, or full shell if your host allows it)."
+    },
+    {
+        "icon": "app_helper.svg",
+        "group_id": "security",
+        "order": 5,
+        "name": "App Helper",
+        "type": "link",
+        "id": "usertools_app_helper_page",
+        "key": "usertools_app_helper",
+        "uri": "user_tools/app_helper.html.tt",
+        "featuremanager": 1,
+        "feature": "usertools_app_helper",
+        "description": "Look after your web applications: maintenance commands, permissions and safety checks."
+    }
+]

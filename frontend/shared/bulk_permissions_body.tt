@@ -1,0 +1,372 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    Shared Bulk Permissions page body (tool C). Included once by each theme
+    adapter. Flow: scope + options,
+    Preview (dry run) with counts, in-page confirm, Apply, progress bar with
+    Cancel, result summary with expandable lists, Undo plus history. A stored
+    job id reattaches the page to a running job after a reload. %]
+<div class="ut-wrap">
+  <p class="ut-lead">[% locale.maketext('Set every file to 644 and every folder to 755 in one place. Start with a preview, then apply.') %]</p>
+  <details class="ut-learn">
+    <summary>[% locale.maketext('Learn more') %]</summary>
+    <p>[% locale.maketext('Files become readable but not executable (644); folders stay openable (755). Programs in cgi-bin, bin folders and scripts that already run keep working.') %]</p>
+    <p>[% locale.maketext('Mail, settings, keys and other protected paths are always skipped, as is anything you do not own. The preview shows exact counts before anything changes.') %]</p>
+  </details>
+  <fieldset class="ut-fieldset">
+    <legend>[% locale.maketext('Where') %]</legend>
+    <label class="ut-radio"><input type="radio" name="ut-scope" value="public_html" checked> [% locale.maketext('Website files (public_html)') %]</label>
+    <label class="ut-radio"><input type="radio" name="ut-scope" value="docroot"> [% locale.maketext('One website:') %]
+      <select id="ut-docroot" aria-label="[% locale.maketext('Website') %]"></select></label>
+    <label class="ut-radio"><input type="radio" name="ut-scope" value="home"> [% locale.maketext('Whole home folder (protected paths still skipped)') %]</label>
+  </fieldset>
+  <fieldset class="ut-fieldset">
+    <legend>[% locale.maketext('Options') %]</legend>
+    <label class="ut-check"><input type="checkbox" id="ut-keep-exec" checked> [% locale.maketext('Keep programs executable (recommended)') %]</label>
+    <label class="ut-check"><input type="checkbox" id="ut-harden"> [% locale.maketext('Lock wp-config.php and .env files down') %]</label>
+    <label class="ut-check" for="ut-excludes">[% locale.maketext('Skip these too (one pattern per line, at most 20):') %]</label>
+    <textarea class="ut-textarea" id="ut-excludes" rows="3" cols="40" placeholder="[% locale.maketext('example: cache/*') %]"></textarea>
+  </fieldset>
+  <div class="ut-banner warn" id="ut-banner" role="status" aria-live="polite">[% locale.maketext('Choose where, then run a preview.') %]</div>
+  <div class="ut-controls">
+    <button class="ut-btn" id="ut-preview" type="button">[% locale.maketext('Preview') %]</button>
+    <button class="ut-btn" id="ut-apply-preview" type="button" hidden></button>
+    <button class="ut-btn secondary" id="ut-undo" type="button" hidden>[% locale.maketext('Undo last change') %]</button>
+  </div>
+  <div class="ut-progress" id="ut-progress" hidden>
+    <progress id="ut-bar" aria-label="[% locale.maketext('Progress') %]"></progress>
+    <div class="ut-path" id="ut-progtext" aria-live="polite"></div>
+    <button class="ut-btn secondary" id="ut-cancel" type="button">[% locale.maketext('Cancel') %]</button>
+  </div>
+  <div class="ut-lists" id="ut-lists"></div>
+  <details class="ut-history" id="ut-history-wrap" hidden>
+    <summary>[% locale.maketext('Change history') %]</summary>
+    <ul id="ut-history"></ul>
+  </details>
+  <dialog class="ut-dialog" id="ut-dialog" aria-labelledby="ut-dialog-title">
+    <h2 id="ut-dialog-title"></h2>
+    <p id="ut-dialog-body"></p>
+    <div class="ut-dialog-actions">
+      <button class="ut-btn" id="ut-dialog-apply" type="button"></button>
+      <button class="ut-btn secondary" id="ut-dialog-cancel" type="button">[% locale.maketext('Cancel') %]</button>
+    </div>
+  </dialog>
+[% PROCESS 'shared/footer.tt' -%]
+</div>
+<script>
+var UT_STR = {
+    apply: "[% locale.maketext('Apply changes') %]",
+    copied: "[% locale.maketext('Copied') %]",
+    previewCountsOne: "[% locale.maketext('Preview: 1 file or folder would change.') %]",
+    previewCountsMany: "[% locale.maketext('Preview: COUNT files and folders would change.') %]",
+    previewClean: "[% locale.maketext('Preview: nothing would change.') %]",
+    confirmTitle: "[% locale.maketext('Confirm changes') %]",
+    confirmBodyOne: "[% locale.maketext('This will change 1 file or folder.') %]",
+    confirmBodyMany: "[% locale.maketext('This will change COUNT files and folders.') %]",
+    applyPreviewOne: "[% locale.maketext('Apply this 1 change') %]",
+    applyPreviewMany: "[% locale.maketext('Apply these COUNT changes') %]",
+    running: "[% locale.maketext('Working.') %]",
+    progtext: "[% locale.maketext('Scanned COUNT1, changed COUNT2.') %]",
+    cancelling: "[% locale.maketext('Cancelling.') %]",
+    cancelled: "[% locale.maketext('Cancelled. Partial results are shown below.') %]",
+    doneSomeOne: "[% locale.maketext('Finished: 1 file or folder changed.') %]",
+    doneSomeMany: "[% locale.maketext('Finished: COUNT files and folders changed.') %]",
+    doneNone: "[% locale.maketext('Finished: nothing needed changing.') %]",
+    failed: "[% locale.maketext('The job failed. Please try again.') %]",
+    startFailed: "[% locale.maketext('Could not start: ') %]",
+    notOwned: "[% locale.maketext('Not owned by you (left alone)') %]",
+    notOwnedNote: "[% locale.maketext('These belong to another account. Send the list to your host; the Ownership Report tool will help.') %]",
+    openReport: "[% locale.maketext('Open the Ownership Report') %]",
+    changed: "[% locale.maketext('Changed') %]",
+    wouldChange: "[% locale.maketext('Would change') %]",
+    skipped: "[% locale.maketext('Skipped') %]",
+    errors: "[% locale.maketext('Errors') %]",
+    andMoreOne: "[% locale.maketext('and 1 more.') %]",
+    andMoreMany: "[% locale.maketext('and COUNT more.') %]",
+    undoDone: "[% locale.maketext('Undo finished.') %]",
+    undoFailed: "[% locale.maketext('Undo failed: ') %]",
+    noDocroots: "[% locale.maketext('No single websites found; pick another scope.') %]"
+};
+</script>
+<script>
+"use strict";
+window.addEventListener("DOMContentLoaded", function () {
+    if (!window.UserTools) {
+        document.getElementById("ut-banner").textContent = "UserTools failed to load.";
+        return;
+    }
+    var bannerEl = document.getElementById("ut-banner");
+    var previewBtn = document.getElementById("ut-preview");
+    var applyPreviewBtn = document.getElementById("ut-apply-preview");
+    var pendingPreview = null;
+    var undoBtn = document.getElementById("ut-undo");
+    var cancelBtn = document.getElementById("ut-cancel");
+    var progWrap = document.getElementById("ut-progress");
+    var progText = document.getElementById("ut-progtext");
+    var listsEl = document.getElementById("ut-lists");
+    var histWrap = document.getElementById("ut-history-wrap");
+    var histEl = document.getElementById("ut-history");
+    var docrootSel = document.getElementById("ut-docroot");
+    var dlg = document.getElementById("ut-dialog");
+    var dlgTitle = document.getElementById("ut-dialog-title");
+    var dlgBody = document.getElementById("ut-dialog-body");
+    var dlgApply = document.getElementById("ut-dialog-apply");
+    var dlgCancel = document.getElementById("ut-dialog-cancel");
+    var lastApply = null;
+    var lastFocus = null;
+    var pollTimer = null;
+    var currentJob = null;
+    var JOB_KEY = "ut_bulk_last_job";
+
+    function tok(s, name, value) { return String(s).split(name).join(value); }
+    function setBanner(kind, text) {
+        bannerEl.className = "ut-banner " + kind;
+        bannerEl.textContent = text;
+    }
+    function setBusy(busy) {
+        previewBtn.disabled = busy;
+        undoBtn.disabled = busy;
+        var scopes = document.querySelectorAll('[name="ut-scope"]');
+        Array.prototype.forEach.call(scopes, function (r) { r.disabled = busy; });
+    }
+    function openDialog(title, body, applyLabel, onApply) {
+        lastFocus = document.activeElement;
+        dlgTitle.textContent = title;
+        dlgBody.textContent = body;
+        dlgApply.textContent = applyLabel;
+        lastApply = onApply;
+        if (dlg.showModal) { dlg.showModal(); } else { dlg.setAttribute("open", ""); }
+        dlgCancel.focus();
+    }
+    function closeDialog() {
+        if (dlg.close) { dlg.close(); } else { dlg.removeAttribute("open"); }
+        lastApply = null;
+        if (lastFocus && lastFocus.focus) { lastFocus.focus(); }
+    }
+    dlgApply.addEventListener("click", function () {
+        var fn = lastApply;
+        closeDialog();
+        if (fn) { fn(); }
+    });
+    dlgCancel.addEventListener("click", closeDialog);
+
+    function scopeValue() {
+        var checked = document.querySelector('[name="ut-scope"]:checked');
+        if (!checked) { return "public_html"; }
+        if (checked.value === "docroot") { return docrootSel.value || "public_html"; }
+        return checked.value;
+    }
+    function options() {
+        var lines = document.getElementById("ut-excludes").value.split("\n");
+        var excludes = [];
+        lines.forEach(function (ln) {
+            var t = ln.replace(/^\s+|\s+$/g, "");
+            if (t) { excludes.push(t); }
+        });
+        return {
+            scope: scopeValue(),
+            dry_run: "1",
+            keep_exec: document.getElementById("ut-keep-exec").checked ? "1" : "0",
+            harden: document.getElementById("ut-harden").checked ? "1" : "0",
+            excludes: JSON.stringify(excludes)
+        };
+    }
+    function startJob(params, onDone) {
+        setBusy(true);
+        UserTools.callApi("bulk_permissions_start", params, "POST").then(function (data) {
+            currentJob = data.job_id;
+            try { window.localStorage.setItem(JOB_KEY, data.job_id); } catch (e) { /* ignore */ }
+            pollJob(onDone);
+        }).catch(function (err) {
+            setBusy(false);
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    }
+    function pollJob(onDone) {
+        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+        if (!currentJob) { return; }
+        UserTools.callApi("bulk_permissions_status", { job_id: currentJob }, "GET").then(function (data) {
+            if (data.state === "running") {
+                progWrap.hidden = false;
+                var p = data.progress || {};
+                progText.textContent = tok(tok(UT_STR.progtext, "COUNT1", p.scanned || 0), "COUNT2", p.changed || 0);
+                setBanner("warn", UT_STR.running);
+                pollTimer = setTimeout(function () { pollJob(onDone); }, 1000);
+            } else {
+                progWrap.hidden = true;
+                setBusy(false);
+                if (data.state === "done") {
+                    renderResult(data.summary || {}, !!data.dry_run);
+                } else if (data.state === "cancelled") {
+                    setBanner("warn", UT_STR.cancelled);
+                    if (data.summary) { renderResult(data.summary, !!data.dry_run); }
+                } else {
+                    setBanner("err", UT_STR.failed);
+                }
+                if (onDone) { onDone(data); }
+            }
+        }).catch(function (err) {
+            setBusy(false);
+            progWrap.hidden = true;
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    }
+    function listBlock(title, items, fmt, isOpen) {
+        if (!items || !items.length) { return ""; }
+        var shown = items.slice(0, 50);
+        var html = "<details" + (isOpen ? " open" : "") + "><summary>" + UserTools.escHtml(title) + " (" + items.length + ")</summary><ul>";
+        shown.forEach(function (it) { html += "<li>" + UserTools.escHtml(fmt(it)) + "</li>"; });
+        if (items.length > shown.length) {
+            html += "<li>" + UserTools.escHtml(UserTools.plural(items.length - shown.length, UT_STR.andMoreOne, UT_STR.andMoreMany)) + "</li>";
+        }
+        return html + "</ul></details>";
+    }
+    function renderResult(summary, isDry) {
+        var c = summary.counts || {};
+        var n = isDry ? (c.would_change || 0) : (c.changed || 0);
+        if (isDry) {
+            if (n > 0) {
+                setBanner("warn", UserTools.plural(n, UT_STR.previewCountsOne, UT_STR.previewCountsMany));
+            } else {
+                setBanner("ok", UT_STR.previewClean);
+            }
+        } else if (n > 0) {
+            setBanner("ok", UserTools.plural(n, UT_STR.doneSomeOne, UT_STR.doneSomeMany));
+        } else {
+            setBanner("ok", UT_STR.doneNone);
+        }
+        var html = "";
+        var paths = summary.paths || {};
+        // An empty array is truthy in JS, so `paths.changed ||
+        // paths.would_change` picks the empty `changed` list on a dry run
+        // and the preview list stays empty while the banner reports 246.
+        // Select by mode instead: dry runs show would_change, applies show
+        // changed.
+        var changeList = isDry ? (paths.would_change || []) : (paths.changed || []);
+        html += listBlock(isDry ? UT_STR.wouldChange : UT_STR.changed, changeList, function (it) {
+            return typeof it === "string" ? it : (it.path + " (" + it.from + " \u2192 " + it.to + ")");
+        }, isDry);
+        var owned = paths.not_owned || [];
+        if (owned.length) {
+            html += "<p>" + UserTools.escHtml(UT_STR.notOwnedNote) + "</p>";
+            html += '<p><a href="ownership_report.html.tt">' + UserTools.escHtml(UT_STR.openReport) + "</a></p>";
+            html += listBlock(UT_STR.notOwned, owned, function (it) {
+                return typeof it === "string" ? it : (it.path + " (" + it.owner + ")");
+            });
+        }
+        var skipped = (paths.skipped_symlink || []).concat(paths.skipped_protected || [],
+            paths.skipped_xdev || [], paths.skipped_special || []);
+        html += listBlock(UT_STR.skipped, skipped, function (it) {
+            return typeof it === "string" ? it : it.path;
+        });
+        html += listBlock(UT_STR.errors, paths.errors || [], function (it) {
+            return it.path + ": " + it.reason;
+        });
+        listsEl.innerHTML = html;
+    }
+    function renderHistory(list) {
+        histEl.innerHTML = "";
+        if (!list || !list.length) { histWrap.hidden = true; return; }
+        histWrap.hidden = false;
+        list.forEach(function (h) {
+            var li = document.createElement("li");
+            li.textContent = h.journal + " (" + h.bytes + " bytes)";
+            histEl.appendChild(li);
+        });
+    }
+    previewBtn.addEventListener("click", function () {
+        listsEl.innerHTML = "";
+        pendingPreview = null;
+        applyPreviewBtn.hidden = true;
+        startJob(options(), function (data) {
+            if (!data || data.state !== "done") { return; }
+            if (data.history) { renderHistory(data.history); }
+            var c = ((data.summary || {}).counts) || {};
+            var n = c.would_change || 0;
+            if (n > 0) {
+                // Show the result + an Apply button; the confirm dialog
+                // opens only from that button, so the user can review the
+                // paths first. Cancel leaves everything in place.
+                var params = options();
+                params.dry_run = "0";
+                pendingPreview = { n: n, params: params };
+                applyPreviewBtn.textContent =
+                    UserTools.plural(n, UT_STR.applyPreviewOne, UT_STR.applyPreviewMany);
+                applyPreviewBtn.hidden = false;
+                applyPreviewBtn.focus();
+            }
+        });
+    });
+    applyPreviewBtn.addEventListener("click", function () {
+        if (!pendingPreview) { return; }
+        var pending = pendingPreview;
+        openDialog(UT_STR.confirmTitle,
+            UserTools.plural(pending.n, UT_STR.confirmBodyOne, UT_STR.confirmBodyMany),
+            UT_STR.apply, function () {
+                pendingPreview = null;
+                applyPreviewBtn.hidden = true;
+                startJob(pending.params, function (real) {
+                    if (real && real.history) { renderHistory(real.history); }
+                    if (real && real.state === "done") { undoBtn.hidden = false; }
+                });
+            });
+    });
+    function clearPending() {
+        // Any scope/option change after a preview invalidates it — hide
+        // the Apply button so Apply never runs settings the user did not
+        // preview. The preview list itself stays for reference.
+        pendingPreview = null;
+        applyPreviewBtn.hidden = true;
+    }
+    Array.prototype.forEach.call(
+        document.querySelectorAll('[name="ut-scope"], #ut-docroot, #ut-keep-exec, #ut-harden, #ut-excludes'),
+        function (el) { el.addEventListener("change", clearPending); });
+    cancelBtn.addEventListener("click", function () {
+        if (!currentJob) { return; }
+        setBanner("warn", UT_STR.cancelling);
+        UserTools.callApi("bulk_permissions_cancel", { job_id: currentJob }, "POST").then(function () {
+            if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+            pollJob(null);
+        }).catch(function (err) {
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    });
+    undoBtn.addEventListener("click", function () {
+        setBusy(true);
+        UserTools.callApi("bulk_permissions_undo", {}, "POST").then(function (data) {
+            if (data.state === "done" && !data.job_id) {
+                setBusy(false);
+                setBanner("ok", UT_STR.undoDone + " 0");
+                return;
+            }
+            currentJob = data.job_id;
+            try { window.localStorage.setItem(JOB_KEY, data.job_id); } catch (e) { /* ignore */ }
+            pollJob(function (real) {
+                if (real && real.history) { renderHistory(real.history); }
+                if (real && real.state === "done" && real.summary) {
+                    setBanner("ok", UT_STR.undoDone + " " + (((real.summary.counts || {}).changed) || 0));
+                }
+            });
+        }).catch(function (err) {
+            setBusy(false);
+            setBanner("err", UT_STR.undoFailed + err.message);
+        });
+    });
+    // Scope picker: docroots from the stock DomainInfo API (the
+    // documentroot field); always usable without it.
+    UserTools.populateDocroots(docrootSel, UT_STR.noDocroots);
+    // Reattach to a running job after a page reload.
+    try {
+        var last = window.localStorage.getItem(JOB_KEY);
+        if (last) {
+            currentJob = last;
+            setBusy(true);
+            pollJob(function (data) {
+                if (data && data.history) { renderHistory(data.history); }
+                if (data && data.state === "done" && !data.dry_run) {
+                    undoBtn.hidden = false;
+                }
+            });
+        }
+    } catch (e) { /* ignore */ }
+});
+</script>

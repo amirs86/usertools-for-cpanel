@@ -1,0 +1,12 @@
+<!-- Copyright 2026 Amir Sibaee (https://as86.pro)
+     SPDX-License-Identifier: Apache-2.0
+     Original icon for Ownership Report: a magnifier over a list.
+     48x48 as required for Jupiter feature icons. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <rect x="2" y="2" width="44" height="44" rx="8" fill="#e8f0fe"/>
+  <rect x="10" y="10" width="18" height="4" rx="2" fill="#1a73e8"/>
+  <rect x="10" y="18" width="18" height="4" rx="2" fill="#1a73e8"/>
+  <rect x="10" y="26" width="14" height="4" rx="2" fill="#1a73e8"/>
+  <circle cx="31" cy="31" r="7" fill="none" stroke="#34a853" stroke-width="3"/>
+  <path d="M36 36 L42 42" stroke="#34a853" stroke-width="3" stroke-linecap="round"/>
+</svg>

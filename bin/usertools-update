@@ -1,0 +1,338 @@
+#!/bin/bash
+# Copyright 2026 Amir Sibaee (https://as86.pro)
+# SPDX-License-Identifier: Apache-2.0
+#
+# UserTools for cPanel — verified updater (root only).
+#
+# The ONLY path where root downloads and runs code. Every step is gated:
+# policy-owned repo, strict tag match, SemVer newer-only (never downgrade),
+# auto runs additionally scope-gated (patch|minor, never major), Sigstore
+# signature REQUIRED (no sha256-only fallback here), sha256 second, fixed
+# argv to the extracted install.sh (--upgrade --yes), audit log for every
+# outcome. Anything unverifiable aborts before anything is installed.
+#
+# Usage (as root): usertools-update --update | --auto | --rollback
+#   --update   manual run (WHM "Update now" passes exactly this, nothing else)
+#   --auto     cron run (reads auto_update/auto_update_scope from policy)
+#   --rollback reinstall the kept previous tarball (CLI only)
+#
+# Unit tests source this file (main() is NOT run on source) and drive the
+# pure functions plus fixture end-to-end runs with USERTOOLS_* overrides
+# and --base-url file:// fixtures. Run: bash tests/test_update.sh
+set -u
+
+# Fixed root PATH: sbin dirs included — AlmaLinux does not merge
+# /usr/sbin into /usr/bin, and cagefsctl/sshd live there. Fixed, never
+# extended from the inherited value (cron and the installer agree).
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+
+BASE="${USERTOOLS_BASE:-/usr/local/cpanel/3rdparty/usertools}"
+POLICY="${USERTOOLS_POLICY:-/etc/usertools.conf}"
+VERSION_FILE="${USERTOOLS_VERSION_FILE:-$BASE/VERSION}"
+PREVIOUS_DIR="${USERTOOLS_PREVIOUS_DIR:-$BASE/previous}"
+AUDIT_LOG="${USERTOOLS_AUDIT_LOG:-/var/log/usertools.log}"
+STATUS_FILE="${USERTOOLS_STATUS_FILE:-/var/cpanel/usertools/autoupdate.status}"
+API_BASE="${USERTOOLS_API_BASE:-https://api.github.com}"
+GH_BASE="${USERTOOLS_GH_BASE:-https://github.com}"
+
+die() { echo "usertools-update: error: $*" >&2; exit 1; }
+info() { echo "usertools-update: $*"; }
+audit() {
+    local line="$1" fh
+    fh="$AUDIT_LOG"
+    mkdir -p "$(dirname "$fh")" 2>/dev/null || true
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line" >>"$fh" 2>/dev/null || true
+    chmod 0600 "$fh" 2>/dev/null || true
+}
+
+# semver_cmp a b: prints -1/0/1 (stdout), 0 exit. Versions are Barbara
+# "[v]N.N.N" (surrounding whitespace tolerated); anything else is exit 1.
+semver_cmp() {
+    local a b
+    a="$(printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^v//')"
+    b="$(printf '%s' "$2" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^v//')"
+    local re='^[0-9]+\.[0-9]+\.[0-9]+$'
+    [[ "$a" =~ $re ]] || return 1
+    [[ "$b" =~ $re ]] || return 1
+    local a1 a2 a3 b1 b2 b3
+    IFS=. read -r a1 a2 a3 <<<"$a"
+    IFS=. read -r b1 b2 b3 <<<"$b"
+    # Base-10 arithmetic (leading zeros must not read as octal).
+    local n
+    for n in a1 a2 a3 b1 b2 b3; do
+        [[ "${!n}" =~ ^[0-9]+$ ]] || return 1
+    done
+    (( 10#$a1 != 10#$b1 )) && { (( 10#$a1 < 10#$b1 )) && echo -1 || echo 1; return 0; }
+    (( 10#$a2 != 10#$b2 )) && { (( 10#$a2 < 10#$b2 )) && echo -1 || echo 1; return 0; }
+    (( 10#$a3 != 10#$b3 )) && { (( 10#$a3 < 10#$b3 )) && echo -1 || echo 1; return 0; }
+    echo 0
+}
+
+# valid_tag t: release tags are exactly vN.N.N (0/1).
+valid_tag() { [[ "${1:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+
+# scope_allows scope current new: 0 when an --auto run may take new (both
+# validated SemVer, new strictly newer). patch = same major.minor; minor =
+# same major (patch included); major never allowed for auto.
+scope_allows() {
+    local scope="$1" cur="$2" new="$3" c
+    c="$(semver_cmp "$cur" "$new")" || return 1
+    [ "$c" = "-1" ] || return 1
+    cur="${cur#v}"; new="${new#v}"
+    local cmaj cmin nmaj nmin
+    IFS=. read -r cmaj cmin _ <<<"$cur"
+    IFS=. read -r nmaj nmin _ <<<"$new"
+    case "$scope" in
+        patch) [ "$cmaj" = "$nmaj" ] && [ "$cmin" = "$nmin" ] ;;
+        minor) [ "$cmaj" = "$nmaj" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+# policy_value file key: trimmed value or empty.
+policy_value() {
+    local file="$1" key="$2" line
+    [ -f "$file" ] || return 0
+    line="$(awk -F= -v k="$key" '$1 == k { v=$2; sub(/^[ \t]+/, "", v); sub(/[ \t;#].*$/, "", v); print v; exit }' "$file" 2>/dev/null)"
+    printf '%s' "${line:-}"
+}
+
+# latest_tag repo api-base: prints tag_name from releases/latest (stdout).
+latest_tag() {
+    local repo="$1" api="$2" json tag
+    json="$(curl -fsSL --max-time 15 -H 'Accept: application/vnd.github+json' "$api/repos/$repo/releases/latest" 2>/dev/null)" \
+        || return 1
+    tag="$(printf '%s' "$json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+    [ -n "$tag" ] || return 1
+    printf '%s' "$tag"
+}
+
+# verify_release tmp tgz sig repo ver: cosign REQUIRED here (0 ok).
+# cosign_bin: fixed locations only (U-C, never PATH as root). Accepts
+# /usr/local/bin/cosign or /usr/bin/cosign when root-owned and not
+# group- or other-writable (the same rule as Composer). USERTOOLS_COSIGN
+# is the test seam (honoured only in test mode via the U-B gate above).
+cosign_bin() {
+    if [ -n "${USERTOOLS_COSIGN:-}" ]; then
+        printf '%s' "$USERTOOLS_COSIGN"
+        return 0
+    fi
+    local c uid mode
+    for c in /usr/local/bin/cosign /usr/bin/cosign; do
+        [ -e "$c" ] || continue
+        [ -f "$c" ] && [ -x "$c" ] || continue
+        uid="$(stat -c '%u' "$c" 2>/dev/null)" || continue
+        if [ "$uid" != "0" ]; then
+            echo "cosign at $c has unsafe ownership or permissions (must be root-owned, no group/other write)"
+            return 1
+        fi
+        mode="$(stat -c '%a' "$c" 2>/dev/null)" || continue
+        if [ "$((8#$mode & 8#22))" -ne 0 ]; then
+            echo "cosign at $c has unsafe ownership or permissions (must be root-owned, no group/other write)"
+            return 1
+        fi
+        printf '%s' "$c"
+        return 0
+    done
+    echo "cosign not found; refusing (signature required)"
+    return 1
+}
+
+verify_release() {
+    local tmp="$1" tgz="$2" sig="$3" repo="$4" ver="$5" cosign_bin err
+    err="$(cosign_bin)" || { echo "$err"; return 1; }
+    cosign_bin="$err"
+    "$cosign_bin" verify-blob "$tmp/$tgz" --bundle "$tmp/$sig" \
+        --certificate-identity "https://github.com/$repo/.github/workflows/ci.yml@refs/tags/$ver" \
+        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+        >/dev/null 2>&1 || { echo "signature mismatch"; return 1; }
+    return 0
+}
+
+# write_status ok reason: auto-run outcome stamp (WHM banner source).
+write_status() {
+    local ok="$1" reason="$2" f
+    f="$STATUS_FILE"
+    mkdir -p "$(dirname "$f")" 2>/dev/null || true
+    {
+        printf 'ok=%s\n' "$ok"
+        printf 'reason=%s\n' "$reason"
+        printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } >"$f" 2>/dev/null || true
+    chmod 0600 "$f" 2>/dev/null || true
+}
+
+# do_install tree: run the extracted installer with the ONLY allowed argv.
+do_install() {
+    local tree="$1" inst
+    [ -d "$tree" ] || { echo "extracted tree missing"; return 1; }
+    inst="$(find "$tree" -maxdepth 2 -name install.sh | head -n 1)"
+    [ -n "$inst" ] || { echo "no install.sh in tree"; return 1; }
+    bash "$inst" --upgrade --yes
+}
+
+do_update() { # mode(update|auto) base-url: full verified update
+    local mode="$1" gh="$2" repo cur latest cmp tmp tgz sig
+    if [ -z "${USERTOOLS_SKIP_ROOT:-}" ] && [ "$(id -u)" != "0" ]; then
+        echo "must run as root"
+        return 1
+    fi
+    repo="$(policy_value "$POLICY" update_repo)"
+    [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "update_repo not configured"; return 1; }
+    if [ "$mode" = "auto" ]; then
+        [ "$(policy_value "$POLICY" auto_update)" = "1" ] || { info "auto-update off; nothing to do"; return 0; }
+    fi
+    [ -f "$VERSION_FILE" ] || { echo "installed VERSION missing"; return 1; }
+    cur="$(tr -d ' \t\r\n' <"$VERSION_FILE")"
+    latest="$(latest_tag "$repo" "$API_BASE")" || { echo "could not determine latest release"; return 1; }
+    valid_tag "$latest" || { echo "ignoring non-release tag $latest"; return 1; }
+    cmp="$(semver_cmp "$cur" "$latest")" || { echo "uncomparable versions"; return 1; }
+    if [ "$cmp" != "-1" ]; then
+        info "already current ($cur); nothing to do"
+        return 0
+    fi
+    if [ "$mode" = "auto" ]; then
+        local scope
+        scope="$(policy_value "$POLICY" auto_update_scope)"
+        [ -z "$scope" ] && scope="patch"
+        scope_allows "$scope" "$cur" "$latest" \
+            || { echo "outside auto-update scope ($scope); leaving $cur untouched"; return 1; }
+    fi
+    tgz="usertools-for-cpanel-$latest.tar.gz"
+    sig="$tgz.sigstore.json"
+    tmp="$(mktemp -d)" || { echo "cannot make temp dir"; return 1; }
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" RETURN
+    curl -fsSL "$gh/$repo/releases/download/$latest/$tgz" -o "$tmp/$tgz" \
+        || { echo "download failed"; return 1; }
+    curl -fsSL "$gh/$repo/releases/download/$latest/$sig" -o "$tmp/$sig" \
+        || { echo "signature download failed"; return 1; }
+    local verr
+    verr="$(verify_release "$tmp" "$tgz" "$sig" "$repo" "$latest")" \
+        || { echo "$verr"; return 1; }
+    curl -fsSL "$gh/$repo/releases/download/$latest/$tgz.sha256" -o "$tmp/$tgz.sha256" \
+        || { echo "sha256 download failed"; return 1; }
+    ( cd "$tmp" && sha256sum -c "$tgz.sha256" >/dev/null 2>&1 ) \
+        || { echo "sha256 mismatch"; return 1; }
+    tar -xzf "$tmp/$tgz" -C "$tmp" || { echo "extract failed"; return 1; }
+    local top
+    top="$(tar -tzf "$tmp/$tgz" | head -n 1)"
+    [[ "$top" =~ ^usertools-for-cpanel-v[0-9.]+\/$ ]] || { echo "unexpected tarball layout"; return 1; }
+    # Save the CURRENTLY installed version before installing. The
+    # installer keeps its source tarball as previous/installed.tar.gz;
+    # move it aside as previous/rollback.tar.gz now, so --rollback
+    # reinstalls the version just replaced, not the one just installed.
+    mkdir -p "$PREVIOUS_DIR" 2>/dev/null || { echo "cannot keep previous"; return 1; }
+    chmod 0700 "$PREVIOUS_DIR" 2>/dev/null || true
+    if [ -f "$PREVIOUS_DIR/installed.tar.gz" ]; then
+        mv -f "$PREVIOUS_DIR/installed.tar.gz" "$PREVIOUS_DIR/rollback.tar.gz" \
+            || { echo "cannot keep previous"; return 1; }
+        chmod 0600 "$PREVIOUS_DIR/rollback.tar.gz" 2>/dev/null || true
+    fi
+    do_install "$tmp/${top%/}" || return 1
+    # The installer saves the new source as previous/installed.tar.gz.
+    # Fall back to the downloaded release tarball when it did not (fixture
+    # installers in tests): installed.tar.gz must always be the NEW version
+    # after a successful update, while rollback.tar.gz stays the OLD one.
+    if [ ! -f "$PREVIOUS_DIR/installed.tar.gz" ]; then
+        cp "$tmp/$tgz" "$PREVIOUS_DIR/installed.tar.gz" 2>/dev/null \
+            || { echo "cannot keep previous"; return 1; }
+        chmod 0600 "$PREVIOUS_DIR/installed.tar.gz" || { echo "cannot keep previous"; return 1; }
+    fi
+    audit "update $cur->$latest ($mode)"
+    if [ "$mode" = "auto" ]; then
+        write_status 1 "updated to $latest"
+    fi
+    info "updated to $latest"
+    return 0
+}
+
+do_rollback() { # : reinstall the kept previous tarball
+    local tgz tmp top f
+    if [ -z "${USERTOOLS_SKIP_ROOT:-}" ] && [ "$(id -u)" != "0" ]; then
+        echo "must run as root"
+        return 1
+    fi
+    # rollback.tar.gz (the version replaced by the last update) wins.
+    # Older installs kept versioned tarballs; use the first one as fallback.
+    tgz=""
+    if [ -f "$PREVIOUS_DIR/rollback.tar.gz" ]; then
+        tgz="$PREVIOUS_DIR/rollback.tar.gz"
+    else
+        for f in "$PREVIOUS_DIR"/usertools-for-cpanel-v*.tar.gz; do
+            [ -e "$f" ] || continue
+            [ -z "$tgz" ] || continue
+            tgz="$f"
+        done
+    fi
+    [ -n "$tgz" ] || { echo "no previous version kept"; return 1; }
+    tmp="$(mktemp -d)" || { echo "cannot make temp dir"; return 1; }
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" RETURN
+    tar -xzf "$tgz" -C "$tmp" || { echo "extract failed"; return 1; }
+    top="$(tar -tzf "$tgz" | head -n 1)"
+    [[ "$top" =~ ^usertools-for-cpanel-v[0-9.]+\/$ ]] || { echo "unexpected tarball layout"; return 1; }
+    do_install "$tmp/${top%/}" || return 1
+    audit "rollback to $(basename "$tgz")"
+    info "rolled back to $(basename "$tgz")"
+    return 0
+}
+
+main() {
+    # The updater ignores every USERTOOLS_* override unless test mode
+    # is on (USERTOOLS_TEST_MODE=1) AND the effective uid is not 0. Tests
+    # run unprivileged with the flag set; production (root, or flag absent)
+    # always uses the compiled-in defaults, so a stray environment —
+    # including the WHM CGI's inherited one — can never redirect policy,
+    # base URLs or the root gate as root.
+    if [ "${USERTOOLS_TEST_MODE:-}" != "1" ] || [ "$(id -u)" = "0" ]; then
+        unset USERTOOLS_BASE USERTOOLS_POLICY USERTOOLS_VERSION_FILE
+        unset USERTOOLS_PREVIOUS_DIR USERTOOLS_AUDIT_LOG USERTOOLS_STATUS_FILE
+        unset USERTOOLS_API_BASE USERTOOLS_GH_BASE USERTOOLS_SKIP_ROOT
+        unset USERTOOLS_COSIGN USERTOOLS_TEST_MODE
+    fi
+    # Re-derive locations here (not only at source time) so tests can
+    # override them with USERTOOLS_* after sourcing this file.
+    BASE="${USERTOOLS_BASE:-/usr/local/cpanel/3rdparty/usertools}"
+    POLICY="${USERTOOLS_POLICY:-/etc/usertools.conf}"
+    VERSION_FILE="${USERTOOLS_VERSION_FILE:-$BASE/VERSION}"
+    PREVIOUS_DIR="${USERTOOLS_PREVIOUS_DIR:-$BASE/previous}"
+    AUDIT_LOG="${USERTOOLS_AUDIT_LOG:-/var/log/usertools.log}"
+    STATUS_FILE="${USERTOOLS_STATUS_FILE:-/var/cpanel/usertools/autoupdate.status}"
+    API_BASE="${USERTOOLS_API_BASE:-https://api.github.com}"
+    GH_BASE="${USERTOOLS_GH_BASE:-https://github.com}"
+    local mode="" gh="$GH_BASE"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --update|--auto|--rollback) [ -z "$mode" ] || die "one action only"; mode="$1" ;;
+            --base-url) shift; gh="${1:-}"; [ -n "$gh" ] || die "--base-url needs a value" ;;
+            --base-url=*) gh="${1#--base-url=}" ;;
+            -h|--help)
+                echo "Usage: usertools-update --update | --auto | --rollback [--base-url URL]"
+                exit 0 ;;
+            *) die "unknown option '$1' (see --help)" ;;
+        esac
+        shift
+    done
+    [ -n "$mode" ] || die "pass --update, --auto or --rollback"
+    local out rc=0
+    if [ "$mode" = "--rollback" ]; then
+        out="$(do_rollback 2>&1)" || rc=$?
+    else
+        out="$(do_update "${mode#--}" "$gh" 2>&1)" || rc=$?
+    fi
+    if [ "$rc" = "0" ]; then
+        [ -n "$out" ] && info "$out"
+    else
+        echo "usertools-update: error: $out" >&2
+        audit "update failed ($mode): $out"
+        if [ "$mode" = "--auto" ]; then
+            write_status 0 "$out"
+        fi
+    fi
+    return "$rc"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

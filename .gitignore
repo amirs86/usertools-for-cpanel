@@ -1,0 +1,29 @@
+# Copyright 2026 Amir Sibaee (https://as86.pro)
+# SPDX-License-Identifier: Apache-2.0
+# Build output
+build/
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Release tarballs
+*.tar.gz
+*.sha256
+
+# Editors / OS
+.vscode/
+.idea/
+*~
+.DS_Store
+Thumbs.db

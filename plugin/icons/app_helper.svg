@@ -1,0 +1,12 @@
+<!-- Copyright 2026 Amir Sibaee (https://as86.pro)
+     SPDX-License-Identifier: Apache-2.0
+     Original icon for App Helper: three stacked squares with a check mark.
+     Neutral geometry; not shaped like any framework logo.
+     48x48 as required for Jupiter feature icons. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <rect x="2" y="2" width="44" height="44" rx="8" fill="#e8f0fe"/>
+  <rect x="10" y="9" width="28" height="7" rx="2" fill="#1a73e8"/>
+  <rect x="10" y="19" width="28" height="7" rx="2" fill="#1a73e8" opacity="0.7"/>
+  <rect x="10" y="29" width="18" height="7" rx="2" fill="#1a73e8" opacity="0.45"/>
+  <path d="M32 36 L37 41 L44 31" fill="none" stroke="#34a853" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

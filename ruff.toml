@@ -1,0 +1,21 @@
+# Copyright 2026 Amir Sibaee (https://as86.pro)
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ruff gate for the engine. The engine targets Python 3.9 stdlib
+# only and runs unprivileged on the server, so the gate covers real bugs,
+# not style modernisation:
+#   E4/E7/E9 = syntax, statement and runtime errors;
+#   F        = pyflakes (undefined names, unused imports).
+# Deliberately NOT selected, with reasons:
+#   UP  (pyupgrade % -> .format etc.): the engine's %-formatting (including
+#         "%04o" mode strings) is consistent and tested on real servers; rewriting
+#         ~90 sites risks behaviour change for zero functional gain.
+#   SIM/FURB/PIE/BLE/PLW/RUF/I: style and test-idiom rules (bare open() in
+#         fixtures, subprocess without check= where returncode is asserted
+#         manually, except Exception as a documented fail-closed catch-all).
+#         A bare `ruff check` under current defaults reports ~150 such
+#         findings.
+target-version = "py39"
+
+[lint]
+select = ["E4", "E7", "E9", "F"]

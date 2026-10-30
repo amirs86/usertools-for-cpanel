@@ -1,0 +1,84 @@
+/* Copyright 2026 Amir Sibaee (https://as86.pro) */
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Shared styles for the UserTools for cPanel pages. Plain CSS, no framework.
+   Logical properties throughout so RTL locales mirror automatically. */
+.ut-wrap { max-width: 960px; margin-inline: auto; padding: 16px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.ut-wrap h1 { font-size: 1.4em; margin: 0 0 8px; }
+.ut-lead { color: #444; margin: 0 0 16px; }
+.ut-learn { margin: 0 0 16px; }
+.ut-learn summary { cursor: pointer; font-weight: bold; }
+/* Jupiter strips the native disclosure triangle, so every <summary>
+   gets an explicit marker plus pointer/hover/focus feedback. Native
+   markers are suppressed first so exactly one marker shows. */
+.ut-wrap summary { cursor: pointer; font-weight: bold; list-style: none; }
+.ut-wrap summary::-webkit-details-marker { display: none; }
+.ut-wrap summary::before { content: "\25b8  "; }
+.ut-wrap details[open] > summary::before { content: "\25be  "; }
+.ut-wrap summary:hover { color: #1a73e8; }
+.ut-banner { border-radius: 6px; padding: 10px 14px; margin: 0 0 16px;
+  font-weight: bold; }
+.ut-banner.ok { background: #e6f4ea; color: #137333;
+  border: 1px solid #34a853; }
+.ut-banner.warn { background: #fef7e0; color: #b06000;
+  border: 1px solid #f9ab00; }
+.ut-banner.err { background: #fce8e6; color: #a50e0e;
+  border: 1px solid #d93025; }
+.ut-grid { display: grid; gap: 12px; grid-template-columns: 1fr; }
+@media (min-width: 700px) { .ut-grid { grid-template-columns: 1fr 1fr; } }
+.ut-card { border: 1px solid #dadce0; border-radius: 8px; padding: 12px 14px;
+  background: #fff; }
+.ut-card.ok { border-inline-start: 6px solid #34a853; }
+.ut-card.bad { border-inline-start: 6px solid #d93025; }
+.ut-card h2 { font-size: 1.05em; margin: 0 0 4px; }
+.ut-path { font-family: monospace; font-size: 0.85em; color: #555;
+  word-break: break-all; }
+.ut-badge { display: inline-block; border-radius: 10px; padding: 1px 10px;
+  font-size: 0.8em; font-weight: bold; margin-inline-start: 8px; }
+.ut-badge.ok { background: #e6f4ea; color: #137333; }
+.ut-badge.bad { background: #fce8e6; color: #a50e0e; }
+.ut-badge.info { background: #e8f0fe; color: #1a73e8; }
+.ut-table { border-collapse: collapse; margin: 8px 0; font-size: 0.9em; }
+.ut-table th, .ut-table td { border: 1px solid #dadce0; padding: 3px 8px;
+  text-align: start; }
+.ut-table th { background: #f1f3f4; }
+.ut-note { background: #fef7e0; border: 1px solid #f9ab00; border-radius: 6px;
+  padding: 8px 10px; margin: 8px 0; font-size: 0.9em; }
+.ut-controls { margin: 16px 0; }
+.ut-fieldset { border: 1px solid #dadce0; border-radius: 8px; padding: 10px 14px;
+  margin: 0 0 12px; }
+.ut-fieldset legend { font-weight: bold; padding-inline: 4px; }
+.ut-radio, .ut-check { display: block; margin: 6px 0; }
+.ut-textarea { width: 100%; max-width: 100%; box-sizing: border-box;
+  font-family: monospace; }
+.ut-progress { margin: 12px 0; }
+.ut-progress progress { width: 100%; }
+.ut-counts ul { margin: 8px 0; padding-inline-start: 20px; }
+.ut-listnav { margin: 8px 0; }
+.ut-listnav .ut-path { margin-inline: 8px; }
+.ut-addrow { margin: 0 0 12px; }
+.ut-input { font: inherit; padding: 6px 8px; border: 1px solid #dadce0;
+  border-radius: 6px; max-width: 100%; box-sizing: border-box; }
+.ut-out pre { background: #f8f9fa; border: 1px solid #dadce0; border-radius: 6px;
+  padding: 8px 10px; overflow-x: auto; font-size: 0.85em; white-space: pre-wrap;
+  word-break: break-word; }
+.ut-btn { border: 1px solid #1a73e8; background: #1a73e8; color: #fff;
+  border-radius: 6px; padding: 8px 16px; font-size: 0.95em; cursor: pointer;
+  margin-inline-end: 8px; }
+.ut-btn.secondary { background: #fff; color: #1a73e8; }
+.ut-btn:disabled { opacity: 0.5; cursor: default; }
+.ut-btn.small { padding: 4px 10px; font-size: 0.85em; }
+.ut-btn:focus-visible, summary:focus-visible { outline: 2px solid #1a73e8;
+  outline-offset: 2px; }
+.ut-history { margin: 0 0 16px; }
+.ut-history summary { cursor: pointer; font-weight: bold; }
+.ut-dialog { border: 1px solid #dadce0; border-radius: 8px; padding: 16px 18px;
+  max-width: 32em; }
+.ut-dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
+.ut-dialog-actions { margin-top: 12px; }
+.ut-footer { margin-top: 28px; padding-top: 10px;
+  border-top: 1px solid #dadce0; font-size: 0.8em; color: #666; }
+.ut-footer a { color: #1a73e8; }
+.ut-about { display: none; background: #f8f9fa; border: 1px solid #dadce0;
+  border-radius: 6px; padding: 8px 10px; margin-top: 8px; white-space: pre-wrap;
+  font-size: 0.85em; }

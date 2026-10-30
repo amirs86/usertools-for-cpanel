@@ -1,0 +1,20 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    Jupiter adapter for Bulk Permissions (tool C): thin wrapper around the
+    shared body. See the Fix Home Permissions adapter for the wrapper notes. %]
+[% WRAPPER '_assets/master.html.tt'
+    app_key = 'usertools_bulk_perms'
+    page_title = locale.maketext('Bulk Permissions')
+    page_stylesheets = [
+        'user_tools/assets/usertools.css'
+    ]
+    page_scripts = [
+        'user_tools/assets/usertools.js'
+    ]
+    include_legacy_stylesheets = 0
+    include_legacy_scripts = 0
+    include_cjt = 0
+-%]
+[% SET CPANEL.CPVAR.dprefix = "../" %]
+[% INCLUDE 'shared/bulk_permissions_body.tt' -%]
+[% END %]

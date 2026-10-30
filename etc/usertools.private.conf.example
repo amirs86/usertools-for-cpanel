@@ -1,0 +1,15 @@
+; Copyright 2026 Amir Sibaee (https://as86.pro)
+; SPDX-License-Identifier: Apache-2.0
+; UserTools for cPanel — PRIVATE policy template (installed as
+; /etc/usertools.private.conf, root:root 0600, by install.sh; never
+; overwritten if it already exists). Root-only: every key here can name
+; accounts. Read only by privileged (root) code, never shipped to browsers.
+
+normal_shell_users=                           ; comma list of users allowed bash
+; Informational sshd rules (auto-filled by install.sh; the Manage Shell page
+; warns the caller when they would still block login):
+;sshd_allowusers=
+;sshd_allowgroups=
+;sshd_denyusers=
+;sshd_denygroups=
+; Later: app_packages=

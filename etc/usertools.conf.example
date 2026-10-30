@@ -1,0 +1,40 @@
+; Copyright 2026 Amir Sibaee (https://as86.pro)
+; SPDX-License-Identifier: Apache-2.0
+; UserTools for cPanel — public policy template (installed as
+; /etc/usertools.conf by install.sh; never overwritten if it already exists).
+; World-readable (0644): NON-SENSITIVE keys only. Anything naming accounts
+; lives in usertools.private.conf.example instead.
+; The engine reads max_job_seconds from this file.
+
+enable_shell=1
+allowed_shell_modes=disabled,jailed          ; add "normal" to permit bash
+enable_fix_home=1
+enable_bulk_perms=1
+enable_ownership_report=1
+enable_app_helper=1
+allow_user_app_docroot=0               ; 1 lets users point their MAIN domain
+                                       ; at public_html/public themselves
+                                       ; (Admin SET_APP_DOCROOT); default off
+app_packages=                          ; comma list: new accounts on these
+                                       ; packages get the Laravel layout
+                                       ; (account-creation hook); default empty
+max_job_seconds=3600
+enable_update_check=0                  ; 1 = WHM page may check GitHub releases
+                                       ; (reports only, never installs)
+update_repo=amirs86/usertools-for-cpanel ; owner/repo for the update check
+                                       ; (prefilled; empty disables it)
+auto_update=0                          ; 1 = daily automatic verified update
+                                       ; (installer writes /etc/cron.d entry)
+auto_update_scope=patch                ; patch = patch updates only;
+                                       ; minor = minor + patch; never major
+composer_path=                         ; absolute path to composer; empty =
+                                       ; auto-discover (/usr/local/bin/composer,
+                                       ; then /opt/cpanel/composer/bin/composer);
+                                       ; must be root-owned, no group/other write
+composer_lift_disable_functions=0      ; 0 = keep the host PHP hardening
+                                       ; (Composer refuses when the host
+                                       ; disables proc_open); 1 = run ONLY the
+                                       ; Composer process with
+                                       ; -d disable_functions= (your explicit
+                                       ; choice; never set by the installer)
+ssh_port=                                     ; auto-filled by install.sh from `sshd -T`

@@ -1,0 +1,16 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    Shared footer partial for every UserTools page.
+    Included with: [% PROCESS 'shared/footer.tt' -%] %]
+<div class="ut-footer">
+  UserTools for cPanel &copy; 2026 Amir Sibaee &middot;
+  <a href="https://as86.pro" target="_blank" rel="noopener noreferrer">as86.pro</a>
+  &middot; <a href="#" onclick="return UserTools.toggleAbout();">About</a>
+  <div class="ut-about" id="ut-about">UserTools for cPanel
+Copyright 2026 Amir Sibaee (https://as86.pro)
+
+This product includes software developed by Amir Sibaee (https://as86.pro).
+Not affiliated with or endorsed by cPanel, L.L.C.
+
+License: Apache License, Version 2.0 (see LICENSE in the release package).</div>
+</div>

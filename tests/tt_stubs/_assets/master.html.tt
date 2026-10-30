@@ -1,0 +1,19 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    TEST-ONLY stub of Jupiter's _assets/master.html.tt for off-server
+    static renders (tests/render_check.pl). NEVER installed: the real master
+    template ships with cPanel. It emulates just enough of the documented
+    WRAPPER contract (page_title, page_stylesheets, page_scripts, content). %]
+<!DOCTYPE html>
+<html>
+<head>
+<title>[% page_title %]</title>
+[% FOREACH css IN page_stylesheets %]<link rel="stylesheet" href="[% css %]">
+[% END %]
+[% FOREACH js IN page_scripts %]<script src="[% js %]"></script>
+[% END %]
+</head>
+<body>
+[% content %]
+</body>
+</html>
