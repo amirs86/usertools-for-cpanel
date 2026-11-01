@@ -49,6 +49,15 @@
 <option value="1"[% IF settings.enable_app_helper == '1' %] selected[% END %]>On</option>
 <option value="0"[% IF settings.enable_app_helper != '1' %] selected[% END %]>Off</option>
 </select></td></tr>
+<tr><td><label for="f_space">Space Cleaner enabled</label></td>
+<td><select id="f_space" name="enable_space_cleaner" class="form-control">
+<option value="1"[% IF settings.enable_space_cleaner == '1' %] selected[% END %]>On</option>
+<option value="0"[% IF settings.enable_space_cleaner != '1' %] selected[% END %]>Off</option>
+</select></td></tr>
+<tr><td><label for="f_logmb">Log size floor for cleaning, MB (1–1024)</label></td>
+<td><input id="f_logmb" name="cleaner_log_min_mb" class="form-control" value="[% settings.cleaner_log_min_mb | html %]" size="10"></td></tr>
+<tr><td><label for="f_trashdays">Trash batches older than this many days are pruned (1–90)</label></td>
+<td><input id="f_trashdays" name="cleaner_trash_days" class="form-control" value="[% settings.cleaner_trash_days | html %]" size="10"></td></tr>
 <tr><td><label for="f_docroot">Users may switch their main domain to public_html/public</label></td>
 <td><select id="f_docroot" name="allow_user_app_docroot" class="form-control">
 <option value="1"[% IF settings.allow_user_app_docroot == '1' %] selected[% END %]>On</option>
@@ -116,7 +125,7 @@ paths=[% composer.path | html %]</pre>
 <label>Feature: <input name="feature" class="form-control" size="30"></label>
 <button type="submit" class="btn btn-primary">Show steps</button></p>
 </form>
-<p>Tool features: usertools_shell, usertools_fix_home, usertools_bulk_perms, usertools_ownership_report, usertools_app_helper.</p>
+<p>Tool features: usertools_shell, usertools_fix_home, usertools_bulk_perms, usertools_ownership_report, usertools_app_helper, usertools_space_cleaner.</p>
 <h2>Updates</h2>
 [% IF cosign && cosign.found %]
 <p>Release verification: <strong>cosign found</strong> (<code>[% cosign.path | html %]</code>).</p>

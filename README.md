@@ -81,7 +81,7 @@ Full removal including settings and log:
 
 ## After installing
 
-1. WHM → Packages → Feature Manager: tick the five `usertools_*`
+1. WHM → Packages → Feature Manager: tick the six `usertools_*`
    features for each package that should get the tools. Everything is
    **off by default** until you do this. (`./install.sh
    --enable-features=LIST` prints the exact steps for a list.)
@@ -99,6 +99,7 @@ Full removal including settings and log:
 - Ownership Report: read-only list of files not owned by the account, with CSV download for the host.
 - Manage Shell: let users turn SSH access off, jailed, or normal (if you allow it), with policy gates and audit.
 - App Helper: find web apps, run maintenance commands, install dependencies, view logs, manage the scheduler, check `.env` safety, and adjust document roots and `.htaccess` files.
+- Space Cleaner: preview, then reclaim disk space and inodes (big logs, crash dumps, framework and WordPress caches, developer caches, old plugin files), with trash, restore, and empty.
 
 ## Tested
 
@@ -165,7 +166,14 @@ adds missing keys:
 - `allowed_shell_modes` (list): which modes users may pick
   (`disabled`, `jailed`, plus `normal` only if you add it).
 - `enable_fix_home`, `enable_bulk_perms`, `enable_ownership_report`,
-  `enable_app_helper` (0/1): one switch per tool.
+  `enable_app_helper`, `enable_space_cleaner` (0/1): one switch per
+  tool. Space Cleaner ships `0`: ticking its feature alone is not
+  enough until you turn this on.
+- `cleaner_log_min_mb` (number, MB, 1–1024, default 50): `error_log`
+  and per-website PHP logs at or above this size qualify for
+  truncating.
+- `cleaner_trash_days` (number, days, 1–90, default 7): trash batches
+  older than this are pruned at the start of every scan and run.
 - `allow_user_app_docroot` (0/1): lets users point their own main
   domain at `public_html/public` themselves. Off by default.
 - `app_packages` (list): new accounts on these packages get the app
@@ -256,6 +264,10 @@ installs.
 ### App Helper
 
 ![App Helper page: application list with maintenance panels](docs/screenshots/05-app-helper.png)
+
+### Space Cleaner
+
+![Space Cleaner page: category cards with a preview, clean, trash and restore](docs/screenshots/07-space-cleaner.png)
 
 ### WHM UserTools Settings
 

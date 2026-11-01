@@ -233,6 +233,7 @@ admin/Cpanel/Admin/Modules/UserTools/Shell.pm|/usr/local/cpanel/Cpanel/Admin/Mod
 admin/Cpanel/Admin/Modules/UserTools/AppDocroot.pm|/usr/local/cpanel/Cpanel/Admin/Modules/UserTools/AppDocroot.pm|0700
 Cpanel/API/UserTools.pm|/usr/local/cpanel/Cpanel/API/UserTools.pm|0644
 engine/perm_engine.py|/usr/local/cpanel/3rdparty/usertools/bin/perm_engine.py|0755
+engine/space_cleaner.py|/usr/local/cpanel/3rdparty/usertools/bin/space_cleaner.py|0755
 engine/recipe_worker.py|/usr/local/cpanel/3rdparty/usertools/bin/recipe_worker.py|0755
 VERSION|/usr/local/cpanel/3rdparty/usertools/VERSION|0644
 frontend/jupiter/user_tools/fix_home_permissions.html.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/fix_home_permissions.html.tt|0644
@@ -240,11 +241,13 @@ frontend/jupiter/user_tools/bulk_permissions.html.tt|/usr/local/cpanel/base/fron
 frontend/jupiter/user_tools/ownership_report.html.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/ownership_report.html.tt|0644
 frontend/jupiter/user_tools/manage_shell.html.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/manage_shell.html.tt|0644
 frontend/jupiter/user_tools/app_helper.html.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/app_helper.html.tt|0644
+frontend/jupiter/user_tools/space_cleaner.html.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/space_cleaner.html.tt|0644
 frontend/shared/fix_home_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/fix_home_body.tt|0644
 frontend/shared/bulk_permissions_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/bulk_permissions_body.tt|0644
 frontend/shared/ownership_report_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/ownership_report_body.tt|0644
 frontend/shared/manage_shell_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/manage_shell_body.tt|0644
 frontend/shared/app_helper_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/app_helper_body.tt|0644
+frontend/shared/space_cleaner_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/space_cleaner_body.tt|0644
 frontend/shared/footer.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/footer.tt|0644
 frontend/jupiter/user_tools/assets/usertools.css|/usr/local/cpanel/base/frontend/jupiter/user_tools/assets/usertools.css|0644
 frontend/jupiter/user_tools/assets/usertools.min.css|/usr/local/cpanel/base/frontend/jupiter/user_tools/assets/usertools.min.css|0644
@@ -499,7 +502,7 @@ cagefs_setup() { # dry: CageFS visibility entry (public paths only, never the pr
     local content tmp
     content="[usertools]
 comment=UserTools for cPanel (public paths only; never the private conf)
-paths=$CPANEL/3rdparty/usertools/bin/perm_engine.py, $CPANEL/3rdparty/usertools/bin/recipe_worker.py, $CPANEL/3rdparty/usertools/VERSION, $ETC/$CONF_NAME
+paths=$CPANEL/3rdparty/usertools/bin/perm_engine.py, $CPANEL/3rdparty/usertools/bin/space_cleaner.py, $CPANEL/3rdparty/usertools/bin/recipe_worker.py, $CPANEL/3rdparty/usertools/VERSION, $ETC/$CONF_NAME
 "
     tmp="$(mktemp "$(dirname "$cfg")/.usertools.XXXXXX")" || die "cannot write in $(dirname "$cfg")"
     printf '%s' "$content" >"$tmp" || { rm -f "$tmp"; die "cannot write $cfg"; }
@@ -535,7 +538,7 @@ usertools-install: to enable the tools for feature list '$list':
   1. WHM >> Home >> Packages >> Feature Manager
   2. Manage feature list '$list'
   3. Tick: usertools_shell usertools_fix_home usertools_bulk_perms
-     usertools_ownership_report usertools_app_helper
+     usertools_ownership_report usertools_app_helper usertools_space_cleaner
   4. Save. (Features stay off by default until you do this.)
 EOF
 }
@@ -584,12 +587,12 @@ verify_table() { # : prints PASS/MISSING per installed path + version
 whats_next() { # : the post-install box
     cat <<'EOF'
 usertools-install: What's next
-  1. WHM >> Packages >> Feature Manager: tick the 5 usertools_* features
+  1. WHM >> Packages >> Feature Manager: tick the 6 usertools_* features
      for the packages that get the tools (off by default), or run:
      ./install.sh --enable-features=LIST
   2. WHM >> Plugins >> UserTools Settings: policy, app packages, updates.
   3. Verify: log in to a test cPanel account on one of those packages and
-     open the UserTools pages under Security.
+     open the UserTools pages under Security (Space Cleaner is under Files).
 EOF
 }
 

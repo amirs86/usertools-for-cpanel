@@ -5,6 +5,17 @@ All notable changes to this project are documented here. Versions follow
 
 ## [Unreleased]
 
+### Added
+
+- Space Cleaner: preview and reclaim disk space and inodes across six
+  fixed categories (big `error_log` and per-website PHP logs truncated
+  in place; crash dumps, framework and WordPress caches, and developer
+  caches moved to a trash folder; the plugin's own old job files and
+  undo journals deleted). Preview first, confirm dialog with totals,
+  progress with cancel, restore per trash batch, empty per batch or
+  all. Off by default: `enable_space_cleaner=0` policy key, WHM
+  checkbox, and its own Feature Manager feature.
+
 ### Fixed
 
 - The updater no longer prints its name twice ("usertools-update:

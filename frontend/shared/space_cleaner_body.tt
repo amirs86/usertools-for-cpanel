@@ -1,0 +1,465 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    Shared Space Cleaner page body. Included once by each theme adapter.
+    Flow: tick categories, Preview (scan) with per-category counts, review
+    the largest files, Clean selection behind a confirm dialog, progress
+    with Cancel, result summary, trash list with Restore per batch and
+    Empty (batch or all, never undone). A stored job id reattaches the
+    page to a running job after a reload. %]
+<div class="ut-wrap">
+  <p class="ut-lead">[% locale.maketext('Free disk space and inodes without hunting for files. Preview first, then clean only what you tick.') %]</p>
+  <details class="ut-learn">
+    <summary>[% locale.maketext('Learn more') %]</summary>
+    <p>[% locale.maketext('Only the six categories below are ever touched: big log files, crash dumps, framework and WordPress caches, developer caches, and old plugin files. Backups, mail, settings, keys and anything you do not own are always left alone.') %]</p>
+    <p>[% locale.maketext('Cleaned files wait in the trash until you empty it, and the trash counts against your quota: empty it to free the space. Freed space can take a few minutes to show in the disk usage numbers. Emptying the trash cannot be undone.') %]</p>
+  </details>
+  <fieldset class="ut-fieldset">
+    <legend>[% locale.maketext('What to clean') %]</legend>
+    <div class="ut-grid" id="ut-cards">
+      <div class="ut-card"><label class="ut-check"><input type="checkbox" id="ut-cat-error_logs" checked> <strong>[% locale.maketext('Big log files') %]</strong></label>
+        <p>[% locale.maketext('error_log files over the size limit, plus the per-website PHP error logs. Truncated to empty; the file, its permissions and its owner stay.') %]</p>
+        <div class="ut-path" id="ut-n-error_logs" aria-live="polite"></div></div>
+      <div class="ut-card"><label class="ut-check"><input type="checkbox" id="ut-cat-core_dumps" checked> <strong>[% locale.maketext('Crash dumps') %]</strong></label>
+        <p>[% locale.maketext('core and core-number files left behind by crashed programs. Moved to the trash.') %]</p>
+        <div class="ut-path" id="ut-n-core_dumps" aria-live="polite"></div></div>
+      <div class="ut-card"><label class="ut-check"><input type="checkbox" id="ut-cat-app_cache" checked> <strong>[% locale.maketext('Application cache') %]</strong></label>
+        <p>[% locale.maketext('Cached views and data inside detected applications (for example Laravel). Only the cache contents move to the trash, never your code.') %]</p>
+        <div class="ut-path" id="ut-n-app_cache" aria-live="polite"></div></div>
+      <div class="ut-card"><label class="ut-check"><input type="checkbox" id="ut-cat-wp_cache" checked> <strong>[% locale.maketext('WordPress cache') %]</strong></label>
+        <p>[% locale.maketext('Files inside wp-content/cache of detected WordPress sites. Moved to the trash.') %]</p>
+        <div class="ut-path" id="ut-n-wp_cache" aria-live="polite"></div></div>
+      <div class="ut-card"><label class="ut-check"><input type="checkbox" id="ut-cat-dev_caches" checked> <strong>[% locale.maketext('Developer caches') %]</strong></label>
+        <p>[% locale.maketext('npm, Composer and compile caches of the plugin itself. Moved to the trash; the tools rebuild them as needed.') %]</p>
+        <div class="ut-path" id="ut-n-dev_caches" aria-live="polite"></div></div>
+      <div class="ut-card"><label class="ut-check"><input type="checkbox" id="ut-cat-usertools_old" checked> <strong>[% locale.maketext('Old plugin files') %]</strong></label>
+        <p>[% locale.maketext('Old job records and undo journals of the plugin itself, older than 30 days (always keeps the newest 3 per tool). Deleted, not trashed.') %]</p>
+        <div class="ut-path" id="ut-n-usertools_old" aria-live="polite"></div></div>
+    </div>
+  </fieldset>
+  <div class="ut-banner warn" id="ut-banner" role="status" aria-live="polite">[% locale.maketext('Tick categories, then run a preview.') %]</div>
+  <div class="ut-controls">
+    <button class="ut-btn" id="ut-preview" type="button">[% locale.maketext('Preview') %]</button>
+    <button class="ut-btn" id="ut-clean" type="button" hidden></button>
+  </div>
+  <div class="ut-progress" id="ut-progress" hidden>
+    <progress id="ut-bar" aria-label="[% locale.maketext('Progress') %]"></progress>
+    <div class="ut-path" id="ut-progtext" aria-live="polite"></div>
+    <button class="ut-btn secondary" id="ut-cancel" type="button">[% locale.maketext('Cancel') %]</button>
+  </div>
+  <div class="ut-lists" id="ut-lists"></div>
+  <dialog class="ut-dialog" id="ut-dialog" aria-labelledby="ut-dialog-title">
+    <h2 id="ut-dialog-title"></h2>
+    <p id="ut-dialog-body"></p>
+    <div class="ut-dialog-actions">
+      <button class="ut-btn" id="ut-dialog-apply" type="button"></button>
+      <button class="ut-btn secondary" id="ut-dialog-cancel" type="button">[% locale.maketext('Cancel') %]</button>
+    </div>
+  </dialog>
+  <h2>[% locale.maketext('Trash') %]</h2>
+  <p class="ut-path" id="ut-trash-size" aria-live="polite"></p>
+  <div id="ut-trash-list"></div>
+  <div class="ut-controls">
+    <button class="ut-btn secondary" id="ut-empty-all" type="button">[% locale.maketext('Empty all trash') %]</button>
+  </div>
+[% PROCESS 'shared/footer.tt' -%]
+</div>
+<script>
+var UT_STR = {
+    preview: "[% locale.maketext('Preview') %]",
+    cleanSelection: "[% locale.maketext('Clean selection') %]",
+    previewCountsOne: "[% locale.maketext('Preview: 1 file would be cleaned.') %]",
+    previewCountsMany: "[% locale.maketext('Preview: COUNT files would be cleaned.') %]",
+    previewClean: "[% locale.maketext('Preview: nothing to clean.') %]",
+    confirmTitle: "[% locale.maketext('Confirm clean') %]",
+    confirmBodyMany: "[% locale.maketext('This will trash or truncate COUNT files (SIZE) and permanently delete DEL files. The trash can be restored; deletions and emptying cannot be undone.') %]",
+    cleanApply: "[% locale.maketext('Clean now') %]",
+    running: "[% locale.maketext('Working.') %]",
+    progtext: "[% locale.maketext('Scanned COUNT1, cleaned COUNT2.') %]",
+    cancelling: "[% locale.maketext('Cancelling.') %]",
+    cancelled: "[% locale.maketext('Cancelled. Partial results are shown below.') %]",
+    doneSomeOne: "[% locale.maketext('Finished: 1 file cleaned.') %]",
+    doneSomeMany: "[% locale.maketext('Finished: COUNT files cleaned.') %]",
+    doneNone: "[% locale.maketext('Finished: nothing needed cleaning.') %]",
+    failed: "[% locale.maketext('The job failed. Please try again.') %]",
+    startFailed: "[% locale.maketext('Could not start: ') %]",
+    catCounts: "[% locale.maketext('FILES files, SIZE') %]",
+    largest: "[% locale.maketext('Largest') %]",
+    topSize: "[% locale.maketext('Biggest folders by size') %]",
+    topInodes: "[% locale.maketext('Biggest folders by file count') %]",
+    andMoreOne: "[% locale.maketext('and 1 more.') %]",
+    andMoreMany: "[% locale.maketext('and COUNT more.') %]",
+    notOwned: "[% locale.maketext('Not owned by you (left alone)') %]",
+    skipped: "[% locale.maketext('Skipped') %]",
+    errors: "[% locale.maketext('Errors') %]",
+    trashEmpty: "[% locale.maketext('Trash is empty.') %]",
+    trashSize: "[% locale.maketext('Trash holds FILES files (SIZE). It counts against your quota until emptied.') %]",
+    restore: "[% locale.maketext('Restore') %]",
+    empty: "[% locale.maketext('Empty') %]",
+    emptyAllTitle: "[% locale.maketext('Empty all trash') %]",
+    emptyAllBody: "[% locale.maketext('This permanently deletes every trash batch. It cannot be undone.') %]",
+    emptyAllDo: "[% locale.maketext('Empty everything') %]",
+    emptyOneTitle: "[% locale.maketext('Empty one batch') %]",
+    emptyOneBody: "[% locale.maketext('This permanently deletes the selected trash batch. It cannot be undone.') %]",
+    emptyOneDo: "[% locale.maketext('Empty batch') %]",
+    restoredOne: "[% locale.maketext('Restored 1 file.') %]",
+    restoredMany: "[% locale.maketext('Restored COUNT files.') %]",
+    restoredConflict: "[% locale.maketext('Some files already exist and were left in the trash.') %]",
+    emptied: "[% locale.maketext('Trash emptied.') %]",
+    batchFiles: "[% locale.maketext('FILES files, SIZE') %]"
+};
+</script>
+<script>
+"use strict";
+window.addEventListener("DOMContentLoaded", function () {
+    if (!window.UserTools) {
+        document.getElementById("ut-banner").textContent = "UserTools failed to load.";
+        return;
+    }
+    var CATS = ["error_logs", "core_dumps", "app_cache", "wp_cache",
+        "dev_caches", "usertools_old"];
+    var bannerEl = document.getElementById("ut-banner");
+    var previewBtn = document.getElementById("ut-preview");
+    var cleanBtn = document.getElementById("ut-clean");
+    var cancelBtn = document.getElementById("ut-cancel");
+    var progWrap = document.getElementById("ut-progress");
+    var progText = document.getElementById("ut-progtext");
+    var listsEl = document.getElementById("ut-lists");
+    var trashSizeEl = document.getElementById("ut-trash-size");
+    var trashListEl = document.getElementById("ut-trash-list");
+    var emptyAllBtn = document.getElementById("ut-empty-all");
+    var dlg = document.getElementById("ut-dialog");
+    var dlgTitle = document.getElementById("ut-dialog-title");
+    var dlgBody = document.getElementById("ut-dialog-body");
+    var dlgApply = document.getElementById("ut-dialog-apply");
+    var dlgCancel = document.getElementById("ut-dialog-cancel");
+    var lastApply = null;
+    var lastFocus = null;
+    var pollTimer = null;
+    var currentJob = null;
+    var currentKind = null;
+    var pendingClean = null;
+    var lastScan = null;
+    var SCAN_KEY = "ut_space_scan_last_job";
+    var CLEAN_KEY = "ut_space_clean_last_job";
+
+    function tok(s, name, value) { return String(s).split(name).join(value); }
+    function fmtBytes(n) {
+        n = Number(n) || 0;
+        if (n < 1024) { return n + " B"; }
+        var units = ["KB", "MB", "GB", "TB"];
+        var u = -1;
+        var v = n;
+        do { v = v / 1024; u++; } while (v >= 1024 && u < units.length - 1);
+        return (Math.round(v * 10) / 10) + " " + units[u];
+    }
+    function setBanner(kind, text) {
+        bannerEl.className = "ut-banner " + kind;
+        bannerEl.textContent = text;
+    }
+    function setBusy(busy) {
+        previewBtn.disabled = busy;
+        cleanBtn.disabled = busy;
+        emptyAllBtn.disabled = busy;
+    }
+    function openDialog(title, body, applyLabel, onApply) {
+        lastFocus = document.activeElement;
+        dlgTitle.textContent = title;
+        dlgBody.textContent = body;
+        dlgApply.textContent = applyLabel;
+        lastApply = onApply;
+        if (dlg.showModal) { dlg.showModal(); } else { dlg.setAttribute("open", ""); }
+        dlgCancel.focus();
+    }
+    function closeDialog() {
+        if (dlg.close) { dlg.close(); } else { dlg.removeAttribute("open"); }
+        lastApply = null;
+        if (lastFocus && lastFocus.focus) { lastFocus.focus(); }
+    }
+    dlgApply.addEventListener("click", function () {
+        var fn = lastApply;
+        closeDialog();
+        if (fn) { fn(); }
+    });
+    dlgCancel.addEventListener("click", closeDialog);
+
+    function selectedCats() {
+        var out = [];
+        CATS.forEach(function (c) {
+            var box = document.getElementById("ut-cat-" + c);
+            if (box && box.checked) { out.push(c); }
+        });
+        return out;
+    }
+    function apiFor(kind, verb) {
+        return "space_" + kind + "_" + verb;
+    }
+    function startJob(kind, params, onDone) {
+        setBusy(true);
+        UserTools.callApi(apiFor(kind, "start"), params, "POST").then(function (data) {
+            if (data.state === "busy") {
+                setBusy(false);
+                setBanner("warn", UT_STR.running);
+                return;
+            }
+            currentJob = data.job_id;
+            currentKind = kind;
+            try { window.localStorage.setItem(kind === "scan" ? SCAN_KEY : CLEAN_KEY, data.job_id); } catch (e) { /* ignore */ }
+            pollJob(onDone);
+        }).catch(function (err) {
+            setBusy(false);
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    }
+    function pollJob(onDone) {
+        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+        if (!currentJob) { return; }
+        var kind = currentKind;
+        UserTools.callApi(apiFor(kind, "status"), { job_id: currentJob }, "GET").then(function (data) {
+            if (data.state === "running") {
+                progWrap.hidden = false;
+                var p = data.progress || {};
+                progText.textContent = tok(tok(UT_STR.progtext, "COUNT1", p.scanned || 0), "COUNT2", p.changed || 0);
+                setBanner("warn", UT_STR.running);
+                pollTimer = setTimeout(function () { pollJob(onDone); }, 1000);
+            } else {
+                progWrap.hidden = true;
+                setBusy(false);
+                if (data.state === "done") {
+                    if (kind === "scan") { renderScan(data.summary || {}); }
+                    else { renderClean(data.summary || {}); }
+                } else if (data.state === "cancelled") {
+                    setBanner("warn", UT_STR.cancelled);
+                    if (data.summary) {
+                        if (kind === "scan") { renderScan(data.summary); }
+                        else { renderClean(data.summary); }
+                    }
+                } else {
+                    setBanner("err", UT_STR.failed);
+                }
+                if (onDone) { onDone(data); }
+            }
+        }).catch(function (err) {
+            setBusy(false);
+            progWrap.hidden = true;
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    }
+    function listBlock(title, items, fmt, isOpen) {
+        if (!items || !items.length) { return ""; }
+        var shown = items.slice(0, 50);
+        var html = "<details" + (isOpen ? " open" : "") + "><summary>" + UserTools.escHtml(title) + " (" + items.length + ")</summary><ul>";
+        shown.forEach(function (it) { html += "<li>" + UserTools.escHtml(fmt(it)) + "</li>"; });
+        if (items.length > shown.length) {
+            html += "<li>" + UserTools.escHtml(UserTools.plural(items.length - shown.length, UT_STR.andMoreOne, UT_STR.andMoreMany)) + "</li>";
+        }
+        return html + "</ul></details>";
+    }
+    function renderScan(summary) {
+        lastScan = summary;
+        var cats = summary.categories || {};
+        var counts = summary.counts || {};
+        var total = counts.would_change || 0;
+        CATS.forEach(function (c) {
+            var el = document.getElementById("ut-n-" + c);
+            var cat = cats[c] || { files: 0, bytes: 0 };
+            if (el) {
+                el.textContent = tok(tok(UT_STR.catCounts, "FILES", cat.files), "SIZE", fmtBytes(cat.bytes));
+            }
+        });
+        if (total > 0) {
+            setBanner("warn", UserTools.plural(total, UT_STR.previewCountsOne, UT_STR.previewCountsMany));
+        } else {
+            setBanner("ok", UT_STR.previewClean);
+        }
+        var html = "";
+        CATS.forEach(function (c) {
+            var cat = cats[c] || {};
+            html += listBlock(UT_STR.largest + " (" + c + ")", cat.largest || [], function (it) {
+                return it.path + " (" + fmtBytes(it.size) + ")";
+            }, false);
+        });
+        var topSize = (summary.top_dirs_size || []).map(function (t) {
+            return t.path + " (" + fmtBytes(t.bytes) + ")";
+        });
+        html += listBlock(UT_STR.topSize, topSize, function (it) { return it; }, false);
+        var topInodes = (summary.top_dirs_inodes || []).map(function (t) {
+            return t.path + " (" + t.inodes + ")";
+        });
+        html += listBlock(UT_STR.topInodes, topInodes, function (it) { return it; }, false);
+        var paths = summary.paths || {};
+        var owned = paths.not_owned || [];
+        if (owned.length) {
+            html += "<p>" + UserTools.escHtml(UT_STR.notOwned) + "</p>";
+            html += listBlock(UT_STR.notOwned, owned, function (it) {
+                return typeof it === "string" ? it : (it.path + " (" + it.owner + ")");
+            }, false);
+        }
+        var skipped = (paths.skipped_symlink || []).concat(paths.skipped_protected || [],
+            paths.skipped_xdev || [], paths.skipped_special || [], paths.skipped_hardlink || []);
+        html += listBlock(UT_STR.skipped, skipped, function (it) {
+            return typeof it === "string" ? it : it.path;
+        }, false);
+        html += listBlock(UT_STR.errors, paths.errors || [], function (it) {
+            return it.path + ": " + it.reason;
+        }, false);
+        listsEl.innerHTML = html;
+        if (total > 0) {
+            var sel = selectedCats();
+            var n = 0;
+            sel.forEach(function (c) { n += ((cats[c] || {}).files || 0); });
+            if (n > 0) {
+                pendingClean = { cats: sel };
+                cleanBtn.textContent = UT_STR.cleanSelection;
+                cleanBtn.hidden = false;
+                cleanBtn.focus();
+            }
+        }
+        refreshTrash();
+    }
+    function renderClean(summary) {
+        var counts = summary.counts || {};
+        var n = counts.changed || 0;
+        if (n > 0) {
+            setBanner("ok", UserTools.plural(n, UT_STR.doneSomeOne, UT_STR.doneSomeMany));
+        } else {
+            setBanner("ok", UT_STR.doneNone);
+        }
+        var paths = summary.paths || {};
+        var html = "";
+        var changed = (paths.trashed || []).concat(paths.truncated || [], paths.deleted || []);
+        html += listBlock(UT_STR.cleanSelection, changed, function (it) {
+            return typeof it === "string" ? it : it.path;
+        }, n > 0);
+        var owned = paths.not_owned || [];
+        if (owned.length) {
+            html += "<p>" + UserTools.escHtml(UT_STR.notOwned) + "</p>";
+        }
+        html += listBlock(UT_STR.errors, paths.errors || [], function (it) {
+            return it.path + ": " + it.reason;
+        }, false);
+        listsEl.innerHTML = html;
+        pendingClean = null;
+        cleanBtn.hidden = true;
+        refreshTrash();
+    }
+    function refreshTrash() {
+        UserTools.callApi("space_trash_list", {}, "GET").then(function (data) {
+            var batches = data.batches || [];
+            if (!batches.length) {
+                trashSizeEl.textContent = UT_STR.trashEmpty;
+                trashListEl.innerHTML = "";
+                return;
+            }
+            trashSizeEl.textContent = tok(tok(UT_STR.trashSize, "FILES",
+                batches.reduce(function (a, b) { return a + (b.files || 0); }, 0)),
+                "SIZE", fmtBytes(data.trash_bytes || 0));
+            var html = "";
+            batches.forEach(function (b) {
+                html += '<div class="ut-card"><h2>' + UserTools.escHtml(b.batch) + "</h2>"
+                    + '<div class="ut-path">' + UserTools.escHtml(tok(tok(UT_STR.batchFiles, "FILES", b.files || 0), "SIZE", fmtBytes(b.bytes || 0))) + "</div>"
+                    + '<div class="ut-controls"><button class="ut-btn secondary" type="button" data-restore="' + UserTools.escHtml(b.batch) + '">' + UserTools.escHtml(UT_STR.restore) + "</button> "
+                    + '<button class="ut-btn secondary" type="button" data-empty="' + UserTools.escHtml(b.batch) + '">' + UserTools.escHtml(UT_STR.empty) + "</button></div></div>";
+            });
+            trashListEl.innerHTML = html;
+            Array.prototype.forEach.call(trashListEl.querySelectorAll("[data-restore]"), function (btn) {
+                btn.addEventListener("click", function () { restoreBatch(btn.getAttribute("data-restore")); });
+            });
+            Array.prototype.forEach.call(trashListEl.querySelectorAll("[data-empty]"), function (btn) {
+                btn.addEventListener("click", function () { confirmEmpty(btn.getAttribute("data-empty")); });
+            });
+        }).catch(function () { /* trash list is best-effort here */ });
+    }
+    function restoreBatch(batch) {
+        setBusy(true);
+        UserTools.callApi("space_trash_restore", { batch: batch }, "POST").then(function (data) {
+            setBusy(false);
+            var msg = UserTools.plural(data.restored || 0, UT_STR.restoredOne, UT_STR.restoredMany);
+            if ((data.conflicts || 0) > 0) { msg += " " + UT_STR.restoredConflict; }
+            setBanner("ok", msg);
+            refreshTrash();
+        }).catch(function (err) {
+            setBusy(false);
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    }
+    function emptyBatch(batch) {
+        setBusy(true);
+        UserTools.callApi("space_trash_empty", { batch: batch }, "POST").then(function () {
+            setBusy(false);
+            setBanner("ok", UT_STR.emptied);
+            refreshTrash();
+        }).catch(function (err) {
+            setBusy(false);
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    }
+    function confirmEmpty(batch) {
+        if (batch === "all") {
+            openDialog(UT_STR.emptyAllTitle, UT_STR.emptyAllBody, UT_STR.emptyAllDo, function () { emptyBatch("all"); });
+        } else {
+            openDialog(UT_STR.emptyOneTitle, UT_STR.emptyOneBody, UT_STR.emptyOneDo, function () { emptyBatch(batch); });
+        }
+    }
+    function clearPending() {
+        // Any category change after a preview invalidates it: hide the
+        // Clean button so Clean never runs a selection that was not
+        // previewed. The preview list itself stays for reference.
+        pendingClean = null;
+        cleanBtn.hidden = true;
+    }
+    Array.prototype.forEach.call(
+        document.querySelectorAll('[id^="ut-cat-"]'),
+        function (el) { el.addEventListener("change", clearPending); });
+    previewBtn.addEventListener("click", function () {
+        listsEl.innerHTML = "";
+        pendingClean = null;
+        cleanBtn.hidden = true;
+        var cats = selectedCats();
+        startJob("scan", { categories: JSON.stringify(cats) }, null);
+    });
+    cleanBtn.addEventListener("click", function () {
+        if (!pendingClean || !lastScan) { return; }
+        var cats = lastScan.categories || {};
+        var trashN = 0;
+        var trashBytes = 0;
+        var delN = 0;
+        pendingClean.cats.forEach(function (c) {
+            var cat = cats[c] || { files: 0, bytes: 0 };
+            if (c === "error_logs") { trashN += cat.files; trashBytes += cat.bytes; }
+            else if (c === "usertools_old") { delN += cat.files; }
+            else { trashN += cat.files; trashBytes += cat.bytes; }
+        });
+        if (trashN + delN <= 0) { return; }
+        var body = tok(tok(tok(UT_STR.confirmBodyMany, "COUNT", trashN), "SIZE", fmtBytes(trashBytes)), "DEL", delN);
+        var params = { categories: JSON.stringify(pendingClean.cats) };
+        openDialog(UT_STR.confirmTitle, body, UT_STR.cleanApply, function () {
+            pendingClean = null;
+            cleanBtn.hidden = true;
+            startJob("clean", params, null);
+        });
+    });
+    cancelBtn.addEventListener("click", function () {
+        if (!currentJob || !currentKind) { return; }
+        var kind = currentKind;
+        setBanner("warn", UT_STR.cancelling);
+        UserTools.callApi(apiFor(kind, "cancel"), { job_id: currentJob }, "POST").then(function () {
+            if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+            pollJob(null);
+        }).catch(function (err) {
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    });
+    emptyAllBtn.addEventListener("click", function () { confirmEmpty("all"); });
+    // Reattach to a running job after a page reload.
+    try {
+        var last = window.localStorage.getItem(SCAN_KEY) || window.localStorage.getItem(CLEAN_KEY);
+        if (last) {
+            currentJob = last;
+            currentKind = window.localStorage.getItem(SCAN_KEY) ? "scan" : "clean";
+            setBusy(true);
+            pollJob(null);
+        }
+    } catch (e) { /* ignore */ }
+    refreshTrash();
+});
+</script>

@@ -44,6 +44,8 @@ sub write_pair {
             enable_shell => '1', allowed_shell_modes => 'disabled,jailed',
             enable_fix_home => '0', enable_bulk_perms => '1',
             enable_ownership_report => '1', enable_app_helper => '1',
+            enable_space_cleaner => '0', cleaner_log_min_mb => '50',
+            cleaner_trash_days => '7',
             allow_user_app_docroot => '0', app_packages => 'webapp, p1',
             max_job_seconds => '3600', enable_update_check => '0',
             update_repo => '', normal_shell_users => 'alice,bob',
@@ -54,6 +56,9 @@ sub write_pair {
         $pdir
     );
     is_deeply( $errs, [], 'valid input passes' );
+    is( $clean->{enable_space_cleaner}, '0', 'space switch kept' );
+    is( $clean->{cleaner_log_min_mb},  '50', 'log floor kept' );
+    is( $clean->{cleaner_trash_days},  '7', 'trash days kept' );
     is( $clean->{app_packages}, 'webapp,p1', 'lists normalized' );
     is( $clean->{normal_shell_users}, 'alice,bob', 'user list kept' );
     is( $clean->{composer_path}, '/usr/local/bin/composer', 'absolute composer path kept' );
@@ -65,6 +70,8 @@ sub write_pair {
         enable_shell => '1', allowed_shell_modes => 'disabled,jailed',
         enable_fix_home => '1', enable_bulk_perms => '1',
         enable_ownership_report => '1', enable_app_helper => '1',
+        enable_space_cleaner => '0', cleaner_log_min_mb => '50',
+        cleaner_trash_days => '7',
         allow_user_app_docroot => '0', app_packages => '',
         max_job_seconds => '3600', enable_update_check => '0',
         update_repo => '', normal_shell_users => '',
@@ -96,6 +103,8 @@ sub write_pair {
             enable_shell => '2', allowed_shell_modes => 'turbo,,',
             enable_fix_home => '1', enable_bulk_perms => '1',
             enable_ownership_report => '1', enable_app_helper => '1',
+            enable_space_cleaner => '1', cleaner_log_min_mb => '0',
+            cleaner_trash_days => '91',
             allow_user_app_docroot => '0', app_packages => 'ok,bad user!',
             max_job_seconds => '30', enable_update_check => '0',
             update_repo => 'not a repo', normal_shell_users => 'root!',
@@ -111,6 +120,10 @@ sub write_pair {
     ok( ( grep { /update_repo/ } @$errs ) ? 1 : 0, 'bad repo reported' );
     ok( ( grep { /normal_shell_users/ } @$errs ) ? 1 : 0, 'bad username reported' );
     ok( ( grep { /composer_path/ } @$errs ) ? 1 : 0, 'bad path reported' );
+    ok( ( grep { /cleaner_log_min_mb/ } @$errs ) ? 1 : 0, 'bad log floor reported' );
+    ok( ( grep { /cleaner_trash_days/ } @$errs ) ? 1 : 0, 'bad trash days reported' );
+    ok( !exists $clean->{cleaner_log_min_mb}, 'bad log floor never written' );
+    ok( !exists $clean->{cleaner_trash_days}, 'bad trash days never written' );
 
     # Packages are validated against the existing package files.
     ( $clean, $errs ) = $Pkg->can('validate_settings')->(
@@ -118,6 +131,8 @@ sub write_pair {
             enable_shell => '1', allowed_shell_modes => 'disabled,jailed',
             enable_fix_home => '1', enable_bulk_perms => '1',
             enable_ownership_report => '1', enable_app_helper => '1',
+            enable_space_cleaner => '0', cleaner_log_min_mb => '50',
+            cleaner_trash_days => '7',
             allow_user_app_docroot => '0', app_packages => 'reseller_gold',
             max_job_seconds => '3600', enable_update_check => '0',
             update_repo => '', normal_shell_users => '',
@@ -154,6 +169,8 @@ sub write_pair {
             enable_shell => '0', allowed_shell_modes => 'disabled,jailed,normal',
             enable_fix_home => '1', enable_bulk_perms => '1',
             enable_ownership_report => '1', enable_app_helper => '1',
+            enable_space_cleaner => '0', cleaner_log_min_mb => '50',
+            cleaner_trash_days => '7',
             allow_user_app_docroot => '1', app_packages => 'webapp',
             max_job_seconds => '7200', enable_update_check => '1',
             update_repo => 'someone/usertools-for-cpanel', normal_shell_users => 'alice',
@@ -367,6 +384,8 @@ sub write_pair {
             settings => { enable_shell => '1', allowed_shell_modes => 'disabled,jailed',
                 enable_fix_home => '1', enable_bulk_perms => '1',
                 enable_ownership_report => '1', enable_app_helper => '1',
+                enable_space_cleaner => '1', cleaner_log_min_mb => '50',
+                cleaner_trash_days => '7',
                 allow_user_app_docroot => '0', app_packages => '',
                 max_job_seconds => '3600', enable_update_check => '0',
                 update_repo => '', normal_shell_users => '', ssh_port => '2222',
@@ -395,6 +414,10 @@ sub write_pair {
     like( $out, qr/Apache License/, 'licence footer kept' );
     like( $out, qr/second &lt;line&gt;/, 'audit escaped' );
     like( $out, qr/name="token" value="abc123"/, 'token echoed' );
+    like( $out, qr/name="enable_space_cleaner"/, 'space switch field rendered' );
+    like( $out, qr/name="cleaner_log_min_mb"[^>]*value="50"/, 'log floor field rendered' );
+    like( $out, qr/name="cleaner_trash_days"[^>]*value="7"/, 'trash days field rendered' );
+    like( $out, qr/usertools_space_cleaner/, 'space feature listed' );
     like( $out, qr/<form method="post" action="">/, 'forms post relatively (token stays in path)' );
     unlike( $out, qr/<form[^>]*action="https?:/, 'no absolute form targets' );
 
@@ -560,6 +583,8 @@ sub write_pair {
         enable_shell => '1', allowed_shell_modes => 'disabled,jailed',
         enable_fix_home => '1', enable_bulk_perms => '1',
         enable_ownership_report => '1', enable_app_helper => '1',
+        enable_space_cleaner => '0', cleaner_log_min_mb => '50',
+        cleaner_trash_days => '7',
         allow_user_app_docroot => '0', app_packages => '',
         max_job_seconds => '3600', enable_update_check => '0',
         update_repo => '', normal_shell_users => '',
@@ -744,8 +769,8 @@ sub write_pair {
         local *Cpanel::Template::process_template = sub { push @FakeU::CALLS, [@_]; return 1; };
         @FakeU::CALLS = ();
         local $ENV{REQUEST_METHOD} = 'POST';
-        local $ENV{CONTENT_LENGTH} = length('action=save&enable_shell=1&allowed_shell_modes=disabled%2Cjailed&enable_fix_home=1&enable_bulk_perms=1&enable_ownership_report=1&enable_app_helper=1&allow_user_app_docroot=0&app_packages=&max_job_seconds=3600&enable_update_check=0&update_repo=&auto_update=1&auto_update_scope=patch&composer_path=&composer_lift_disable_functions=0');
-        open my $in, '<', \'action=save&enable_shell=1&allowed_shell_modes=disabled%2Cjailed&enable_fix_home=1&enable_bulk_perms=1&enable_ownership_report=1&enable_app_helper=1&allow_user_app_docroot=0&app_packages=&max_job_seconds=3600&enable_update_check=0&update_repo=&auto_update=1&auto_update_scope=patch&composer_path=&composer_lift_disable_functions=0' or die $!;
+        local $ENV{CONTENT_LENGTH} = length('action=save&enable_shell=1&allowed_shell_modes=disabled%2Cjailed&enable_fix_home=1&enable_bulk_perms=1&enable_ownership_report=1&enable_app_helper=1&enable_space_cleaner=0&cleaner_log_min_mb=50&cleaner_trash_days=7&allow_user_app_docroot=0&app_packages=&max_job_seconds=3600&enable_update_check=0&update_repo=&auto_update=1&auto_update_scope=patch&composer_path=&composer_lift_disable_functions=0');
+        open my $in, '<', \'action=save&enable_shell=1&allowed_shell_modes=disabled%2Cjailed&enable_fix_home=1&enable_bulk_perms=1&enable_ownership_report=1&enable_app_helper=1&enable_space_cleaner=0&cleaner_log_min_mb=50&cleaner_trash_days=7&allow_user_app_docroot=0&app_packages=&max_job_seconds=3600&enable_update_check=0&update_repo=&auto_update=1&auto_update_scope=patch&composer_path=&composer_lift_disable_functions=0' or die $!;
         local *STDIN = $in;
         my $out = '';
         open my $cap, '>', \$out or die $!;

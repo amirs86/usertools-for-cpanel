@@ -63,5 +63,18 @@
         "featuremanager": 1,
         "feature": "usertools_app_helper",
         "description": "Look after your web applications: maintenance commands, permissions and safety checks."
+    },
+    {
+        "icon": "space_cleaner.svg",
+        "group_id": "files",
+        "order": 1,
+        "name": "Space Cleaner",
+        "type": "link",
+        "id": "usertools_space_cleaner_page",
+        "key": "usertools_space_cleaner",
+        "uri": "user_tools/space_cleaner.html.tt",
+        "featuremanager": 1,
+        "feature": "usertools_space_cleaner",
+        "description": "Preview and reclaim disk space and inodes (caches, big logs, crash dumps), with trash and restore."
     }
 ]

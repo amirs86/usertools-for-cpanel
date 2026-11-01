@@ -1,0 +1,11 @@
+<!-- Copyright 2026 Amir Sibaee (https://as86.pro)
+     SPDX-License-Identifier: Apache-2.0
+     Original icon for Space Cleaner: a dustpan catching swept squares.
+     48x48 as required for Jupiter feature icons. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <rect x="2" y="2" width="44" height="44" rx="8" fill="#e8f0fe"/>
+  <rect x="10" y="12" width="8" height="8" rx="1" fill="#1a73e8"/>
+  <rect x="21" y="12" width="8" height="8" rx="1" fill="#1a73e8"/>
+  <rect x="15" y="23" width="8" height="8" rx="1" fill="#34a853"/>
+  <path d="M10 36 L30 36 L26 28 L14 28 Z" fill="none" stroke="#1a73e8" stroke-width="3" stroke-linejoin="round"/>
+</svg>

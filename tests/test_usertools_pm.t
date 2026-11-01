@@ -957,6 +957,173 @@ sub report_wait_done {
     ok( !$ok, 'unknown report cancel refused' );
 }
 
+# --- space cleaner -------------------------------------------------------------
+for my $fn (
+    qw(space_scan_start space_scan_status space_scan_cancel
+    space_clean_start space_clean_status space_clean_cancel
+    space_trash_list space_trash_restore space_trash_empty)
+  )
+{
+    is(
+        $Cpanel::API::UserTools::API{$fn}{needs_feature},
+        'usertools_space_cleaner',
+        "%API declares needs_feature for $fn"
+    );
+}
+
+$Cpanel::API::UserTools::TEST_SPACE_ENGINE =
+  "$FindBin::Bin/../engine/space_cleaner.py";
+
+sub space_make_home {
+    my $home = make_home();
+    make_path("$home/public_html");
+    open my $fh, '>', "$home/policy.conf" or die $!;
+    print $fh "enable_space_cleaner=1\ncleaner_log_min_mb=1\n"
+      . "cleaner_trash_days=7\n";
+    close $fh;
+    return $home;
+}
+
+sub space_wait_done {
+    my ( $status_fn, $job_id ) = @_;
+    for ( 1 .. 200 ) {
+        my $res = FakeResult->new();
+        my $ok = $status_fn->( FakeArgs->new( job_id => $job_id ), $res );
+        if ( $ok && $res->{data}{state} eq 'done' ) {
+            return $res;
+        }
+        select( undef, undef, undef, 0.1 );
+    }
+    die "space job $job_id did not finish";
+}
+
+{
+    # Feature + policy gates.
+    my $home = space_make_home();
+    local $HAVE_FEATURE = 0;
+    my $res = FakeResult->new();
+    my $ok = Cpanel::API::UserTools::space_scan_start(
+        FakeArgs->new( categories => '["error_logs"]' ), $res );
+    ok( !$ok, 'scan refused without the feature' );
+    is( $res->{errors}[0][0], '_ERROR_FEATURE', 'feature error reported' );
+}
+
+{
+    my $home = space_make_home();
+    open my $fh, '>', "$home/policy.conf" or die $!;
+    print $fh "enable_space_cleaner=0\n";
+    close $fh;
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = "$home/policy.conf";
+    my $res = FakeResult->new();
+    my $ok = Cpanel::API::UserTools::space_scan_start(
+        FakeArgs->new( categories => '["error_logs"]' ), $res );
+    ok( !$ok, 'scan refused when the policy switch is off' );
+    like( $res->{errors}[0][0], qr/not enabled/, 'policy error reported' );
+}
+
+{
+    # Unknown categories and empty clean selection are refused.
+    my $home = space_make_home();
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = "$home/policy.conf";
+    my $res = FakeResult->new();
+    my $ok = Cpanel::API::UserTools::space_scan_start(
+        FakeArgs->new( categories => '["nope"]' ), $res );
+    ok( !$ok, 'unknown category refused' );
+    $res = FakeResult->new();
+    $ok = Cpanel::API::UserTools::space_clean_start( FakeArgs->new(), $res );
+    ok( !$ok, 'clean without categories refused' );
+    $res = FakeResult->new();
+    $ok = Cpanel::API::UserTools::space_trash_restore(
+        FakeArgs->new( batch => 'yesterday' ), $res );
+    ok( !$ok, 'bad batch id refused' );
+}
+
+{
+    # Unknown job ids are refused.
+    my $home = space_make_home();
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = "$home/policy.conf";
+    my $res = FakeResult->new();
+    my $ok = Cpanel::API::UserTools::space_scan_status(
+        FakeArgs->new( job_id => 'space-scan-nope' ), $res );
+    ok( !$ok, 'unknown scan job refused' );
+    $res = FakeResult->new();
+    $ok = Cpanel::API::UserTools::space_scan_cancel(
+        FakeArgs->new( job_id => 'space-scan-nope' ), $res );
+    ok( !$ok, 'unknown scan cancel refused' );
+}
+
+{
+    # Scan preview, clean, trash list/restore/empty round trip.
+    my $home = space_make_home();
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = "$home/policy.conf";
+    open my $fh, '>', "$home/public_html/error_log" or die $!;
+    truncate $fh, 2 * 1024 * 1024 or die $!;
+    close $fh;
+    open $fh, '>', "$home/core.1" or die $!;
+    print $fh "x" x 25;
+    close $fh;
+
+    my $res = FakeResult->new();
+    my $ok = Cpanel::API::UserTools::space_scan_start(
+        FakeArgs->new( categories => '["error_logs","core_dumps"]' ), $res );
+    ok( $ok, 'scan start accepted' );
+    like( $res->{data}{job_id}, qr/^space-scan-/, 'scan job id shape' );
+    my $st = space_wait_done( \&Cpanel::API::UserTools::space_scan_status,
+        $res->{data}{job_id} );
+    my $summary = $st->{data}{summary};
+    is( $summary->{command}, 'clean-scan', 'engine ran the scan command' );
+    is( $summary->{categories}{error_logs}{files}, 1, 'scan saw the log' );
+    is( $summary->{categories}{core_dumps}{files},  1, 'scan saw the core' );
+    is( $summary->{counts}{changed}, 0, 'scan changed nothing' );
+
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::space_clean_start(
+        FakeArgs->new( categories => '["error_logs","core_dumps"]' ), $res );
+    ok( $ok, 'clean start accepted' );
+    like( $res->{data}{job_id}, qr/^space-clean-/, 'clean job id shape' );
+    $st = space_wait_done( \&Cpanel::API::UserTools::space_clean_status,
+        $res->{data}{job_id} );
+    $summary = $st->{data}{summary};
+    is( $summary->{counts}{truncated_files}, 1, 'log truncated' );
+    is( $summary->{counts}{trashed_files},   1, 'core trashed' );
+    ok( -s "$home/public_html/error_log" == 0, 'log really truncated' );
+    ok( !-e "$home/core.1", 'core really moved' );
+    my $batch = $summary->{trash_batch};
+    ok( $batch =~ /^[0-9]{8}T[0-9]{6}$/, 'batch id shape' );
+
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::space_trash_list( FakeArgs->new(), $res );
+    ok( $ok, 'trash list accepted' );
+    is( $res->{data}{trash_batches}, 1, 'one batch listed' );
+    is( $res->{data}{batches}[0]{batch}, $batch, 'batch id listed' );
+
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::space_trash_restore(
+        FakeArgs->new( batch => $batch ), $res );
+    ok( $ok, 'restore accepted' );
+    is( $res->{data}{restored}, 1, 'one file restored' );
+    ok( -f "$home/core.1", 'core really back' );
+
+    open $fh, '>', "$home/core.2" or die $!;
+    print $fh "y" x 10;
+    close $fh;
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::space_clean_start(
+        FakeArgs->new( categories => '["core_dumps"]' ), $res );
+    ok( $ok, 'second clean accepted' );
+    space_wait_done( \&Cpanel::API::UserTools::space_clean_status,
+        $res->{data}{job_id} );
+
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::space_trash_empty(
+        FakeArgs->new( batch => 'all' ), $res );
+    ok( $ok, 'empty all accepted' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::space_trash_list( FakeArgs->new(), $res );
+    is( $res->{data}{trash_batches}, 0, 'trash empty' );
+    ok( !-e "$home/core.2", 'second core deleted with its batch' );
+}
+
 # --- CSV rules (Perl mirror of the usertools.js builders) -------------------------------
 # No JS runtime exists in this environment, so the exact escaping and
 # formula-injection rules are pinned here AND asserted present in the

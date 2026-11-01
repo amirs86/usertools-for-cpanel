@@ -32,6 +32,7 @@ our $FEATURE_BULK_PERMS = 'usertools_bulk_perms';
 our $FEATURE_OWNERSHIP_REPORT = 'usertools_ownership_report';
 our $FEATURE_SHELL = 'usertools_shell';
 our $FEATURE_APP_HELPER = 'usertools_app_helper';
+our $FEATURE_SPACE_CLEANER = 'usertools_space_cleaner';
 
 our %API = (
     'home_permissions_check' => { 'needs_feature' => $FEATURE_FIX_HOME },
@@ -44,6 +45,15 @@ our %API = (
     'ownership_report_start'  => { 'needs_feature' => $FEATURE_OWNERSHIP_REPORT },
     'ownership_report_status' => { 'needs_feature' => $FEATURE_OWNERSHIP_REPORT },
     'ownership_report_cancel' => { 'needs_feature' => $FEATURE_OWNERSHIP_REPORT },
+    'space_scan_start'   => { 'needs_feature' => $FEATURE_SPACE_CLEANER },
+    'space_scan_status'  => { 'needs_feature' => $FEATURE_SPACE_CLEANER },
+    'space_scan_cancel'  => { 'needs_feature' => $FEATURE_SPACE_CLEANER },
+    'space_clean_start'  => { 'needs_feature' => $FEATURE_SPACE_CLEANER },
+    'space_clean_status' => { 'needs_feature' => $FEATURE_SPACE_CLEANER },
+    'space_clean_cancel' => { 'needs_feature' => $FEATURE_SPACE_CLEANER },
+    'space_trash_list'    => { 'needs_feature' => $FEATURE_SPACE_CLEANER },
+    'space_trash_restore' => { 'needs_feature' => $FEATURE_SPACE_CLEANER },
+    'space_trash_empty'   => { 'needs_feature' => $FEATURE_SPACE_CLEANER },
     'shell_status' => { 'needs_feature' => $FEATURE_SHELL },
     'shell_set'    => { 'needs_feature' => $FEATURE_SHELL },
     'app_helper_list'      => { 'needs_feature' => $FEATURE_APP_HELPER },
@@ -81,7 +91,15 @@ our %API = (
 
 # Install path of the engine on a cPanel server (install.sh).
 our $ENGINE_PATH = '/usr/local/cpanel/3rdparty/usertools/bin/perm_engine.py';
+our $SPACE_ENGINE_PATH =
+  '/usr/local/cpanel/3rdparty/usertools/bin/space_cleaner.py';
 our $ENGINE_PYTHON = '/usr/bin/python3';
+
+# Fixed Space Cleaner categories: the only selectable things. The engine
+# enforces the same list; anything outside it is never touched.
+our @SPACE_CATEGORIES = qw(
+  error_logs core_dumps app_cache wp_cache dev_caches usertools_old
+);
 
 # Test seams (see tests/test_usertools_pm.t): undef in production.
 # $TEST_ENGINE_BIN/$TEST_ENGINE redirect engine spawns at the repo's engine;
@@ -98,11 +116,13 @@ our $ENGINE_PYTHON = '/usr/bin/python3';
 # $TEST_CRONTAB fakes the crontab binary. In-process UAPI calls
 # (Cpanel::API::execute) are programmed directly in tests; there is no CLI
 # seam because user-context code never shells to `uapi --user=`.
+# $TEST_SPACE_ENGINE fakes the Space Cleaner engine script the same way
+# $TEST_ENGINE fakes the permission engine.
 our ( $TEST_USER, $TEST_HOME, $TEST_ENGINE_BIN, $TEST_ENGINE,
     $TEST_ARTISAN_TIMEOUT, $TEST_PHP_DIR, $TEST_DOMAIN_DATA_DIR,
     $TEST_ENV_BUDGET_SECONDS, $TEST_CPANEL_CONFIG, $TEST_POLICY_FILE,
     $TEST_ALT_PHP_DIR, $TEST_RECIPE_WORKER, $TEST_COMPOSER, $TEST_CRONTAB,
-    $TEST_CAGEFS_MP, $TEST_CAGEFS_CONF_D );
+    $TEST_CAGEFS_MP, $TEST_CAGEFS_CONF_D, $TEST_SPACE_ENGINE );
 
 # Composer locations after the admin-set composer_path: a plain
 # package var so tests can localise it instead of depending on whatever
@@ -920,12 +940,14 @@ sub _proc_is_engine {
     close $fh;
     return 0 unless defined $cmd;
     $cmd =~ s/\0/ /g;
-    return $cmd =~ /perm_engine\.py/ ? 1 : 0;
+    return $cmd =~ /(?:perm_engine|space_cleaner)\.py/ ? 1 : 0;
 }
 
 sub _spawn_engine {
-    my ( $home, $job, $engine_args ) = @_;
+    my ( $home, $job, $engine_args, $engine_bin ) = @_;
     # Double-fork + setsid detach. Returns the worker pid or (undef, reason).
+    # $engine_bin selects the script (Space Cleaner passes its own);
+    # undef keeps the permission engine.
     my ( $rd, $wr );
     if ( !pipe( $rd, $wr ) ) {
         return ( undef, "cannot create pipe: $!" );
@@ -940,7 +962,7 @@ sub _spawn_engine {
         close $rd;
         setsid();
         my $py  = $TEST_ENGINE_BIN // $ENGINE_PYTHON;
-        my $bin = $TEST_ENGINE     // $ENGINE_PATH;
+        my $bin = $engine_bin // $TEST_ENGINE // $ENGINE_PATH;
         my @cmd = ( $py, $bin, @{$engine_args} );
         if ( ( $ENV{USERTOOLS_TESTING} // '' ) eq '1' && defined $TEST_HOME ) {
             push @cmd, '--home', $home;    # test seam only; never on server
@@ -1000,9 +1022,10 @@ sub _gate_caller {
 }
 
 # ---------------------------------------------------------------------------
-# Shared detached-job machinery (tools C and D). The engine does the walking;
-# these helpers spawn it, track job files, report status and cancel. Thin
-# per-tool wrappers validate their own options and build engine argv.
+# Shared detached-job machinery (Bulk, Ownership Report, Space Cleaner).
+# The engine does the walking; these helpers spawn it, track job files,
+# report status and cancel. Thin per-tool wrappers validate their own
+# options and build engine argv.
 # ---------------------------------------------------------------------------
 
 sub _job_status_impl {
@@ -1100,11 +1123,12 @@ sub _job_cancel_impl {
 }
 
 sub _job_spawn_and_record {
-    my ( $result, $tool, $home, $scope_abs, $excludes, $engine_args, $dry_run, $extra ) = @_;
+    my ( $result, $tool, $home, $scope_abs, $excludes, $engine_args, $dry_run, $extra, $engine_bin ) = @_;
     # Shared spawn/grace/meta/prune/answer for tools C and D. The caller has
     # already gated and validated; $engine_args holds the tool-specific argv
     # WITHOUT --json-progress (added here). $extra (optional hashref) merges
-    # tool-specific keys into the job meta.
+    # tool-specific keys into the job meta. $engine_bin (optional) selects
+    # the engine script (Space Cleaner); undef keeps the permission engine.
 
     my $jobs_dir = _jobs_dir($home);
     eval { make_path( $jobs_dir, { mode => 0700 } ) };
@@ -1116,7 +1140,7 @@ sub _job_spawn_and_record {
     my $job = _job_paths( $home, $job_id );
 
     my @full_args = ( @{$engine_args}, '--json-progress', $job->{progress} );
-    my ( $pid, $spawn_err ) = _spawn_engine( $home, $job, \@full_args );
+    my ( $pid, $spawn_err ) = _spawn_engine( $home, $job, \@full_args, $engine_bin );
     if ( !defined $pid ) {
         $result->error( 'Cannot start background job: [_1].', $spawn_err );
         return;
@@ -1555,6 +1579,425 @@ sub ownership_report_cancel {
 
     my ($job_id) = $args->get('job_id');
     return _job_cancel_impl( $result, $home, $uid, $job_id );
+}
+
+# ---------------------------------------------------------------------------
+# Space Cleaner: reclaim disk space and inodes, with trash and restore.
+# The scan and the clean each run as a detached engine job (same
+# single-job lock as the permission engine), reusing the spawn, status
+# and cancel helpers above. Trash listing, restore and empty run
+# synchronously: they only touch the caller's own trash folder, whose
+# batch ids come from the server-side listing (never paths from the
+# request). Like every tool, Space Cleaner is gated by its Feature
+# Manager feature plus the enable_space_cleaner policy key.
+# ---------------------------------------------------------------------------
+
+sub _space_policy_enabled {
+    my ($result) = @_;
+    # Off by default: the WHM policy must explicitly say 1, like the
+    # enable_* switches of the other tools.
+    my $policy = _read_user_policy();
+    if ( ref $policy eq 'HASH'
+        && ( $policy->{enable_space_cleaner} // '' ) eq '1' )
+    {
+        return 1;
+    }
+    $result->error('This feature is not enabled for your account.');
+    return 0;
+}
+
+sub _space_categories_param {
+    my ( $args, $require ) = @_;
+    # Primary shape: one `categories` parameter holding a JSON list.
+    # Repeated `category` parameters are accepted for compatibility.
+    my @collected;
+    my ($packed) = $args->get('categories');
+    if ( defined $packed && $packed ne '' ) {
+        if ( length($packed) > 1024 ) {
+            return ( undef, 'categories list is too long' );
+        }
+        my $list = eval { JSON::PP->new()->decode($packed) };
+        if ($@) {
+            return ( undef, 'categories is not valid JSON' );
+        }
+        if ( ref $list ne 'ARRAY' ) {
+            return ( undef, 'categories must be a JSON list' );
+        }
+        push @collected, @{$list};
+    }
+    my @rep = $args->get('category');
+    for my $e (@rep) {
+        if ( ref $e eq 'ARRAY' ) {
+            push @collected, grep { defined $_ } @{$e};
+        }
+        elsif ( defined $e && $e ne '' ) {
+            push @collected, $e;
+        }
+    }
+    my %valid = map { $_ => 1 } @SPACE_CATEGORIES;
+    my @clean;
+    for my $c (@collected) {
+        if ( !defined $c || !$valid{$c} ) {
+            return ( undef, "unknown category: $c" );
+        }
+        push @clean, $c unless grep { $_ eq $c } @clean;
+    }
+    if ( $require && !@clean ) {
+        return ( undef, 'choose at least one category' );
+    }
+    return ( \@clean, undef );
+}
+
+sub _space_start_busy {
+    my ( $result, $home ) = @_;
+    # A job is already running: reattach instead of spawning into the
+    # engine's exit-3 path, so the page shows progress, not an error.
+    my $live = _find_live_job($home);
+    $result->data(
+        {
+            state  => 'busy',
+            job_id => defined $live ? $live->{id} : undef,
+            $live ? ( categories => $live->{categories} ) : (),
+        }
+    );
+    return 1;
+}
+
+sub _space_engine_args {
+    my ($categories) = @_;
+    my @engine_args =
+      ( map { '--category=' . $_ } @{$categories} );
+    if ( defined $TEST_POLICY_FILE ) {
+        push @engine_args, '--policy', $TEST_POLICY_FILE;
+    }
+    return @engine_args;
+}
+
+sub _space_engine_bin {
+    return $TEST_SPACE_ENGINE // $SPACE_ENGINE_PATH;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   space_scan_start - Preview what could be reclaimed (changes nothing
+#   except pruning trash batches older than the policy).
+#-------------------------------------------------------------------------------------------------
+sub space_scan_start {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SPACE_CLEANER );
+    return unless _space_policy_enabled($result);
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ( $categories, $cat_err ) = _space_categories_param( $args, 0 );
+    if ( !defined $categories ) {
+        $result->error( 'Invalid categories: [_1].', $cat_err );
+        return;
+    }
+    if ( !@{$categories} ) {
+        $categories = [@SPACE_CATEGORIES];
+    }
+    if ( _engine_running($home) ) {
+        return _space_start_busy( $result, $home );
+    }
+
+    my @engine_args = ( 'clean-scan', _space_engine_args($categories) );
+    return _job_spawn_and_record(
+        $result, 'space-scan', $home, $home, [], \@engine_args,
+        1, { categories => $categories }, _space_engine_bin() );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   space_scan_status - Progress JSON plus the final scan summary.
+#-------------------------------------------------------------------------------------------------
+sub space_scan_status {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SPACE_CLEANER );
+    return unless _space_policy_enabled($result);
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    return _job_status_impl( $result, $home, $job_id, undef );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   space_scan_cancel - Stop the caller's own scan (same verification as
+#   the other cancel calls).
+#-------------------------------------------------------------------------------------------------
+sub space_scan_cancel {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SPACE_CLEANER );
+    return unless _space_policy_enabled($result);
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    return _job_cancel_impl( $result, $home, $uid, $job_id );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   space_clean_start - Move candidates to the trash, truncate big logs
+#   and delete the plugin's own old files (explicit categories required).
+#-------------------------------------------------------------------------------------------------
+sub space_clean_start {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SPACE_CLEANER );
+    return unless _space_policy_enabled($result);
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ( $categories, $cat_err ) = _space_categories_param( $args, 1 );
+    if ( !defined $categories ) {
+        $result->error( 'Invalid categories: [_1].', $cat_err );
+        return;
+    }
+    if ( _engine_running($home) ) {
+        return _space_start_busy( $result, $home );
+    }
+
+    my @engine_args = ( 'clean-run', _space_engine_args($categories) );
+    return _job_spawn_and_record(
+        $result, 'space-clean', $home, $home, [], \@engine_args,
+        0, { categories => $categories }, _space_engine_bin() );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   space_clean_status - Progress JSON plus the final clean summary.
+#-------------------------------------------------------------------------------------------------
+sub space_clean_status {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SPACE_CLEANER );
+    return unless _space_policy_enabled($result);
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    return _job_status_impl( $result, $home, $job_id, undef );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   space_clean_cancel - Stop the caller's own clean run.
+#-------------------------------------------------------------------------------------------------
+sub space_clean_cancel {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SPACE_CLEANER );
+    return unless _space_policy_enabled($result);
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    return _job_cancel_impl( $result, $home, $uid, $job_id );
+}
+
+sub _space_valid_batch {
+    my ($batch) = @_;
+    return ( defined $batch && $batch =~ /^[0-9]{8}T[0-9]{6}$/ ) ? $batch : undef;
+}
+
+sub _space_trash_entries {
+    my ( $home, $batch ) = @_;
+    # (bytes, files): regular files under one batch, never following links.
+    my $root  = "$home/.usertools-trash/$batch";
+    my $total = 0;
+    my $files = 0;
+    my @stack = ($root);
+    while (@stack) {
+        my $cur = pop @stack;
+        my @st = lstat $cur;
+        next unless @st;
+        if ( -l _ ) {
+            next;
+        }
+        if ( -d _ ) {
+            my $dh;
+            if ( !opendir( $dh, $cur ) ) {
+                next;
+            }
+            while ( my $name = readdir $dh ) {
+                next if $name eq '.' || $name eq '..';
+                push @stack, "$cur/$name";
+            }
+            closedir $dh;
+            next;
+        }
+        if ( -f _ ) {
+            $total += $st[7];
+            $files++;
+        }
+    }
+    return ( $total, $files );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   space_trash_list - Trash batches with sizes (synchronous, read-only).
+#-------------------------------------------------------------------------------------------------
+sub space_trash_list {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SPACE_CLEANER );
+    return unless _space_policy_enabled($result);
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my $trash = "$home/.usertools-trash";
+    my @batches;
+    if ( opendir( my $dh, $trash ) ) {
+        while ( my $name = readdir $dh ) {
+            next unless _space_valid_batch($name);
+            my $dir = "$trash/$name";
+            my @st = lstat $dir;
+            next unless @st && !-l _ && -d _;
+            my ( $bytes, $files ) = _space_trash_entries( $home, $name );
+            push @batches,
+              {
+                batch   => $name,
+                created => $st[9],
+                bytes   => $bytes + 0,
+                files   => $files + 0,
+              };
+        }
+        closedir $dh;
+    }
+    @batches = sort { $b->{batch} cmp $a->{batch} } @batches;
+    my $total = 0;
+    $total += $_->{bytes} for @batches;
+    $result->data(
+        {
+            batches       => \@batches,
+            trash_bytes   => $total + 0,
+            trash_batches => scalar(@batches) + 0,
+        }
+    );
+    return 1;
+}
+
+sub _run_space_sync {
+    my ( $home, $args ) = @_;
+    # Run the Space Cleaner engine synchronously (restore/empty only touch
+    # the caller's own trash folder, so no detached job is needed). Returns
+    # the decoded summary or (undef, reason).
+    my $py  = $TEST_ENGINE_BIN // $ENGINE_PYTHON;
+    my $bin = $TEST_SPACE_ENGINE // $SPACE_ENGINE_PATH;
+    my @cmd = ( $py, $bin, @{$args} );
+    if ( ( $ENV{USERTOOLS_TESTING} // '' ) eq '1' && defined $TEST_HOME ) {
+        push @cmd, '--home', $home;
+    }
+    if ( defined $TEST_POLICY_FILE ) {
+        push @cmd, '--policy', $TEST_POLICY_FILE;
+    }
+    my $env = {
+        PATH               => '/usr/bin:/bin',
+        USERTOOLS_TESTING  => ( $ENV{USERTOOLS_TESTING} // '' ),
+    };
+    my $run = _spawn_sync( \@cmd, $home, $env, 300, 1048576 );
+    if ( !$run || $run->{error} ) {
+        return ( undef, $run ? $run->{error} : 'could not start the engine' );
+    }
+    if ( $run->{timed_out} ) {
+        return ( undef, 'the engine run timed out' );
+    }
+    if ( $run->{exit} != 0 ) {
+        return ( undef, 'the engine run failed' );
+    }
+    my $summary = eval { JSON::PP->new()->decode( $run->{output} ) };
+    if ( $@ || ref $summary ne 'HASH' ) {
+        return ( undef, 'the engine returned an unreadable summary' );
+    }
+    return ( $summary, undef );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   space_trash_restore - Put one trash batch back (conflicts reported,
+#   never overwritten).
+#-------------------------------------------------------------------------------------------------
+sub space_trash_restore {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SPACE_CLEANER );
+    return unless _space_policy_enabled($result);
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($batch_p) = $args->get('batch');
+    my $batch = _space_valid_batch($batch_p);
+    if ( !defined $batch ) {
+        $result->error('Invalid batch: pick one from the trash list.');
+        return;
+    }
+    my ( $summary, $err ) =
+      _run_space_sync( $home, [ 'trash-restore', '--batch', $batch ] );
+    if ( !defined $summary ) {
+        $result->error( 'Restore failed: [_1].', $err );
+        return;
+    }
+    my $counts = $summary->{counts} || {};
+    $result->data(
+        {
+            batch     => $batch,
+            restored  => $counts->{restored_files} + 0,
+            conflicts => $counts->{restore_conflicts} + 0,
+            state     => 'done',
+        }
+    );
+    return 1;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   space_trash_empty - Delete one batch or every batch (cannot be undone).
+#-------------------------------------------------------------------------------------------------
+sub space_trash_empty {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SPACE_CLEANER );
+    return unless _space_policy_enabled($result);
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($batch_p) = $args->get('batch');
+    my @engine_args = ('trash-empty');
+    my $which;
+    if ( !defined $batch_p || $batch_p eq '' || $batch_p eq 'all' ) {
+        push @engine_args, '--all';
+        $which = 'all';
+    }
+    else {
+        my $batch = _space_valid_batch($batch_p);
+        if ( !defined $batch ) {
+            $result->error('Invalid batch: pick one from the trash list.');
+            return;
+        }
+        push @engine_args, '--batch', $batch;
+        $which = $batch;
+    }
+    my ( $summary, $err ) = _run_space_sync( $home, \@engine_args );
+    if ( !defined $summary ) {
+        $result->error( 'Empty failed: [_1].', $err );
+        return;
+    }
+    my $counts = $summary->{counts} || {};
+    $result->data(
+        {
+            emptied => $counts->{changed} + 0,
+            batch   => $which,
+            state   => 'done',
+        }
+    );
+    return 1;
 }
 
 # ---------------------------------------------------------------------------

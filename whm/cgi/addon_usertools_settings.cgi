@@ -58,6 +58,9 @@ our %KEYS = (
     enable_bulk_perms       => [ 'conf', 'bool' ],
     enable_ownership_report => [ 'conf', 'bool' ],
     enable_app_helper       => [ 'conf', 'bool' ],
+    enable_space_cleaner    => [ 'conf', 'bool' ],
+    cleaner_log_min_mb      => [ 'conf', 'megabytes' ],
+    cleaner_trash_days      => [ 'conf', 'days' ],
     allow_user_app_docroot  => [ 'conf', 'bool' ],
     app_packages            => [ 'conf', 'pkglist' ],
     max_job_seconds         => [ 'conf', 'seconds' ],
@@ -130,6 +133,8 @@ sub read_settings {
         enable_shell => '1', allowed_shell_modes => 'disabled,jailed',
         enable_fix_home => '1', enable_bulk_perms => '1',
         enable_ownership_report => '1', enable_app_helper => '1',
+        enable_space_cleaner => '0', cleaner_log_min_mb => '50',
+        cleaner_trash_days => '7',
         allow_user_app_docroot => '0', app_packages => '',
         max_job_seconds => '3600', enable_update_check => '0',
         update_repo => '', auto_update => '0', auto_update_scope => 'patch',
@@ -230,6 +235,25 @@ sub validate_settings {
             }
             else {
                 push @errors, "$key must be 60..86400 seconds";
+            }
+        }
+        elsif ( $kind eq 'megabytes' ) {
+            # Log size floor for the Space Cleaner (matches the engine's
+            # fenced range; out-of-range falls back to the default there).
+            if ( $v =~ /^\d+$/ && $v >= 1 && $v <= 1024 ) {
+                $clean{$key} = "$v";
+            }
+            else {
+                push @errors, "$key must be 1..1024 MB";
+            }
+        }
+        elsif ( $kind eq 'days' ) {
+            # Trash age for the Space Cleaner (matches the engine's range).
+            if ( $v =~ /^\d+$/ && $v >= 1 && $v <= 90 ) {
+                $clean{$key} = "$v";
+            }
+            else {
+                push @errors, "$key must be 1..90 days";
             }
         }
         elsif ( $kind eq 'repo' ) {
