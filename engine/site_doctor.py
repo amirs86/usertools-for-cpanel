@@ -182,6 +182,7 @@ def new_clean_summary(command, home, dry_run):
             "skipped_hardlink": 0,
             "probed": 0,
             "exposed": 0,
+            "not_checked": 0,
             "moved": 0,
             "restored": 0,
             "restore_conflicts": 0,
@@ -260,14 +261,17 @@ def _open_conn(ip, port, host, timeout, use_tls):
     return conn
 
 
-def _same_host_https_path(location, host, https_port):
-    # type: (object, str, int) -> object
-    """Path to re-probe when a redirect points at the same host over TLS.
+def _follow_target(location, host, https_port, alt_hosts):
+    # type: (object, str, int, object) -> object
+    """Decide whether a 3xx Location deserves the single same-host hop.
 
-    Returns None unless the Location is exactly https://<host>[:port]
-    with a sane port and path: no other host, no userinfo, no NUL, no
-    dot-dot segments. Only the query string may ride along; the
-    fragment never leaves the client.
+    Returns (use_host, None) or None. Follows only https URLs whose host
+    is the probed domain itself, or its www/bare counterpart when that
+    counterpart is in the account's server-side domain list (alt_hosts,
+    any case). Takes only the scheme and host from the Location; the
+    path re-probed is always the ORIGINAL one, so a
+    redirect-everything-to-/ host cannot make an unserved file look
+    served. The TLS port must match exactly. No DNS is ever consulted.
     """
     if not location or not isinstance(location, str):
         return None
@@ -277,8 +281,6 @@ def _same_host_https_path(location, host, https_port):
         return None
     if parts.scheme.lower() != "https":
         return None
-    if (parts.hostname or "").lower() != host.lower():
-        return None
     if parts.username or parts.password:
         return None
     try:
@@ -287,14 +289,23 @@ def _same_host_https_path(location, host, https_port):
         return None
     if port != https_port:
         return None
-    path = parts.path or "/"
-    if "\x00" in path:
+    if not parts.hostname:
         return None
-    if ".." in path.split("/"):
+    target = parts.hostname.lower()
+    if target == host.lower():
+        return (host, None)
+    base = host.lower()
+    if base.startswith("www."):
+        counterpart = base[4:]
+    else:
+        counterpart = "www." + base
+    allowed = set()
+    if alt_hosts:
+        allowed = set(
+            [h.lower() for h in alt_hosts if isinstance(h, str)])
+    if target != counterpart or target not in allowed:
         return None
-    if parts.query:
-        path += "?" + parts.query
-    return path
+    return (parts.hostname, None)
 
 
 def _probe_scheme(ip, port, host, quoted, timeout, use_tls):
@@ -364,32 +375,40 @@ def _probe_scheme(ip, port, host, quoted, timeout, use_tls):
             "error": None}
 
 
-def http_probe(ip, port, host, path, timeout, https_port=None):
-    # type: (str, int, str, str, float, object) -> dict
+def http_probe(ip, port, host, path, timeout, https_port=None,
+             alt_hosts=None):
+    # type: (str, int, str, str, float, object, object) -> dict
     """Probe one URL path: HEAD, then a capped GET fallback.
 
     Returns {status, location, ms, length, exposed, error, scheme}.
     exposed is true only when the server actually serves the bytes
-    (200/206). When plain HTTP answers 3xx to https://<same host>,
-    the probe is repeated once over TLS to the same literal IP
-    (SNI = host, never verified) and that verdict wins; scheme
-    records which one answered. Anything else is reported as-is —
-    only the first redirect is ever shown, never followed further.
-    Bodies are read up to READ_CAP and discarded, never stored.
-    https_port overrides the TLS port (tests point it at a fixture;
-    the default is 443).
+    (200/206). When plain HTTP answers 3xx to https://<same host> (or
+    to its www/bare counterpart when that name belongs to the account,
+    see alt_hosts), the probe is repeated once over TLS to the same
+    literal IP (SNI and Host set to the followed name, never verified)
+    and that verdict wins; scheme records which one answered. The hop
+    always re-probes the ORIGINAL path, never the redirect target.
+    Anything else is reported as-is: only the first redirect is ever
+    shown, never followed further. Bodies are read up to READ_CAP and
+    discarded, never stored. https_port overrides the TLS port (tests
+    point it at a fixture; the default is 443).
     """
     if https_port is None:
         https_port = HTTPS_PORT
+    if "\x00" in path or ".." in path.split("/"):
+        return {"status": 0, "location": None, "ms": None, "length": None,
+                "exposed": False,
+                "error": "refusing to probe an unsafe path",
+                "scheme": "http"}
     quoted = urllib.parse.quote(path, safe="/")
     first = _probe_scheme(ip, port, host, quoted, timeout, False)
     first["scheme"] = "http"
     if first["status"] in (301, 302, 303, 307, 308):
-        hop = _same_host_https_path(first.get("location"), host,
-                                    https_port)
+        hop = _follow_target(first.get("location"), host, https_port,
+                             alt_hosts)
         if hop is not None:
-            second = _probe_scheme(ip, https_port, host,
-                                   urllib.parse.quote(hop, safe="/?=&%"),
+            use_host, _hop_path = hop
+            second = _probe_scheme(ip, https_port, use_host, quoted,
                                    timeout, True)
             second["scheme"] = "https"
             if second["status"] == 0 and second.get("error"):
@@ -736,8 +755,9 @@ class Checker(object):
     """Per-domain fact gathering with a shared deadline."""
 
     def __init__(self, home, uid, summary, progress_cb, deadline,
-                 progress_every, top_dev, timeout, https_port=HTTPS_PORT):
-        # type: (str, int, dict, object, object, int, int, float, int) -> None
+                 progress_every, top_dev, timeout, https_port=HTTPS_PORT,
+                 domains=None):
+        # type: (str, int, dict, object, object, int, int, float, int, object) -> None
         self.home = home
         self.uid = uid
         self.summary = summary
@@ -747,6 +767,7 @@ class Checker(object):
         self.top_dev = top_dev
         self.timeout = timeout
         self.https_port = https_port
+        self.domains = domains
         self.done = 0
 
     def poll(self):
@@ -774,7 +795,8 @@ class Checker(object):
         rec["docroot"] = docroot
         if docroot.get("usable"):
             rec["http"] = http_probe(target["ip"], target["port"], domain,
-                                     "/", self.timeout, self.https_port)
+                                     "/", self.timeout, self.https_port,
+                                     self.domains)
             rec["htaccess"] = self.check_htaccess(
                 docroot["abs"], docroot["hrel"])
             rec["logs"] = self.check_logs(domain, docroot["abs"],
@@ -895,8 +917,13 @@ def doctor_scan(home, uid, summary, progress_cb, deadline, progress_every,
                 top_dev, timeout, targets, https_port=HTTPS_PORT):
     # type: (str, int, dict, object, object, int, int, float, list, int) -> list
     """Fact records for up to MAX_DOMAINS websites inside the budget."""
+    domains = set()
+    for target in targets:
+        if isinstance(target.get("domain"), str):
+            domains.add(target["domain"].lower())
     checker = Checker(home, uid, summary, progress_cb, deadline,
-                      progress_every, top_dev, timeout, https_port)
+                      progress_every, top_dev, timeout, https_port,
+                      domains)
     records = []
     for pos, target in enumerate(targets[:MAX_DOMAINS]):
         if deadline is not None and time.monotonic() >= deadline:
@@ -966,19 +993,48 @@ def is_blockable_name(text):
     # type: (object) -> bool
     """True when text may be embedded in a .htaccess deny rule.
 
-    Only printable ASCII without `"`, `'`, backslash or backtick: a
-    quote would close the rule's quoting and a newline would write
-    extra lines, either of which makes Apache reject the whole file
-    (site down). Anything else is moved, never blocked.
+    Only printable ASCII without `"`, `'`, backslash, backtick, `%` or
+    `$`: a quote would close the rule's quoting and a newline would
+    write extra lines, either of which makes Apache reject the whole
+    file (site down). Inside an <If> expression `%{NAME}` is variable
+    interpolation and `$0`..`$9` are regex back-references, even in
+    single quotes, so those names are Move-only too. Anything else is
+    moved, never blocked.
     """
     if not text or not isinstance(text, str):
         return False
     for ch in text:
-        if ch in "\"'\\`":
+        if ch in "\"'\\`%$":
             return False
         if ord(ch) < 0x20 or ord(ch) > 0x7E:
             return False
     return True
+
+
+def finding_state(probe):
+    # type: (dict) -> tuple
+    """(state, reason) for a probe: "exposed", "not_exposed", or
+    "not_checked". Only 401/403/404/410 count as safe; redirects,
+    failed HTTPS hops and server errors are "not checked" with the
+    reason spelled out, never a clean bill of health.
+    """
+    if probe.get("exposed"):
+        return ("exposed", None)
+    status = probe.get("status") or 0
+    if status in (401, 403, 404, 410):
+        return ("not_exposed", None)
+    if status in (301, 302, 303, 307, 308):
+        location = probe.get("location") or "elsewhere"
+        if probe.get("error"):
+            return ("not_checked",
+                    "redirects to %s (%s)" % (location, probe["error"]))
+        return ("not_checked", "redirects to %s" % location)
+    if status >= 500:
+        return ("not_checked", "server error %d" % status)
+    if status == 0:
+        err = probe.get("error") or "no answer"
+        return ("not_checked", "not checked: %s" % err)
+    return ("not_checked", "unexpected status %d" % status)
 
 
 class ExposedWalker(object):
@@ -986,8 +1042,8 @@ class ExposedWalker(object):
 
     def __init__(self, home, uid, summary, progress_cb, deadline,
                  progress_every, top_dev, timeout, ip, port, domain,
-                 https_port=HTTPS_PORT):
-        # type: (str, int, dict, object, object, int, int, float, str, int, str, int) -> None
+                 https_port=HTTPS_PORT, alt_hosts=None):
+        # type: (str, int, dict, object, object, int, int, float, str, int, str, int, object) -> None
         self.home = home
         self.uid = uid
         self.summary = summary
@@ -1000,6 +1056,7 @@ class ExposedWalker(object):
         self.port = port
         self.domain = domain
         self.https_port = https_port
+        self.alt_hosts = alt_hosts
         self.done = 0
         self.findings = []  # type: list
 
@@ -1082,6 +1139,9 @@ class ExposedWalker(object):
         "likely", since front controllers often answer 200 for any
         path (soft 404). blockable is false for names that can never
         appear in a .htaccess rule; those are moved, never blocked.
+        state is "exposed", "not_exposed" (401/403/404/410 only), or
+        "not_checked" with a reason: redirects, failed HTTPS hops and
+        server errors never read as safe.
         """
         if self.deadline is not None and time.monotonic() >= self.deadline:
             self.summary["counts"]["errors"] += 1
@@ -1090,7 +1150,7 @@ class ExposedWalker(object):
             return
         url_path = "/" + probe_path_for(rrel, kind)
         probe = http_probe(self.ip, self.port, self.domain, url_path,
-                           self.timeout, self.https_port)
+                           self.timeout, self.https_port, self.alt_hosts)
         self.summary["counts"]["probed"] += 1
         if probe["exposed"]:
             self.summary["counts"]["exposed"] += 1
@@ -1101,6 +1161,9 @@ class ExposedWalker(object):
                 confidence = "confirmed"
             else:
                 confidence = "likely"
+        state, reason = finding_state(probe)
+        if state == "not_checked":
+            self.summary["counts"]["not_checked"] += 1
         self.findings.append({
             "domain": self.domain,
             "relpath": hrel,
@@ -1112,6 +1175,8 @@ class ExposedWalker(object):
             "exposed": probe["exposed"],
             "scheme": probe.get("scheme", "http"),
             "confidence": confidence,
+            "state": state,
+            "reason": reason,
             "blockable": is_blockable_name(hrel)
             and is_blockable_name(url_path),
         })
@@ -1178,6 +1243,10 @@ def exposed_scan(home, uid, summary, progress_cb, deadline, progress_every,
                  top_dev, timeout, targets, https_port=HTTPS_PORT):
     # type: (str, int, dict, object, object, int, int, float, list, int) -> list
     """Walk every docroot and probe each risky name (10-domain budget)."""
+    domains = set()
+    for target in targets:
+        if isinstance(target.get("domain"), str):
+            domains.add(target["domain"].lower())
     findings = []
     for pos, target in enumerate(targets[:MAX_DOMAINS]):
         if deadline is not None and time.monotonic() >= deadline:
@@ -1219,7 +1288,7 @@ def exposed_scan(home, uid, summary, progress_cb, deadline, progress_every,
         walker = ExposedWalker(home, uid, summary, progress_cb, deadline,
                               progress_every, top_dev, timeout,
                               target["ip"], target["port"],
-                              target["domain"], https_port)
+                              target["domain"], https_port, domains)
         fd = open_dir(real, (st.st_dev, st.st_ino), hrel, summary)
         if fd is None:
             continue
@@ -1544,6 +1613,9 @@ def build_parser():
                         help="probe port (re-probe only)")
     parent.add_argument("--host", default=None,
                         help="website name sent as Host (re-probe only)")
+    parent.add_argument("--alt-host", action="append", default=[],
+                        help="extra account hostname the probe may follow "
+                             "a redirect to (re-probe only; repeatable)")
     parent.add_argument("--path", default=None,
                         help="URL path to probe, starting with / (re-probe only)")
     parent.add_argument("--timeout", type=float, default=REQUEST_TIMEOUT,
@@ -1713,8 +1785,16 @@ def main(argv=None):
             if not re.match(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$",
                             args.host):
                 raise pe.UsageError("bad probe host")
+            alt_hosts = []
+            for extra in args.alt_host or []:
+                if not re.match(
+                        r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$",
+                        extra):
+                    raise pe.UsageError("bad --alt-host name")
+                alt_hosts.append(extra)
             summary["probe"] = http_probe(args.ip, args.port, args.host,
-                                          args.path, timeout, https_port)
+                                          args.path, timeout, https_port,
+                                          alt_hosts)
         else:  # pragma: no cover - argparse required=True guards this
             raise pe.UsageError("unknown command: %r" % (args.command,))
     except pe.UsageError as exc:

@@ -209,6 +209,171 @@ def _tls_http_server(tmp_path, body=b"served-target", status=200):
     return srv, stop, thread, port
 
 
+def _tls_path_server(tmp_path, routes, seen):
+    """HTTPS server answering per-path (status, body); records paths + Host."""
+    import ssl as _ssl
+    key, crt, _der = _make_self_signed(tmp_path)
+    ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(crt, key)
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(5)
+    port = srv.getsockname()[1]
+    stop = threading.Event()
+
+    def serve():
+        srv.settimeout(0.5)
+        while not stop.is_set():
+            try:
+                raw, _addr = srv.accept()
+            except socket.timeout:
+                continue
+            try:
+                with ctx.wrap_socket(raw, server_side=True) as tls:
+                    tls.settimeout(5)
+                    data = b""
+                    try:
+                        while b"\r\n\r\n" not in data:
+                            chunk = tls.recv(4096)
+                            if not chunk:
+                                break
+                            data += chunk
+                    except OSError:
+                        pass
+                    try:
+                        head = data.split(b"\r\n", 1)[0].decode("iso-8859-1")
+                        req_path = head.split(" ")[1] if " " in head else "/"
+                    except (IndexError, ValueError):
+                        req_path = "/"
+                    seen.append(req_path)
+                    host = ""
+                    for line in data.split(b"\r\n"):
+                        if line.lower().startswith(b"host:"):
+                            host = line.split(b":", 1)[1].decode(
+                                "iso-8859-1").strip()
+                            break
+                    seen.append("HOST:" + host)
+                    status, body = routes.get(req_path, (404, b"nope"))
+                    is_head = data.startswith(b"HEAD")
+                    tls.sendall(
+                        ("HTTP/1.1 %d Test\r\nContent-Length: %d\r\n"
+                         "Connection: close\r\n\r\n"
+                         % (status, len(body))).encode()
+                        + (b"" if is_head else body))
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return srv, stop, thread, port
+
+
+def test_www_variant_followed_when_listed(tmp_path, web):
+    port, app = web
+    seen = []
+    srv, stop, thread, tlsport = _tls_path_server(
+        tmp_path, {"/backup.sql": (200, b"dump\n")}, seen)
+    try:
+        app.routes["/backup.sql"] = (
+            301, {"Location": "https://www.example.test:%d/" % tlsport},
+            b"")
+        out = sd.http_probe("127.0.0.1", port, "example.test",
+                            "/backup.sql", 5, https_port=tlsport,
+                            alt_hosts=["example.test", "www.example.test"])
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+        srv.close()
+    assert out["status"] == 200, out
+    assert out["scheme"] == "https"
+    assert out["exposed"] is True
+    assert "/backup.sql" in seen, seen
+    assert "HOST:www.example.test" in seen, seen
+    state, _reason = sd.finding_state(out)
+    assert state == "exposed"
+
+
+def test_www_variant_not_listed_stays_not_checked(tmp_path, web):
+    port, app = web
+    seen = []
+    srv, stop, thread, tlsport = _tls_path_server(
+        tmp_path, {"/backup.sql": (200, b"dump\n")}, seen)
+    try:
+        app.routes["/backup.sql"] = (
+            301, {"Location": "https://www.example.test:%d/" % tlsport},
+            b"")
+        out = sd.http_probe("127.0.0.1", port, "example.test",
+                            "/backup.sql", 5, https_port=tlsport,
+                            alt_hosts=["example.test"])
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+        srv.close()
+    assert out["status"] == 301, out
+    assert out["scheme"] == "http"
+    assert out["exposed"] is False
+    assert seen == [], seen
+    state, reason = sd.finding_state(out)
+    assert state == "not_checked"
+    assert "redirects to" in reason
+
+
+def test_redirect_to_slash_probes_original_path(tmp_path, web):
+    port, app = web
+    seen = []
+    srv, stop, thread, tlsport = _tls_path_server(
+        tmp_path, {"/": (200, b"home"), "/backup.sql": (404, b"nope")},
+        seen)
+    try:
+        app.routes["/backup.sql"] = (
+            301, {"Location": "https://example.test:%d/" % tlsport},
+            b"")
+        out = sd.http_probe("127.0.0.1", port, "example.test",
+                            "/backup.sql", 5, https_port=tlsport,
+                            alt_hosts=["example.test"])
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+        srv.close()
+    assert out["status"] == 404, out
+    assert out["scheme"] == "https"
+    assert out["exposed"] is False
+    assert "/backup.sql" in seen, seen
+    assert "/" not in [p for p in seen if not p.startswith("HOST:")], seen
+    state, _reason = sd.finding_state(out)
+    assert state == "not_exposed"
+
+
+def test_hop_failure_is_not_checked(tmp_path, web):
+    port, app = web
+    app.routes["/"] = (
+        301, {"Location": "https://example.test:1/gone"}, b"")
+    out = sd.http_probe("127.0.0.1", port, "example.test", "/", 5,
+                        https_port=1)
+    assert out["status"] == 301
+    assert "https follow failed" in (out["error"] or "")
+    state, reason = sd.finding_state(out)
+    assert state == "not_checked"
+    assert "redirects to" in reason
+
+
+def test_finding_state_table():
+    assert sd.finding_state({"exposed": True, "status": 200})[0] == "exposed"
+    for good in (401, 403, 404, 410):
+        s, r = sd.finding_state({"exposed": False, "status": good})
+        assert s == "not_exposed", good
+        assert r is None
+    s, r = sd.finding_state(
+        {"exposed": False, "status": 301, "location": "https://x/"})
+    assert s == "not_checked" and "redirects to" in r
+    s, r = sd.finding_state({"exposed": False, "status": 500})
+    assert s == "not_checked" and "server error 500" in r
+    s, r = sd.finding_state(
+        {"exposed": False, "status": 0, "error": "boom"})
+    assert s == "not_checked" and "boom" in r
+
+
 def test_https_hop_followed_same_host(tmp_path, web):
     port, app = web
     srv, stop, thread, tlsport = _tls_http_server(tmp_path)
@@ -458,6 +623,8 @@ def test_blockable_names():
     for bad in ('we"ird.sql', "quo'te.sql", "back\\slash.sql",
                 "back`tick.sql", "new\nline.sql", "tab\there.sql",
                 "caf\xc3\xa9.sql", "del\x7f.sql", "ctl\x01.sql",
+                "a%{b.sql", "a%{HTTP_HOST}.sql", "%", "%{",
+                "pay$1.sql", "$1", "price$.sql",
                 "", None, 123):
         assert not sd.is_blockable_name(bad), repr(bad)
 

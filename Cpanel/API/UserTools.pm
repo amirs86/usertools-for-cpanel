@@ -643,7 +643,9 @@ sub home_permissions_fix {
     my $journal = _write_journal( $home, 'fixhome', \@changes );
     _activity_log( $home, 'fix_home', 'fix modes',
         { fixed => scalar(@changes) },
-        @changes ? { fn => 'home_permissions_undo', args => {} } : undef );
+        defined $journal
+        ? { fn => 'home_permissions_undo', args => { journal => $journal } }
+        : undef );
     $result->data(
         {
             user         => $user,
@@ -657,9 +659,11 @@ sub home_permissions_fix {
 
 #-------------------------------------------------------------------------------------------------
 # Name:
-#   home_permissions_undo - Restore modes recorded by the latest Fix Modes run.
-#   Same gates as fix (symlinks refused, caller-owned only); protected paths
-#   are restored on purpose (that is what undo is for).
+#   home_permissions_undo - Restore modes recorded by a Fix Modes run.
+#   Takes an optional journal basename; without one the latest journal
+#   is used. A named journal must still be present and be the newest one.
+#   Same gates as fix (symlinks refused, caller-owned only); protected
+#   paths are restored on purpose (that is what undo is for).
 #-------------------------------------------------------------------------------------------------
 sub home_permissions_undo {
     my ( $args, $result ) = @_;
@@ -686,10 +690,29 @@ sub home_permissions_undo {
         return;
     }
 
-    my $out = _undo_latest( $home, $uid, 'fixhome-' );
-    if ( ref $out ne 'HASH' ) {
-        $result->error('The latest undo journal is unreadable.');
-        return;
+    my ($journal_p) = $args->get('journal');
+    my $out;
+    if ( defined $journal_p ) {
+        my ( $target, $err ) =
+          _journal_target_check( _undo_dir($home), 'fixhome-', $journal_p );
+        if ( !defined $target ) {
+            $result->error($err);
+            return;
+        }
+        $out = _undo_journal_file( $home, $uid, $target );
+        if ( ref $out ne 'HASH' ) {
+            $result->error('The undo journal is unreadable.');
+            return;
+        }
+        _journal_mark_used( _undo_dir($home),
+            ( split m{/}, $target )[-1] );
+    }
+    else {
+        $out = _undo_latest( $home, $uid, 'fixhome-' );
+        if ( ref $out ne 'HASH' ) {
+            $result->error('The latest undo journal is unreadable.');
+            return;
+        }
     }
     _activity_log( $home, 'fix_home', 'undo fix modes',
         { restored => $out->{restored} // 0 }, undef );
@@ -1225,9 +1248,52 @@ sub _undo_latest {
     if ( !defined $latest ) {
         return { paths => [], undo_journal => undef, restored => 0 };
     }
-    my $parsed = _read_journal($latest);
+    return _undo_journal_file( $home, $uid, $latest );
+}
+
+sub _journal_target_check {
+    my ( $undo_dir, $prefix, $id ) = @_;
+    # A named journal for undo: the id must be one still present, and
+    # the newest one, otherwise an older row would undo a newer change.
+    # Returns (path, undef) or (undef, reason).
+    if ( !defined $id
+        || $id !~ /^\Q$prefix\E[0-9]{8}T[0-9]{6}-[0-9]+\.jsonl\.gz$/ )
+    {
+        return ( undef, 'already undone' );
+    }
+    return ( undef, 'already undone' ) if $id =~ m{/};
+    return ( undef, 'already undone' )
+      unless opendir( my $dh, $undo_dir );
+    my @all =
+      sort grep { /^\Q$prefix\E.*\.jsonl\.gz$/ } readdir $dh;
+    closedir $dh;
+    if ( !grep { $_ eq $id } @all ) {
+        return ( undef, 'already undone' );
+    }
+    if ( -f "$undo_dir/$id.undone" ) {
+        return ( undef, 'already undone' );
+    }
+    if ( $id ne $all[-1] ) {
+        return ( undef, 'a newer change exists, undo that first' );
+    }
+    return ( "$undo_dir/$id", undef );
+}
+
+sub _journal_mark_used {
+    my ( $undo_dir, $id ) = @_;
+    if ( open my $fh, '>', "$undo_dir/$id.undone" ) {
+        print $fh time(), "\n";
+        close $fh;
+        chmod 0600, "$undo_dir/$id.undone";
+    }
+    return;
+}
+
+sub _undo_journal_file {
+    my ( $home, $uid, $path ) = @_;
+    my $parsed = _read_journal($path);
     if ( !$parsed ) {
-        return ( undef, 'The latest undo journal is unreadable.' );
+        return ( undef, 'The undo journal is unreadable.' );
     }
     my @paths;
     my $restored = 0;
@@ -1238,7 +1304,7 @@ sub _undo_latest {
     }
     return {
         paths        => \@paths,
-        undo_journal => ( split m{/}, $latest )[-1],
+        undo_journal => ( split m{/}, $path )[-1],
         restored     => $restored,
     };
 }
@@ -1334,9 +1400,12 @@ sub bulk_permissions_status {
         sub {
             my ( $summary, $meta ) = @_;
             return undef unless ( $meta->{tool} // '' ) eq 'bulk';
-            return ( $summary->{counts}{changed} // 0 ) > 0
-              ? { fn => 'bulk_permissions_undo', args => {} }
-              : undef;
+            return undef unless ( $summary->{counts}{changed} // 0 ) > 0;
+            my $j = $summary->{undo_journal};
+            my ($base) = defined $j ? ( $j =~ m{/([^/]+)$} ) : ();
+            return defined $base && $base ne ''
+              ? { fn => 'bulk_permissions_undo', args => { journal => $base } }
+              : { fn => 'bulk_permissions_undo', args => {} };
         }
     );
     return $ok;
@@ -1361,7 +1430,9 @@ sub bulk_permissions_cancel {
 
 #-------------------------------------------------------------------------------------------------
 # Name:
-#   bulk_permissions_undo - Restore modes from the latest bulk journal.
+#   bulk_permissions_undo - Restore modes from a bulk journal (newest by
+#   default; pass journal to name one). A named journal must still be
+#   present and be the newest one, and is marked used.
 #-------------------------------------------------------------------------------------------------
 sub bulk_permissions_undo {
     my ( $args, $result ) = @_;
@@ -1375,7 +1446,19 @@ sub bulk_permissions_undo {
     # synchronously (instant), then spawn the engine's `undo --journal` with
     # --json-progress; progress/cancel ride the usual status/cancel calls and
     # the engine summary carries the restored counts.
-    my $latest = _latest_journal( _undo_dir($home), 'bulk-' );
+    my ($journal_p) = $args->get('journal');
+    my $latest;
+    if ( defined $journal_p ) {
+        ( $latest, my $err ) =
+          _journal_target_check( _undo_dir($home), 'bulk-', $journal_p );
+        if ( !defined $latest ) {
+            $result->error($err);
+            return;
+        }
+    }
+    else {
+        $latest = _latest_journal( _undo_dir($home), 'bulk-' );
+    }
     if ( !defined $latest ) {
         $result->data(
             {
@@ -1402,6 +1485,9 @@ sub bulk_permissions_undo {
         return 1;
     }
     my ($journal_name) = ( split m{/}, $latest )[-1];
+    if ( defined $journal_p ) {
+        _journal_mark_used( _undo_dir($home), $journal_name );
+    }
     return _job_spawn_and_record(
         $result, 'undo', $home, $home, [], [ 'undo', '--journal', $latest ],
         0, { undo_journal => $journal_name } );
@@ -2006,6 +2092,11 @@ sub space_trash_restore {
         $result->error('Invalid batch: pick one from the trash list.');
         return;
     }
+    my $root = "$home/.usertools-trash/$batch";
+    if ( !-d $root || -l $root ) {
+        $result->error('already undone: the batch is gone');
+        return;
+    }
     my ( $summary, $err ) =
       _run_space_sync( $home, [ 'trash-restore', '--batch', $batch ] );
     if ( !defined $summary ) {
@@ -2257,8 +2348,11 @@ sub _doctor_verdicts {
     }
     elsif ( $status >= 300 && $status < 400 ) {
         my $loc = $http->{location} // 'elsewhere';
+        my $extra = defined $http->{error} && $http->{error} ne ''
+          ? " ($http->{error}; not checked)"
+          : " (not checked)";
         $say->("$domain redirects (HTTP $status to $loc); "
-          . "only the first redirect is shown, it is not followed.", 1);
+          . "only the first redirect is shown, it is not followed further$extra.", 1);
     }
     elsif ( $status == 403 ) {
         $say->("$domain is forbidden (HTTP 403): check the .htaccess "
@@ -2630,14 +2724,16 @@ our $HT_EXP_END   = '# END UserTools Exposed Files';
 
 sub _expose_safe_path {
     my ($s) = @_;
-    # Printable ASCII only, without `"`, `'`, backslash or backtick: a
-    # quote would close the rule's quoting and anything outside
-    # printable ASCII (controls, DEL, newlines, non-ASCII bytes) could
-    # smuggle extra lines into the file, either of which makes Apache
-    # reject the whole .htaccess (site down). True when $s may be
-    # embedded in a deny rule.
+    # Printable ASCII only, without `"`, `'`, backslash, backtick, `%`
+    # or `$`: a quote would close the rule's quoting and anything
+    # outside printable ASCII (controls, DEL, newlines, non-ASCII bytes)
+    # could smuggle extra lines into the file, either of which makes
+    # Apache reject the whole .htaccess (site down). Inside an <If>
+    # expression `%{NAME}` interpolates and `$0`..`$9` are regex
+    # back-references, even in single quotes, so those names are
+    # Move-only too. True when $s may be embedded in a deny rule.
     return 0 unless defined $s && $s ne '';
-    return $s =~ /\A[\x20\x21\x23-\x26\x28-\x5B\x5D-\x5F\x61-\x7E]+\z/ ? 1 : 0;
+    return $s =~ /\A[\x20\x21\x23\x26\x28-\x5B\x5D-\x5F\x61-\x7E]+\z/ ? 1 : 0;
 }
 
 sub _expose_rule_lines {
@@ -2957,7 +3053,11 @@ sub doctor_htaccess_fix {
     _activity_log( $home, 'site_doctor', 'fix .htaccess',
         { domain => $domain, lines => scalar( @{ $plan->{lines} } ) },
         { fn => 'doctor_htaccess_undo',
-          args => { job_id => $job_id, domain => $domain } } );
+          args => {
+            job_id => $job_id,
+            domain => $domain,
+            backup => ( split m{/}, $bak )[-1],
+          } } );
     $result->data(
         {
             domain => $plan->{domain},
@@ -2972,7 +3072,8 @@ sub doctor_htaccess_fix {
 
 #-------------------------------------------------------------------------------------------------
 # Name:
-#   doctor_htaccess_undo - Restore the newest backup of that .htaccess.
+#   doctor_htaccess_undo - Restore the newest backup of that .htaccess,
+#   or the named one (which must still be the newest).
 #-------------------------------------------------------------------------------------------------
 sub doctor_htaccess_undo {
     my ( $args, $result ) = @_;
@@ -2984,19 +3085,40 @@ sub doctor_htaccess_undo {
 
     my ($job_id) = $args->get('job_id');
     my ($domain) = $args->get('domain');
+    my ($backup_p) = $args->get('backup');
     my ( $real, $docroot_err ) = _doctor_docroot( $home, $user, $job_id, $domain );
     if ( !defined $real ) {
         $result->error($docroot_err);
         return;
     }
     my $path = "$real/.htaccess";
-    my @cands = grep { -f $_ } glob "$path.usertools-bak-*";
+    my @cands = sort grep { -f $_ } glob "$path.usertools-bak-*";
     if ( !@cands ) {
-        $result->error('No backup found: nothing to undo.');
+        $result->error('already undone');
         return;
     }
-    @cands = sort { ( ( stat($b) )[9] // 0 ) <=> ( ( stat($a) )[9] // 0 ) } @cands;
-    if ( rename( $cands[0], $path ) ) {
+    my $pick;
+    if ( defined $backup_p ) {
+        if ( $backup_p !~ /^\.htaccess\.usertools-bak-[0-9]+(-\d+)?$/ ) {
+            $result->error('already undone');
+            return;
+        }
+        my $want = "$real/$backup_p";
+        if ( !grep { $_ eq $want } @cands ) {
+            $result->error('already undone');
+            return;
+        }
+        if ( $want ne $cands[-1] ) {
+            $result->error('a newer change exists, undo that first');
+            return;
+        }
+        $pick = $want;
+    }
+    else {
+        @cands = sort { ( ( stat($b) )[9] // 0 ) <=> ( ( stat($a) )[9] // 0 ) } @cands;
+        $pick = $cands[0];
+    }
+    if ( rename( $pick, $path ) ) {
         chmod 0644, $path;
         _activity_log( $home, 'site_doctor', 'undo .htaccess fix',
             { domain => $domain }, undef );
@@ -3043,20 +3165,26 @@ sub _exposed_resolve {
 }
 
 sub _exposed_reprobe {
-    my ( $home, $ip, $port, $host, $urlpath ) = @_;
+    my ( $home, $ip, $port, $host, $urlpath, $user ) = @_;
     # Re-probe one URL path after an action via the site engine (single,
     # tested prober: HEAD then a capped GET, status + exposed only, never
-    # the body).
+    # the body). Account domains ride along as --alt-host so the www/bare
+    # variant follow matches the scan.
     if ( defined $TEST_EXPOSED_PROBE ) {
         return { %{$TEST_EXPOSED_PROBE} };
     }
     return { status => 0, exposed => 0 }
       unless defined $home && defined $ip && defined $port
       && defined $host && defined $urlpath;
-    my ( $summary, undef ) = _run_site_sync(
-        $home,
-        [ 'exposed-reprobe', '--ip', $ip, '--port', $port,
-          '--host', $host, '--path', $urlpath ] );
+    my @argv = ( 'exposed-reprobe', '--ip', $ip, '--port', $port,
+        '--host', $host, '--path', $urlpath );
+    if ( defined $user && $user ne '' ) {
+        for my $t ( _site_targets($user) ) {
+            next unless ref $t eq 'HASH' && defined $t->{domain};
+            push @argv, ( '--alt-host', $t->{domain} );
+        }
+    }
+    my ( $summary, undef ) = _run_site_sync( $home, \@argv );
     if ( ref $summary eq 'HASH' && ref $summary->{probe} eq 'HASH' ) {
         my $p = $summary->{probe};
         return {
@@ -3152,7 +3280,7 @@ sub exposed_move {
     my $reprobe = { status => 0, exposed => 0 };
     if ( defined $rec && defined $rec->{ip} && defined $rec->{port} ) {
         my $upath = $finding->{urlpath} // ( '/' . ( $finding->{relpath} // '' ) );
-        $reprobe = _exposed_reprobe( $home, $rec->{ip}, $rec->{port}, $finding->{domain}, $upath );
+        $reprobe = _exposed_reprobe( $home, $rec->{ip}, $rec->{port}, $finding->{domain}, $upath, $user );
     }
     _activity_log( $home, 'exposed_files', 'quarantine finding',
         { finding => $finding_id, batch => $summary->{quarantine_batch} },
@@ -3187,6 +3315,11 @@ sub exposed_restore {
     my $batch = ( defined $batch_p && $batch_p =~ /^[0-9]{8}T[0-9]{6}$/ ) ? $batch_p : undef;
     if ( !defined $batch ) {
         $result->error('Invalid batch: pick one from the quarantine list.');
+        return;
+    }
+    my $qroot = "$home/.usertools-quarantine/$batch";
+    if ( !-d $qroot || -l $qroot ) {
+        $result->error('already undone: the batch is gone');
         return;
     }
     my ( $summary, $err ) = _run_site_sync( $home, [ 'exposed-restore', '--batch', $batch ] );
@@ -3308,7 +3441,7 @@ sub exposed_block {
     my $reprobe = { status => 0, exposed => 0 };
     if ( defined $rec->{ip} && defined $rec->{port} ) {
         my $upath = $finding->{urlpath} // ( '/' . ( $finding->{relpath} // '' ) );
-        $reprobe = _exposed_reprobe( $home, $rec->{ip}, $rec->{port}, $finding->{domain}, $upath );
+        $reprobe = _exposed_reprobe( $home, $rec->{ip}, $rec->{port}, $finding->{domain}, $upath, $user );
     }
     _activity_log( $home, 'exposed_files', 'block finding',
         { finding => $finding_id },
@@ -3390,7 +3523,7 @@ sub exposed_unblock {
     my $reprobe = { status => 0, exposed => 0 };
     if ( defined $rec->{ip} && defined $rec->{port} ) {
         my $upath = $finding->{urlpath} // ( '/' . ( $finding->{relpath} // '' ) );
-        $reprobe = _exposed_reprobe( $home, $rec->{ip}, $rec->{port}, $finding->{domain}, $upath );
+        $reprobe = _exposed_reprobe( $home, $rec->{ip}, $rec->{port}, $finding->{domain}, $upath, $user );
     }
     _activity_log( $home, 'exposed_files', 'unblock finding',
         { finding => $finding_id },
@@ -3436,8 +3569,13 @@ sub _activity_log {
     eval {
         my $dir = "$home/.cpanel/usertools";
         make_path( $dir, { mode => 0700 } );
-        my @lines;
         my $file = _activity_file($home);
+        require Fcntl;
+        sysopen my $lock_fh, $file,
+          Fcntl::O_RDWR() | Fcntl::O_CREAT(), 0600
+          or die "cannot open: $!";
+        flock( $lock_fh, Fcntl::LOCK_EX() ) or die "cannot lock: $!";
+        my @lines;
         if ( open my $fh, '<', $file ) {
             @lines = <$fh>;
             close $fh;
@@ -3456,10 +3594,13 @@ sub _activity_log {
           );
         splice( @lines, 0, @lines - $ACTIVITY_MAX_LINES )
           if @lines > $ACTIVITY_MAX_LINES;
-        open my $out, '>', $file or die "cannot write: $!";
+        my $tmp = "$file.tmp.$$";
+        open my $out, '>', $tmp or die "cannot write: $!";
         print $out "$_\n" for @lines;
         close $out;
-        chmod 0600, $file;
+        chmod 0600, $tmp;
+        rename( $tmp, $file ) or die "cannot replace: $!";
+        close $lock_fh;
     };
     return;
 }
@@ -3574,6 +3715,7 @@ sub _cron_parse {
       ? split( /(?<=\n)/, $content ) : ();
     my @recs;
     my %seen;
+    my %env_seen;
     my $n = 0;
     for my $raw (@lines) {
         $n++;
@@ -3585,8 +3727,9 @@ sub _cron_parse {
         elsif ( $text =~ /^\s*#/ ) {
             $rec{kind} = 'comment';
         }
-        elsif ( $text =~ /^\s*[A-Za-z_][A-Za-z0-9_]*\s*=/ ) {
+        elsif ( $text =~ /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/ ) {
             $rec{kind} = 'env';
+            $env_seen{$1} = $2;
         }
         else {
             my ( $sched, $cmd );
@@ -3613,15 +3756,46 @@ sub _cron_parse {
     my @findings;
     for my $rec (@recs) {
         next unless ( $rec->{kind} // '' ) eq 'entry';
-        my $flags = _cron_flags( $rec, $home, $domains_ar );
+        my $pos_off = _cron_mailto_empty( \@recs, $rec->{id} );
+        my $pos_env = $pos_off ? { MAILTO => '""' } : {};
+        my $flags = _cron_flags( $rec, $home, $domains_ar, $pos_env );
         for my $f ( @{$flags} ) {
             push @findings,
               { line => $rec->{id}, kind => $f->{kind}, text => $f->{text} };
         }
         $rec->{flags} = $flags;
+        my $has_redirect_flag =
+          grep { $_->{kind} eq 'no_redirect' } @{$flags};
+        my $has_percent =
+          defined $rec->{command}
+          && $rec->{command} =~ /(?<!\\)%/ ? 1 : 0;
+        if ($has_percent) {
+            my $pct = {
+                kind => 'percent_input',
+                text => 'The command holds an unescaped %: cron would '
+                  . 'feed everything after it to the command as input, '
+                  . 'so silencing cannot be appended here.',
+            };
+            push @{$flags},                    $pct;
+            push @findings, { line => $rec->{id}, %{$pct} };
+        }
+        my $mailto = $pos_off ? '""' : undef;
+        my $mail_off =
+          defined $mailto && $mailto =~ /^(?:""|'')?$/ ? 1 : 0;
+        my $plain_output =
+             $rec->{command} !~ />/
+          && $rec->{command} !~ /-O\s+\/dev\/null/;
+        if ( !$has_redirect_flag && $mail_off && $plain_output ) {
+            my $sup = {
+                kind => 'mailto_empty',
+                text => 'MAILTO is empty, so cron already discards '
+                  . 'output; there is nothing to silence.',
+            };
+            push @{$flags},                    $sup;
+            push @findings, { line => $rec->{id}, %{$sup} };
+        }
         $rec->{fixable} =
-          ( ( $rec->{kind} // '' ) eq 'entry'
-              && grep { $_->{kind} eq 'no_redirect' } @{$flags} ) ? 1 : 0;
+          ( $has_redirect_flag && !$has_percent ) ? 1 : 0;
         if ( $seen{ _cron_norm( $rec->{schedule} . ' ' . $rec->{command} ) } > 1 ) {
             my $dupe = {
                 kind => 'duplicate',
@@ -3646,7 +3820,7 @@ sub _cron_norm {
 }
 
 sub _cron_flags {
-    my ( $rec, $home, $domains_ar ) = @_;
+    my ( $rec, $home, $domains_ar, $env_seen ) = @_;
     # One advice record per problem on a schedule entry. No state, no
     # writes; file checks use -e as the caller (symlinks followed for
     # the existence question only, nothing is opened).
@@ -3662,7 +3836,9 @@ sub _cron_flags {
               . 'seconds; overlapping runs pile up and hit account limits.',
           };
     }
-    if ( $cmd !~ />/ && $cmd !~ /-O\s+\/dev\/null/ ) {
+    my $mailto = ref $env_seen eq 'HASH' ? $env_seen->{MAILTO} : undef;
+    my $mail_off = defined $mailto && $mailto =~ /^(?:""|'')?$/ ? 1 : 0;
+    if ( $cmd !~ />/ && $cmd !~ /-O\s+\/dev\/null/ && !$mail_off ) {
         push @out,
           {
             kind => 'no_redirect',
@@ -3773,36 +3949,87 @@ sub _cron_backup_dir {
 }
 
 sub _cron_backup_write {
-    my ( $home, $content ) = @_;
-    # Full crontab backup before a fix (0600, newest 3 kept).
-    # Returns the basename or undef.
+    my ( $home, $content, $fix_hr ) = @_;
+    # Full crontab backup (0600, newest 3 kept) plus the fix it belongs
+    # to: {line, old, new}. The name carries microseconds so same-second
+    # backups sort chronologically. The record stays as the audit trail;
+    # undo consumes nothing. Returns the basename or undef.
     my $dir = _cron_backup_dir($home);
     eval { make_path( $dir, { mode => 0700 } ) };
     return undef if $@;
-    my $name = 'crontab-' . _journal_timestamp() . '.bak';
+    require Time::HiRes;
+    my $whole = int( Time::HiRes::time() );
+    my @t = gmtime($whole);
+    my $name = sprintf(
+        'crontab-%04d%02d%02dT%02d%02d%02d-%d-%06d.json',
+        $t[5] + 1900, $t[4] + 1, $t[3], $t[2], $t[1], $t[0], $$,
+        int( ( Time::HiRes::time() - $whole ) * 1000000 )
+    );
     my $path = "$dir/$name";
+    my %rec = (
+        v       => 1,
+        created => time(),
+        content => defined $content ? $content : '',
+    );
+    if ( ref $fix_hr eq 'HASH' ) {
+        $rec{line} = $fix_hr->{line};
+        $rec{old}  = $fix_hr->{old};
+        $rec{new}  = $fix_hr->{new};
+    }
     open my $fh, '>', $path or return undef;
-    print $fh $content;
+    print $fh JSON::PP->new()->encode( \%rec );
     close $fh;
     chmod 0600, $path;
-    if ( opendir( my $dh, $dir ) ) {
-        my @all = sort grep { /^crontab-.*\.bak$/ } readdir $dh;
-        closedir $dh;
-        while ( @all > 3 ) {
-            my $old = shift @all;
-            next if $old eq $name;
-            unlink "$dir/$old";
-        }
-    }
+    _cron_backup_prune($dir);
     return $name;
+}
+
+sub _cron_backup_prune {
+    my ($dir) = @_;
+    return unless opendir( my $dh, $dir );
+    my @all = sort grep { /^crontab-.*\.json$/ } readdir $dh;
+    my @legacy = grep { /^crontab-.*\.bak$/ } readdir $dh;
+    closedir $dh;
+    while ( @all > 3 ) {
+        my $old = shift @all;
+        unlink "$dir/$old";
+        unlink "$dir/$old.used";
+    }
+    unlink "$dir/$_" for @legacy;
+    return;
+}
+
+sub _cron_backup_names {
+    my ($home) = @_;
+    # Oldest first, by creation time (names can collide on the clock
+    # within one second, so mtime decides, names break ties).
+    my $dir = _cron_backup_dir($home);
+    return () unless opendir( my $dh, $dir );
+    my @all = grep { /^crontab-.*\.json$/ } readdir $dh;
+    closedir $dh;
+    return ( sort {
+             ( stat("$dir/$a") )[9] <=> ( stat("$dir/$b") )[9]
+          || $a cmp $b
+    } @all );
+}
+
+sub _cron_backup_record {
+    my ( $home, $basename ) = @_;
+    return undef
+      unless defined $basename
+      && $basename =~ /^crontab-[0-9]{8}T[0-9]{6}-[0-9]+-[0-9]{6}\.json$/;
+    return undef if $basename =~ m{/};
+    my $path = _cron_backup_dir($home) . "/$basename";
+    return undef unless -f $path;
+    my $rec = _read_json_file($path);
+    return undef unless ref $rec eq 'HASH';
+    return ( $path, $rec );
 }
 
 sub _cron_backup_latest {
     my ($home) = @_;
     my $dir = _cron_backup_dir($home);
-    return undef unless opendir( my $dh, $dir );
-    my @all = sort grep { /^crontab-.*\.bak$/ } readdir $dh;
-    closedir $dh;
+    my @all = _cron_backup_names($home);
     return @all ? "$dir/$all[-1]" : undef;
 }
 
@@ -3872,7 +4099,7 @@ sub cron_fix_preview {
     return unless _cron_gate( $result, \$ctx );
     my ($line_id) = $args->get('line');
     my ($text)   = $args->get('text');
-    my ( $plan, $err ) = _cron_fix_plan( $ctx, $line_id, $text );
+    my ( $plan, undef, $err ) = _cron_fix_plan( $ctx, $line_id, $text );
     if ( !defined $plan ) {
         $result->error( 'Nothing to fix: [_1].', $err );
         return;
@@ -3881,35 +4108,69 @@ sub cron_fix_preview {
     return 1;
 }
 
+sub _cron_mailto_empty {
+    my ( $lines_ar, $line_id ) = @_;
+    # True when an empty MAILTO precedes the line: cron mails nothing,
+    # so there is nothing to silence. Only lines before the target
+    # count (a later MAILTO= does not cover it).
+    return 0 unless defined $line_id && $line_id =~ /^L(\d+)$/;
+    my $idx = $1 - 1;
+    my $empty = 0;
+    for my $i ( 0 .. $#$lines_ar ) {
+        last if $i >= $idx;
+        my $ln = $lines_ar->[$i];
+        next unless ref $ln eq 'HASH' && ( $ln->{kind} // '' ) eq 'env';
+        ( my $body = $ln->{raw} ) =~ s/^\s+//;
+        if ( $body =~ /^MAILTO\s*=\s*(?:""|'')?\s*$/ ) {
+            $empty = 1;
+        }
+        elsif ( $body =~ /^MAILTO\s*=/ ) {
+            $empty = 0;
+        }
+    }
+    return $empty;
+}
+
 sub _cron_fix_plan {
     my ( $ctx, $line_id, $text ) = @_;
-    # The line must still read exactly as scanned; only unredirected
-    # schedule entries qualify.
-    my ( $content, $err ) = _cron_read();
+    # Preview data plus the exact content it was built from, so the fix
+    # writes from a single read and the line index cannot drift between
+    # two reads. Returns (plan, content, undef) or (undef, undef, reason).
+    my ( $content, $read_err ) = _cron_read();
     if ( !defined $content ) {
-        return ( undef, "cannot read crontab: $err" );
+        return ( undef, undef, "cannot read crontab: $read_err" );
     }
     my @domains = map { $_->{domain} } _user_domains( $ctx->{user} );
     my $parsed = _cron_parse( $content, $ctx->{home}, \@domains );
     my $rec = _cron_find_line( $parsed->{lines}, $line_id );
     if ( !defined $rec ) {
-        return ( undef, 'unknown line' );
+        return ( undef, undef, 'unknown line' );
     }
     if ( ( $rec->{kind} // '' ) ne 'entry' ) {
-        return ( undef, 'only schedule entries can be silenced' );
+        return ( undef, undef, 'only schedule entries can be silenced' );
     }
     if ( defined $text && $text ne '' && $text ne $rec->{raw} ) {
-        return ( undef, 'the crontab changed since the scan' );
+        return ( undef, undef, 'the crontab changed since the scan' );
+    }
+    if ( $rec->{command} =~ /(?<!\\)%/ ) {
+        return ( undef, undef,
+            'the command holds an unescaped %: cron would feed the '
+              . 'redirect to the command as input instead' );
     }
     if ( $rec->{command} =~ />/ ) {
-        return ( undef, 'output is already redirected' );
+        return ( undef, undef, 'output is already redirected' );
+    }
+    if ( _cron_mailto_empty( $parsed->{lines}, $line_id ) ) {
+        return ( undef, undef,
+            'MAILTO is empty, so cron already discards output' );
     }
     if ( length($content) + length(' >/dev/null 2>&1') > $CRON_MAX_BYTES ) {
-        return ( undef, 'crontab is too large' );
+        return ( undef, undef, 'crontab is too large' );
     }
     my $old = $rec->{raw};
     my $new = $rec->{schedule} . ' ' . _cron_silenced( $rec->{command} );
-    return ( { line => $rec->{id}, old => $old, new => $new }, undef );
+    return ( { line => $rec->{id}, old => $old, new => $new }, $content,
+        undef );
 }
 
 #-------------------------------------------------------------------------------------------------
@@ -3923,22 +4184,19 @@ sub cron_fix_output {
     return unless _cron_gate( $result, \$ctx );
     my ($line_id) = $args->get('line');
     my ($text)   = $args->get('text');
-    my ( $plan, $err ) = _cron_fix_plan( $ctx, $line_id, $text );
+    my ( $plan, $plan_content, $plan_err ) =
+      _cron_fix_plan( $ctx, $line_id, $text );
     if ( !defined $plan ) {
-        $result->error( 'Nothing to fix: [_1].', $err );
+        $result->error( 'Nothing to fix: [_1].', $plan_err );
         return;
     }
-    my ( $content, $read_err ) = _cron_read();
-    if ( !defined $content ) {
-        $result->error( 'Cannot read crontab: [_1].', $read_err );
-        return;
-    }
-    my $backup = _cron_backup_write( $ctx->{home}, $content );
+    my $backup = _cron_backup_write( $ctx->{home}, $plan_content,
+        { line => $line_id, old => $plan->{old}, new => $plan->{new} } );
     if ( !defined $backup ) {
         $result->error('Could not back up the crontab; nothing was changed.');
         return;
     }
-    my @lines = split /(?<=\n)/, $content;
+    my @lines = split /(?<=\n)/, $plan_content;
     $lines[ $1 - 1 ] = $plan->{new} . "\n"
       if $line_id =~ /^L(\d+)$/ && $1 - 1 <= $#lines;
     my $new_content = join '', @lines;
@@ -3949,7 +4207,7 @@ sub cron_fix_output {
     _activity_log(
         $ctx->{home}, 'cron_doctor', 'silence cron line',
         { line => $line_id },
-        { fn => 'cron_undo', args => {} }
+        { fn => 'cron_undo', args => { line => $line_id, backup => $backup } }
     );
     $result->data(
         { line => $line_id, old => $plan->{old}, new => $plan->{new}, backup => $backup } );
@@ -3958,31 +4216,111 @@ sub cron_fix_output {
 
 #-------------------------------------------------------------------------------------------------
 # Name:
-#   cron_undo - Restore the newest backed-up crontab.
+#   cron_undo - Undo one silenced line (or, with no args, restore the
+#   newest backup whole, as before).
 #-------------------------------------------------------------------------------------------------
 sub cron_undo {
     my ( $args, $result ) = @_;
 
     my $ctx;
     return unless _cron_gate( $result, \$ctx );
+    my ($line_id) = $args->get('line');
+    my ($backup)  = $args->get('backup');
+    if ( !defined $line_id && !defined $backup ) {
+        return _cron_undo_whole( $ctx, $result );
+    }
+    if ( !defined $line_id || $line_id !~ /^L\d+$/ || !defined $backup ) {
+        $result->error('Invalid undo target: supply line and backup.');
+        return;
+    }
+    my @names = _cron_backup_names( $ctx->{home} );
+    if ( !@names ) {
+        $result->error('already undone');
+        return;
+    }
+    if ( !grep { $_ eq $backup } @names ) {
+        $result->error('already undone');
+        return;
+    }
+    if ( -f _cron_backup_dir( $ctx->{home} ) . "/$backup.used" ) {
+        $result->error('already undone');
+        return;
+    }
+    if ( $backup ne $names[-1] ) {
+        $result->error(
+            'a newer change exists, undo that first' );
+        return;
+    }
+    my ( $rec_path, $rec ) = _cron_backup_record( $ctx->{home}, $backup );
+    if ( !defined $rec
+        || !defined $rec->{old}
+        || !defined $rec->{new}
+        || $rec->{line} ne $line_id )
+    {
+        $result->error('the backup record is unreadable');
+        return;
+    }
+    my ( $content, $read_err ) = _cron_read();
+    if ( !defined $content ) {
+        $result->error( 'Cannot read crontab: [_1].', $read_err );
+        return;
+    }
+    my @hits =
+      grep { $_ eq $rec->{new} }
+      map { s/\r?\n\z//r } split /(?<=\n)/, $content;
+    if ( @hits == 0 ) {
+        $result->error(
+            'no line still reads the silenced text (it changed since the fix)'
+        );
+        return;
+    }
+    if ( @hits > 1 ) {
+        $result->error(
+            'more than one line reads the silenced text; refusing' );
+        return;
+    }
+    my @lines = split /(?<=\n)/, $content;
+    for my $ln (@lines) {
+        ( my $bare = $ln ) =~ s/\r?\n\z//;
+        if ( $bare eq $rec->{new} ) {
+            $ln = $rec->{old} . "\n";
+            last;
+        }
+    }
+    if ( my $werr = _cron_write( join( '', @lines ) ) ) {
+        $result->error( 'Could not write crontab: [_1].', $werr );
+        return;
+    }
+    if ( open my $fh, '>', "$rec_path.used" ) {
+        print $fh time(), "\n";
+        close $fh;
+        chmod 0600, "$rec_path.used";
+    }
+    _activity_log( $ctx->{home}, 'cron_doctor', 'undo cron fix',
+        { backup => $backup, line => $line_id }, undef );
+    $result->data( { restored => 1 } );
+    return 1;
+}
+
+sub _cron_undo_whole {
+    my ( $ctx, $result ) = @_;
+    # Legacy path (no id): restore the newest backup whole and consume it.
     my $latest = _cron_backup_latest( $ctx->{home} );
     if ( !defined $latest ) {
         $result->error('No backup found: nothing to undo.');
         return;
     }
-    my $fh;
-    if ( !open $fh, '<', $latest ) {
+    my $rec = _read_json_file($latest);
+    if ( ref $rec ne 'HASH' || !defined $rec->{content} ) {
         $result->error('Could not read the backup.');
         return;
     }
-    local $/;
-    my $content = <$fh>;
-    close $fh;
-    if ( my $werr = _cron_write( $content // '' ) ) {
+    if ( my $werr = _cron_write( $rec->{content} ) ) {
         $result->error( 'Could not write crontab: [_1].', $werr );
         return;
     }
     unlink $latest;
+    unlink "$latest.used";
     _activity_log( $ctx->{home}, 'cron_doctor', 'undo cron fix',
         { backup => ( split m{/}, $latest )[-1] }, undef );
     $result->data( { restored => 1 } );
@@ -3990,7 +4328,7 @@ sub cron_undo {
 }
 
 # ---------------------------------------------------------------------------
-# App Helper (tool E): Laravel maintenance that runs purely as
+# App Helper: web-app maintenance that runs purely as
 # the user. No docroot changes and no privileged code in this step.
 # ---------------------------------------------------------------------------
 
@@ -5441,7 +5779,7 @@ sub _guard_homepages {
 }
 
 # ---------------------------------------------------------------------------
-# App Helper (tool E): addon/subdomain docroots, the .htaccess
+# App Helper: addon/subdomain docroots, the .htaccess
 # generator, and the primary-domain switch. All file writes run as the user;
 # the only privileged step (primary docroot) goes through the Admin module.
 # ---------------------------------------------------------------------------
@@ -6871,7 +7209,7 @@ sub app_helper_primary_set {
 }
 
 # ---------------------------------------------------------------------------
-# App Helper (tool E): deploy & maintain. Long runs (composer,
+# App Helper: deploy & maintain. Long runs (composer,
 # npm) go through detached recipe jobs with progress/cancel/capped logs;
 # quick fixed-argv actions (maintenance, queue, key, config cache) run
 # synchronously; reads (logs, readiness, cron state, quota) are synchronous.

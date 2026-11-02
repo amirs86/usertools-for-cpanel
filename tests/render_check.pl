@@ -94,7 +94,8 @@ my %pages = (
         'UT_STR', 'as86.pro', 'Learn more', 'Quarantine',
         'exposed_scan_start', 'Move to quarantine', 'data-block',
         'exposed (confirmed)', 'exposed (likely)',
-        'use Move to quarantine instead',
+        'use Move to quarantine instead', 'not exposed', 'not checked',
+        'could not be checked',
     ],
     'cron_doctor.html.tt' => [
         '<title>Cron Doctor</title>', 'ut-scan', 'ut-lists', 'ut-dialog',
@@ -104,7 +105,8 @@ my %pages = (
     'activity.html.tt' => [
         '<title>My Activity</title>', 'ut-lists',
         'UT_STR', 'as86.pro', 'Learn more', 'activity_list',
-        'cannot be undone', 'data-undo',
+        'cannot be undone', 'data-undo', 'Confirm undo', 'Undo now',
+        'Undone here already', 'ut-dialog',
     ],
 );
 

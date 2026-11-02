@@ -409,6 +409,52 @@ sub call_undo {
     is_deeply( $res->{data}{paths}, [], 'no paths' );
 }
 
+{
+    # Targeted undo: older journal refused while a newer exists, newest
+    # works once then reports already undone.
+    my $home = make_home();
+    make_path("$home/tmp");
+    chmod 0700, "$home/tmp";
+    my ( $ok, $res ) = call_fix();
+    ok( $ok, 'first fix ok' );
+    my $j1 = $res->{data}{undo_journal};
+    ok( defined $j1, 'first journal named' );
+    sleep 1;
+    chmod 0700, "$home/tmp";
+    ( $ok, $res ) = call_fix();
+    ok( $ok, 'second fix ok' );
+    my $j2 = $res->{data}{undo_journal};
+    ok( defined $j2 && $j2 ne $j1, 'second journal differs' );
+    chmod 0755, "$home/tmp";
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::home_permissions_undo(
+        FakeArgs->new( journal => $j1 ), $res );
+    ok( !$ok, 'older targeted undo refused' );
+    like( $res->{errors}[0][0], qr/newer change exists/,
+        'refusal names newer change' );
+    chmod 0755, "$home/tmp";
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::home_permissions_undo(
+        FakeArgs->new( journal => $j2 ), $res );
+    ok( $ok, 'newest targeted undo accepted' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::home_permissions_undo(
+        FakeArgs->new( journal => $j2 ), $res );
+    ok( !$ok, 'used targeted undo refused' );
+    is( $res->{errors}[0][0], 'already undone', 'used reads as undone' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::home_permissions_undo(
+        FakeArgs->new( journal => 'fixhome-20000101T000000-1.jsonl.gz' ),
+        $res );
+    ok( !$ok, 'unknown journal refused' );
+    is( $res->{errors}[0][0], 'already undone', 'unknown reads as undone' );
+    my $alog = Cpanel::API::UserTools::_activity_list( $home, 100 );
+    my ($fix_entry) = grep { $_->{action} eq 'fix modes' } @{$alog};
+    ok( defined $fix_entry, 'fix logged' );
+    is( $fix_entry->{undo}{fn}, 'home_permissions_undo', 'fix names undo' );
+    ok( defined $fix_entry->{undo}{args}{journal}, 'fix names the journal' );
+}
+
 # --- maketext routing ------------------------------------------------------------------
 {
     my $home = make_home();
@@ -582,6 +628,32 @@ sub wait_job_done {
     ok( $ust->{data}{summary}{counts}{changed} >= 4, 'bulk undo restored all changed modes' );
     is( ( CORE::lstat("$home/public_html/index.html") )[2] & 07777,
         0600, 'index.html mode restored to 0600' );
+}
+
+# --- bulk targeted undo: older refused, unknown is already undone --------
+{
+    my $home = make_bulk_home();
+    my $j1 = Cpanel::API::UserTools::_write_journal(
+        $home, 'bulk',
+        [ { rel => 'public_html/index.html', from => 0600, to => 0644 } ] );
+    ok( defined $j1, 'bulk journal 1 written' );
+    sleep 1;
+    my $j2 = Cpanel::API::UserTools::_write_journal(
+        $home, 'bulk',
+        [ { rel => 'public_html/index.html', from => 0600, to => 0644 } ] );
+    ok( defined $j2 && $j2 ne $j1, 'bulk journal 2 differs' );
+    my $ures = FakeResult->new();
+    my $ok = Cpanel::API::UserTools::bulk_permissions_undo(
+        FakeArgs->new( journal => $j1 ), $ures );
+    ok( !$ok, 'older bulk undo refused' );
+    like( $ures->{errors}[0][0], qr/newer change exists/,
+        'bulk refusal names newer change' );
+    $ures = FakeResult->new();
+    $ok = Cpanel::API::UserTools::bulk_permissions_undo(
+        FakeArgs->new( journal => 'bulk-20000101T000000-1.jsonl.gz' ),
+        $ures );
+    ok( !$ok, 'unknown bulk journal refused' );
+    is( $ures->{errors}[0][0], 'already undone', 'unknown reads as undone' );
 }
 
 # --- small (d): undo busy reattach + empty history -------------------------------
@@ -1369,9 +1441,14 @@ sub site_wait_done {
     is( scalar(@{$alog}), 1, 'fix logged' );
     is( $alog->[0]{tool}, 'site_doctor', 'tool recorded' );
     is( $alog->[0]{undo}{fn}, 'doctor_htaccess_undo', 'fix carries its undo' );
-    is_deeply( $alog->[0]{undo}{args},
+    is_deeply(
+        { job_id => $alog->[0]{undo}{args}{job_id},
+          domain => $alog->[0]{undo}{args}{domain} },
         { job_id => 'doctor-1', domain => 'primary.test' },
-        'undo args recorded' );
+        'undo targets recorded'
+    );
+    like( $alog->[0]{undo}{args}{backup} // '',
+        qr/^\.htaccess\.usertools-bak-/, 'undo names the backup' );
     my $after = do { open my $rfh, '<', "$home/public_html/.htaccess" or die $!; local $/; <$rfh> };
     like( $after, qr/# BEGIN UserTools Site Doctor/, 'marked block added' );
     like( $after, qr/# php_value upload_max_filesize 64M/, 'line commented' );
@@ -1545,7 +1622,8 @@ sub site_wait_done {
     is( $legacy->[0][3], '/home/example/public_html/old.sql',
         'legacy rule gains the mapped filename' );
     my @nasty = ( 'we"ird.sql', "new\nline.sql", "tab\there.sql",
-        'back\\.sql', "quo'te.sql", 'back`tick.sql', "caf\xc3\xa9.sql" );
+        'back\\.sql', "quo'te.sql", 'back`tick.sql', "caf\xc3\xa9.sql",
+        'a%{b.sql', '%', '%{', '%{HTTP_HOST}', 'pay$1.sql', '$1' );
     my $n = 0;
     for my $bad ( @nasty, '', undef ) {
         $n++;
@@ -1836,6 +1914,19 @@ sub cron_policy_file {
         'duplicate flagged on both copies (second)' );
     my @dup = grep { $_->{kind} eq 'duplicate' } @{ $parsed->{findings} };
     is( scalar(@dup), 2, 'two duplicate findings' );
+    my $quiet = Cpanel::API::UserTools::_cron_parse(
+        "MAILTO=\"\"\n0 6 * * * /bin/echo hi\n",
+        $home, [] );
+    is( scalar( @{ $quiet->{lines}[1]{flags} } ), 1,
+        'empty MAILTO shows only the mailto note' );
+    is( $quiet->{lines}[1]{flags}[0]{kind}, 'mailto_empty',
+        'mailto note has its own kind' );
+    ok( !$quiet->{lines}[1]{fixable}, 'suppressed line is not fixable' );
+    my $pct = Cpanel::API::UserTools::_cron_parse(
+        "* * * * * /bin/echo 100% done\n", $home, [] );
+    ok( ( grep { $_->{kind} eq 'percent_input' } @{ $pct->{lines}[0]{flags} } ),
+        'unescaped percent flagged' );
+    ok( !$pct->{lines}[0]{fixable}, 'percent line is not fixable' );
     my $foreign = Cpanel::API::UserTools::_cron_parse(
         "0 7 * * * /usr/bin/wget -q https://other.test/x\n",
         $home, ['primary.test'] );
@@ -1892,7 +1983,7 @@ sub cron_policy_file {
     my $seed = join( '',
         "MAILTO=ops\@example.com\n",
         "* * * * * /usr/bin/php $home/scripts/nightly.php\n",
-        "*/5 * * * * echo hi >/dev/null 2>&1\n",
+        "*/5 * * * * /usr/bin/php $home/scripts/hourly.php\n",
     );
     open my $cf, '>', "$home/crontab.txt" or die $!;
     print $cf $seed;
@@ -1925,6 +2016,7 @@ sub cron_policy_file {
     ok( $ok, 'fix applied' );
     ok( defined $res->{data}{backup}, 'backup recorded' );
     my $new_text = $res->{data}{new};
+    my $backup_b1 = $res->{data}{backup};
     my $after = do { open my $rfh, '<', "$home/crontab.txt" or die $!; local $/; <$rfh> };
     like( $after, qr{\Q$home/scripts/nightly.php\E >/dev/null 2>&1},
         'line silenced in place' );
@@ -1935,19 +2027,56 @@ sub cron_policy_file {
         FakeArgs->new( line => 'L2', text => $new_text ), $res );
     ok( !$ok, 'second fix refused (already redirected)' );
     $res = FakeResult->new();
-    $ok  = Cpanel::API::UserTools::cron_undo( FakeArgs->new(), $res );
-    ok( $ok, 'undo accepted' );
-    my $back = do { open my $rfh, '<', "$home/crontab.txt" or die $!; local $/; <$rfh> };
-    is( $back, $seed, 'original crontab back byte-for-byte' );
-    my $alog = Cpanel::API::UserTools::_activity_list( $home, 100 );
-    is( scalar(@{$alog}), 2, 'fix and undo both logged' );
-    is( $alog->[0]{tool}, 'cron_doctor', 'undo logged newest-first' );
-    is( $alog->[0]{action}, 'undo cron fix', 'undo action recorded' );
-    is( $alog->[1]{action}, 'silence cron line', 'fix action recorded' );
-    is( $alog->[1]{undo}{fn}, 'cron_undo', 'fix carries its undo' );
-    my @baks = glob "$home/.cpanel/usertools/cron/crontab-*.bak";
-    is( scalar(@baks), 0, 'used backup consumed' );
+    $ok  = Cpanel::API::UserTools::cron_scan( FakeArgs->new(), $res );
+    my ($l3) = grep { $_->{id} eq 'L3' } @{ $res->{data}{lines} };
     $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::cron_fix_output(
+        FakeArgs->new( line => 'L3', text => $l3->{raw} ), $res );
+    ok( $ok, 'second line fixed too' );
+    my $backup_b2 = $res->{data}{backup};
+    # Undo the older fix while the newer one stands: refused.
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::cron_undo(
+        FakeArgs->new( line => 'L2', backup => $backup_b1 ), $res );
+    ok( !$ok, 'older undo refused while a newer change exists' );
+    like( $res->{errors}[0][0], qr/newer change exists/, 'refusal says why' );
+    # A line added after the fix survives the undo of that fix.
+    open my $afh, '>>', "$home/crontab.txt" or die $!;
+    print $afh "# added after the fix\n";
+    close $afh;
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::cron_undo(
+        FakeArgs->new( line => 'L3', backup => $backup_b2 ), $res );
+    ok( $ok, 'newest undo accepted' );
+    my $back = do { open my $rfh, '<', "$home/crontab.txt" or die $!; local $/; <$rfh> };
+    like( $back, qr/^# added after the fix$/m, 'later-added line kept' );
+    like( $back, qr{\Q$home/scripts/nightly.php\E >/dev/null 2>&1},
+        'other fixed line left alone' );
+    like( $back, qr{^\*/5 \* \* \* \* /usr/bin/php \Q$home/scripts/hourly.php\E$}m,
+        'only the silenced line went back' );
+    is( ( split /\n/, $back ), 4, 'no lines added or lost' );
+    # The same undo again: already used.
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::cron_undo(
+        FakeArgs->new( line => 'L3', backup => $backup_b2 ), $res );
+    ok( !$ok, 'used undo refused' );
+    is( $res->{errors}[0][0], 'already undone', 'used reads as undone' );
+    # Unknown backup id: already undone. Argless with no backups: refused.
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::cron_undo(
+        FakeArgs->new( line => 'L9', backup => 'crontab-20000101T000000-1-000001.json' ), $res );
+    ok( !$ok, 'unknown backup refused' );
+    my $alog = Cpanel::API::UserTools::_activity_list( $home, 100 );
+    ok( ( grep { $_->{action} eq 'silence cron line' } @{$alog} ),
+        'fix logged' );
+    my ($fix_entry) = grep { $_->{action} eq 'silence cron line'
+          && ( $_->{summary}{line} // '' ) eq 'L2' } @{$alog};
+    is( $fix_entry->{undo}{fn}, 'cron_undo', 'fix carries its undo' );
+    is( $fix_entry->{undo}{args}{line}, 'L2', 'undo names the line' );
+    ok( defined $fix_entry->{undo}{args}{backup}, 'undo names the backup' );
+    my $home2 = make_home();
+    $res = FakeResult->new();
+    local $Cpanel::API::UserTools::TEST_HOME = $home2;
     $ok  = Cpanel::API::UserTools::cron_undo( FakeArgs->new(), $res );
     ok( !$ok, 'undo with no backup refused' );
 }
@@ -1961,7 +2090,7 @@ sub cron_policy_file {
         ok( defined $name, "backup $i written" );
         sleep 1;
     }
-    my @baks = sort glob "$dir/crontab-*.bak";
+    my @baks = sort glob "$dir/crontab-*.json";
     is( scalar(@baks), 3, 'only three backups kept' );
     my $latest = Cpanel::API::UserTools::_cron_backup_latest($home);
     is( $latest, $baks[-1], 'latest backup found' );

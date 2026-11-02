@@ -43,8 +43,10 @@ var UT_STR = {
     exposedYes: "[% locale.maketext('exposed') %]",
     exposedConfirmed: "[% locale.maketext('exposed (confirmed)') %]",
     exposedLikely: "[% locale.maketext('exposed (likely)') %]",
-    exposedNo: "[% locale.maketext('not downloadable') %]",
+    exposedNo: "[% locale.maketext('not exposed') %]",
     notProbed: "[% locale.maketext('not checked') %]",
+    notCheckedMany: "[% locale.maketext('COUNT files could not be checked (redirects, errors or failed hops are never called safe).') %]",
+    notCheckedOne: "[% locale.maketext('1 file could not be checked (a redirect, error or failed hop is never called safe).') %]",
     moveOnlyReason: "[% locale.maketext('Block is unavailable for this file name; use Move to quarantine instead.') %]",
     move: "[% locale.maketext('Move to quarantine') %]",
     block: "[% locale.maketext('Block') %]",
@@ -103,7 +105,21 @@ window.addEventListener("DOMContentLoaded", function () {
             if (f.confidence === "likely") { return UserTools.escHtml(UT_STR.exposedLikely); }
             return UserTools.escHtml(UT_STR.exposedYes);
         }
-        if (f.http_status) { return UserTools.escHtml(UT_STR.exposedNo); }
+        // Only 401/403/404/410 ever read as safe; redirects, failed
+        // HTTPS hops and server errors are "not checked" with a reason.
+        if (f.state === "not_exposed") { return UserTools.escHtml(UT_STR.exposedNo); }
+        if (f.state === "not_checked") {
+            var why = f.reason ? ": " + f.reason : "";
+            return UserTools.escHtml(UT_STR.notProbed + why);
+        }
+        if (f.http_status === 401 || f.http_status === 403 ||
+            f.http_status === 404 || f.http_status === 410) {
+            return UserTools.escHtml(UT_STR.exposedNo);
+        }
+        if (f.http_status) {
+            var reason = f.reason ? ": " + f.reason : "";
+            return UserTools.escHtml(UT_STR.notProbed + reason);
+        }
         return UserTools.escHtml(UT_STR.notProbed);
     }
     function startJob() {
@@ -150,12 +166,17 @@ window.addEventListener("DOMContentLoaded", function () {
     function renderResult(summary) {
         var findings = summary.findings || [];
         lastFindings = findings;
+        var notChecked = (summary.counts && summary.counts.not_checked) || 0;
         if (!findings.length) {
             setBanner("ok", UT_STR.noneFound);
             listsEl.innerHTML = "";
             return;
         }
-        setBanner("warn", UserTools.plural(findings.length, UT_STR.foundOne, UT_STR.foundMany));
+        var banner = UserTools.plural(findings.length, UT_STR.foundOne, UT_STR.foundMany);
+        if (notChecked > 0) {
+            banner += " " + UserTools.plural(notChecked, UT_STR.notCheckedOne, UT_STR.notCheckedMany);
+        }
+        setBanner("warn", banner);
         var html = '<table class="ut-table"><thead><tr><th>File</th><th>Status</th><th></th></tr></thead><tbody>';
         findings.forEach(function (f) {
             html += "<tr><td>" + UserTools.escHtml(f.relpath || "?") + "<br><span class=\"ut-path\">" +
