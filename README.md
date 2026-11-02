@@ -1,7 +1,7 @@
 # UserTools for cPanel
 
 Self-service tools for cPanel users, managed by the server admin.
-Version 0.1.2 (public beta).
+Version 0.2.0 (public beta).
 
 ## Requirements
 
@@ -14,18 +14,18 @@ Version 0.1.2 (public beta).
 One line (pinned release, verified download, then install):
 
 ```sh
-curl -fsSL https://github.com/amirs86/usertools-for-cpanel/releases/download/v0.1.2/bootstrap-install.sh | bash -s -- \
-    --repo amirs86/usertools-for-cpanel --version v0.1.2 --yes
+curl -fsSL https://github.com/amirs86/usertools-for-cpanel/releases/download/v0.2.0/bootstrap-install.sh | bash -s -- \
+    --repo amirs86/usertools-for-cpanel --version v0.2.0 --yes
 ```
 
 Pinned install with checksum check (recommended when you want a fixed
 version). Copy the expected hash from the release notes first:
 
 ```sh
-curl -fsSLO https://github.com/amirs86/usertools-for-cpanel/releases/download/v0.1.2/usertools-for-cpanel-v0.1.2.tar.gz
-curl -fsSLO https://github.com/amirs86/usertools-for-cpanel/releases/download/v0.1.2/usertools-for-cpanel-v0.1.2.tar.gz.sha256
-sha256sum -c usertools-for-cpanel-v0.1.2.tar.gz.sha256
-tar -xzf usertools-for-cpanel-v0.1.2.tar.gz && cd usertools-for-cpanel-*
+curl -fsSLO https://github.com/amirs86/usertools-for-cpanel/releases/download/v0.2.0/usertools-for-cpanel-v0.2.0.tar.gz
+curl -fsSLO https://github.com/amirs86/usertools-for-cpanel/releases/download/v0.2.0/usertools-for-cpanel-v0.2.0.tar.gz.sha256
+sha256sum -c usertools-for-cpanel-v0.2.0.tar.gz.sha256
+tar -xzf usertools-for-cpanel-v0.2.0.tar.gz && cd usertools-for-cpanel-*
 ./install.sh --yes
 ```
 
@@ -34,7 +34,7 @@ instead of the downloaded `.sha256` file (both files above come from the
 same place, so that check only proves the download was not damaged):
 
 ```sh
-./bootstrap-install.sh --repo amirs86/usertools-for-cpanel --version v0.1.2 --sha256 HEX --yes
+./bootstrap-install.sh --repo amirs86/usertools-for-cpanel --version v0.2.0 --sha256 HEX --yes
 ```
 
 ## Verify a release
@@ -45,8 +45,8 @@ the tagged commit — not merely that it downloaded intact. With
 [cosign](https://github.com/sigstore/cosign) installed:
 
 ```sh
-cosign verify-blob usertools-for-cpanel-v0.1.2.tar.gz \
-    --bundle usertools-for-cpanel-v0.1.2.tar.gz.sigstore.json \
+cosign verify-blob usertools-for-cpanel-v0.2.0.tar.gz \
+    --bundle usertools-for-cpanel-v0.2.0.tar.gz.sigstore.json \
     --certificate-identity-regexp '^https://github.com/amirs86/usertools-for-cpanel/\.github/workflows/ci\.yml@refs/tags/v' \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -111,6 +111,7 @@ Full removal including settings and log:
 |---|---|
 | 11.138 / AlmaLinux 9 | tested |
 | 11.134 LTS / AlmaLinux 10 with CloudLinux CageFS | tested |
+| 11.138 / AlmaLinux 10.2 with CloudLinux 10, CageFS and ea-nginx | tested |
 | Reseller-owned packages + account-creation hook (11.134 LTS) | tested |
 | Signed update, repeat and rollback (11.134 LTS) | tested |
 | Meridian | not supported yet: cPanel has no published plugin docs for it, and the pages do not load for accounts on Meridian (switch those accounts to Jupiter) |

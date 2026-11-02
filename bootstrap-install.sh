@@ -11,8 +11,8 @@
 #
 # Usage:
 #   curl -fsSL https://<host>/bootstrap-install.sh | bash -s -- \
-#       --repo amirs86/usertools-for-cpanel --version v0.1.2 [--sha256 HEX] [--require-signature] [--yes]
-#   ./bootstrap-install.sh --repo amirs86/usertools-for-cpanel --version v0.1.2
+#       --repo amirs86/usertools-for-cpanel --version v0.2.0 [--sha256 HEX] [--require-signature] [--yes]
+#   ./bootstrap-install.sh --repo amirs86/usertools-for-cpanel --version v0.2.0
 #
 # Signature verification: when cosign is installed and the release
 # publishes a Sigstore bundle, the tarball's signature is verified against

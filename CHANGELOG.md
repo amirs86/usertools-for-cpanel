@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. Versions follow
 [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-11-02
 
 ### Added
 
@@ -22,21 +22,26 @@ All notable changes to this project are documented here. Versions follow
   blocked with a marked `.htaccess` deny rule that matches the mapped
   file (undo removes it), with a re-probe after each action. Names that
   cannot be quoted safely are never written to `.htaccess` (Move only).
+  Redirects that cannot be followed, failed HTTPS checks and server
+  errors read "not checked" with the reason, never "not exposed".
   Off by default: `enable_exposed_files=0` policy key, WHM checkbox,
   and its own Feature Manager feature.
 - Cron Doctor: read-only flags over the user's own crontab (every-minute
   schedules, unredirected output, bare `php` without a path, duplicate
   lines, missing script files, `wget`/`curl` of the account's own URLs),
   with one fix in this release (append output redirection to a chosen
-  line, full crontab backed up) and an undo that restores the newest
-  backup. Off by default: `enable_cron_doctor=0` policy key, WHM
-  checkbox, and its own Feature Manager feature.
+  line, full crontab backed up) and an undo that puts back only that
+  line, so cron jobs added later are kept. Lines whose output cannot be
+  silenced this way (an unescaped `%`, an empty `MAILTO`) are refused.
+  Off by default: `enable_cron_doctor=0` policy key, WHM checkbox, and
+  its own Feature Manager feature.
 - My Activity: every UAPI action that changes something appends one JSON
   line to `~/.cpanel/usertools/activity.jsonl` (0600, capped at 1,000
   lines): time, tool, action, summary counts and an undo reference when
-  one exists. The page lists the latest 100 with Undo buttons that call
-  the tool's existing undo. No file contents, no secrets in the log.
-
+  one exists. The page lists the latest 100 with Undo buttons; each undo
+  names the exact change, asks for confirmation, and is refused when a
+  newer change exists or it was already undone. No file contents, no secrets in
+  the log.
 - Space Cleaner: preview and reclaim disk space and inodes across six
   fixed categories (big `error_log` and per-website PHP logs truncated
   in place; crash dumps, framework and WordPress caches, and developer
