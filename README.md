@@ -81,7 +81,7 @@ Full removal including settings and log:
 
 ## After installing
 
-1. WHM → Packages → Feature Manager: tick the six `usertools_*`
+1. WHM → Packages → Feature Manager: tick the eight `usertools_*`
    features for each package that should get the tools. Everything is
    **off by default** until you do this. (`./install.sh
    --enable-features=LIST` prints the exact steps for a list.)
@@ -100,6 +100,8 @@ Full removal including settings and log:
 - Manage Shell: let users turn SSH access off, jailed, or normal (if you allow it), with policy gates and audit.
 - App Helper: find web apps, run maintenance commands, install dependencies, view logs, manage the scheduler, check `.env` safety, and adjust document roots and `.htaccess` files.
 - Space Cleaner: preview, then reclaim disk space and inodes (big logs, crash dumps, framework and WordPress caches, developer caches, old plugin files), with trash, restore, and empty.
+- Site Doctor: check every website at a glance (homepage status, folders, `.htaccess` mistakes, certificates, recent errors), with one fix for php_value lines under PHP-FPM and undo.
+- Exposed Files: find files that must never be public and probe whether the web server serves them, then move them to quarantine (restore) or block them with a marked `.htaccess` rule (undo).
 
 ## Tested
 
@@ -166,9 +168,10 @@ adds missing keys:
 - `allowed_shell_modes` (list): which modes users may pick
   (`disabled`, `jailed`, plus `normal` only if you add it).
 - `enable_fix_home`, `enable_bulk_perms`, `enable_ownership_report`,
-  `enable_app_helper`, `enable_space_cleaner` (0/1): one switch per
-  tool. Space Cleaner ships `0`: ticking its feature alone is not
-  enough until you turn this on.
+  `enable_app_helper`, `enable_space_cleaner`, `enable_site_doctor`,
+  `enable_exposed_files` (0/1): one switch per tool. The last three
+  ship `0`: ticking their feature alone is not enough until you turn
+  these on.
 - `cleaner_log_min_mb` (number, MB, 1–1024, default 50): `error_log`
   and per-website PHP logs at or above this size qualify for
   truncating.
@@ -264,6 +267,14 @@ installs.
 ### App Helper
 
 ![App Helper page: application list with maintenance panels](docs/screenshots/05-app-helper.png)
+
+### Site Doctor
+
+![Site Doctor page: per-website verdicts with details and a fix button](docs/screenshots/08-site-doctor.png)
+
+### Exposed Files
+
+![Exposed Files page: findings table with quarantine and block actions](docs/screenshots/09-exposed-files.png)
 
 ### Space Cleaner
 

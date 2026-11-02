@@ -33,6 +33,8 @@ our $FEATURE_OWNERSHIP_REPORT = 'usertools_ownership_report';
 our $FEATURE_SHELL = 'usertools_shell';
 our $FEATURE_APP_HELPER = 'usertools_app_helper';
 our $FEATURE_SPACE_CLEANER = 'usertools_space_cleaner';
+our $FEATURE_SITE_DOCTOR = 'usertools_site_doctor';
+our $FEATURE_EXPOSED_FILES = 'usertools_exposed_files';
 
 our %API = (
     'home_permissions_check' => { 'needs_feature' => $FEATURE_FIX_HOME },
@@ -54,6 +56,20 @@ our %API = (
     'space_trash_list'    => { 'needs_feature' => $FEATURE_SPACE_CLEANER },
     'space_trash_restore' => { 'needs_feature' => $FEATURE_SPACE_CLEANER },
     'space_trash_empty'   => { 'needs_feature' => $FEATURE_SPACE_CLEANER },
+    'doctor_scan_start'   => { 'needs_feature' => $FEATURE_SITE_DOCTOR },
+    'doctor_scan_status'  => { 'needs_feature' => $FEATURE_SITE_DOCTOR },
+    'doctor_scan_cancel'  => { 'needs_feature' => $FEATURE_SITE_DOCTOR },
+    'doctor_htaccess_preview' => { 'needs_feature' => $FEATURE_SITE_DOCTOR },
+    'doctor_htaccess_fix'     => { 'needs_feature' => $FEATURE_SITE_DOCTOR },
+    'doctor_htaccess_undo'    => { 'needs_feature' => $FEATURE_SITE_DOCTOR },
+    'exposed_scan_start'  => { 'needs_feature' => $FEATURE_EXPOSED_FILES },
+    'exposed_scan_status' => { 'needs_feature' => $FEATURE_EXPOSED_FILES },
+    'exposed_scan_cancel' => { 'needs_feature' => $FEATURE_EXPOSED_FILES },
+    'exposed_move'          => { 'needs_feature' => $FEATURE_EXPOSED_FILES },
+    'exposed_restore'       => { 'needs_feature' => $FEATURE_EXPOSED_FILES },
+    'exposed_quarantine_list' => { 'needs_feature' => $FEATURE_EXPOSED_FILES },
+    'exposed_block'   => { 'needs_feature' => $FEATURE_EXPOSED_FILES },
+    'exposed_unblock' => { 'needs_feature' => $FEATURE_EXPOSED_FILES },
     'shell_status' => { 'needs_feature' => $FEATURE_SHELL },
     'shell_set'    => { 'needs_feature' => $FEATURE_SHELL },
     'app_helper_list'      => { 'needs_feature' => $FEATURE_APP_HELPER },
@@ -93,6 +109,8 @@ our %API = (
 our $ENGINE_PATH = '/usr/local/cpanel/3rdparty/usertools/bin/perm_engine.py';
 our $SPACE_ENGINE_PATH =
   '/usr/local/cpanel/3rdparty/usertools/bin/space_cleaner.py';
+our $SITE_ENGINE_PATH =
+  '/usr/local/cpanel/3rdparty/usertools/bin/site_doctor.py';
 our $ENGINE_PYTHON = '/usr/bin/python3';
 
 # Fixed Space Cleaner categories: the only selectable things. The engine
@@ -117,12 +135,17 @@ our @SPACE_CATEGORIES = qw(
 # (Cpanel::API::execute) are programmed directly in tests; there is no CLI
 # seam because user-context code never shells to `uapi --user=`.
 # $TEST_SPACE_ENGINE fakes the Space Cleaner engine script the same way
-# $TEST_ENGINE fakes the permission engine.
+# $TEST_ENGINE fakes the permission engine. $TEST_SITE_ENGINE fakes the
+# site engine; $TEST_EXPOSED_PROBE, when defined, replaces the live
+# post-action HTTP re-probe with a canned {status, exposed} answer;
+# $TEST_SITE_IP_OVERRIDE and $TEST_SITE_PORT_OVERRIDE point probes at a
+# local test server.
 our ( $TEST_USER, $TEST_HOME, $TEST_ENGINE_BIN, $TEST_ENGINE,
     $TEST_ARTISAN_TIMEOUT, $TEST_PHP_DIR, $TEST_DOMAIN_DATA_DIR,
     $TEST_ENV_BUDGET_SECONDS, $TEST_CPANEL_CONFIG, $TEST_POLICY_FILE,
     $TEST_ALT_PHP_DIR, $TEST_RECIPE_WORKER, $TEST_COMPOSER, $TEST_CRONTAB,
-    $TEST_CAGEFS_MP, $TEST_CAGEFS_CONF_D, $TEST_SPACE_ENGINE );
+    $TEST_CAGEFS_MP, $TEST_CAGEFS_CONF_D, $TEST_SPACE_ENGINE, $TEST_SITE_ENGINE,
+    $TEST_EXPOSED_PROBE, $TEST_SITE_IP_OVERRIDE, $TEST_SITE_PORT_OVERRIDE );
 
 # Composer locations after the admin-set composer_path: a plain
 # package var so tests can localise it instead of depending on whatever
@@ -940,7 +963,7 @@ sub _proc_is_engine {
     close $fh;
     return 0 unless defined $cmd;
     $cmd =~ s/\0/ /g;
-    return $cmd =~ /(?:perm_engine|space_cleaner)\.py/ ? 1 : 0;
+    return $cmd =~ /(?:perm_engine|space_cleaner|site_doctor)\.py/ ? 1 : 0;
 }
 
 sub _spawn_engine {
@@ -1995,6 +2018,1250 @@ sub space_trash_empty {
             emptied => $counts->{changed} + 0,
             batch   => $which,
             state   => 'done',
+        }
+    );
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Site Doctor + Exposed Files Scanner: read-only website checks with
+# probed findings, plus server-derived fixes (commented php_value lines,
+# quarantine moves, marked deny blocks), every one with preview or an
+# existing-file undo. Probes go to the account's own address with the
+# domain as Host (never through public DNS); writes never take paths
+# from the request (domain names resolve server-side, finding ids resolve
+# against the stored scan). Both tools are off by default: Feature
+# Manager feature plus enable_site_doctor / enable_exposed_files.
+# ---------------------------------------------------------------------------
+
+our $SITE_MAX_DOMAINS = 10;
+our $SITE_BUDGET_SECONDS = 30;
+our $SITE_TIMEOUT_SECONDS = 5;
+
+sub _site_policy_enabled {
+    my ( $result, $key ) = @_;
+    # Off by default: the WHM policy must explicitly say 1.
+    my $policy = _read_user_policy();
+    if ( ref $policy eq 'HASH' && ( $policy->{$key} // '' ) eq '1' ) {
+        return 1;
+    }
+    $result->error('This feature is not enabled for your account.');
+    return 0;
+}
+
+sub _site_engine_bin {
+    return $TEST_SITE_ENGINE // $SITE_ENGINE_PATH;
+}
+
+sub _site_targets {
+    my ($user) = @_;
+    # Server-side website list with probe addresses. DomainInfo first
+    # (ip and port travel with each record); the userdata files as
+    # fallback (ip:/port: lines when present).
+    my @out;
+    my $data = _call_uapi( 'DomainInfo', 'domains_data' );
+    if ( ref $data eq 'HASH' ) {
+        my $d = ref $data->{result} eq 'HASH' ? $data->{result}{data} : $data->{data};
+        my @recs;
+        if ( ref $d eq 'HASH' ) {
+            push @recs, $d->{main_domain} if ref $d->{main_domain} eq 'HASH';
+            for my $k (qw(addon_domains sub_domains parked_domains alias_domains)) {
+                push @recs, @{ $d->{$k} } if ref $d->{$k} eq 'ARRAY';
+            }
+        }
+        elsif ( ref $d eq 'ARRAY' ) {
+            @recs = @{$d};
+        }
+        my %seen;
+        for my $r (@recs) {
+            next unless ref $r eq 'HASH';
+            next unless defined $r->{domain} && defined $r->{documentroot};
+            next if $seen{ lc( $r->{domain} ) }++;
+            my %t = ( domain => $r->{domain}, documentroot => $r->{documentroot} );
+            $t{ip} = $r->{ip} if defined $r->{ip} && $r->{ip} ne '';
+            if ( defined $r->{port} && $r->{port} =~ /^\d+$/ ) {
+                $t{port} = $r->{port} + 0;
+            }
+            push @out, \%t;
+        }
+    }
+    if ( !@out ) {
+        my $base = defined $TEST_DOMAIN_DATA_DIR ? $TEST_DOMAIN_DATA_DIR : '/var/cpanel/userdata';
+        my $dir = "$base/$user";
+        my $dh;
+        if ( opendir( $dh, $dir ) ) {
+            for my $f ( sort grep { -f "$dir/$_" } readdir $dh ) {
+                next if $f eq 'main' || $f eq 'cache' || $f =~ /^\./;
+                next if $f =~ /(?:_SSL|\.cache|\.json|\.yaml)$/ || $f =~ /\.php-fpm\./;
+                next unless $f =~ /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/;
+                my ( $docroot, $ip, $port );
+                if ( open my $fh, '<', "$dir/$f" ) {
+                    while ( my $line = <$fh> ) {
+                        $docroot = $1 if !defined $docroot && $line =~ /^\s*documentroot:\s*(\S+)\s*$/;
+                        $ip      = $1 if !defined $ip      && $line =~ /^\s*ip:\s*(\S+)\s*$/;
+                        $port    = $1 if !defined $port    && $line =~ /^\s*port:\s*(\d+)\s*$/;
+                    }
+                    close $fh;
+                }
+                next unless defined $docroot;
+                my %t = ( domain => $f, documentroot => $docroot );
+                $t{ip}   = $ip if defined $ip;
+                $t{port} = $port + 0 if defined $port;
+                push @out, \%t;
+            }
+            closedir $dh;
+        }
+    }
+    if ( defined $TEST_SITE_IP_OVERRIDE ) {
+        $_->{ip} = $TEST_SITE_IP_OVERRIDE for @out;
+    }
+    if ( defined $TEST_SITE_PORT_OVERRIDE ) {
+        $_->{port} = $TEST_SITE_PORT_OVERRIDE + 0 for @out;
+    }
+    return @out;
+}
+
+sub _site_php_map {
+    my ($user) = @_;
+    # lc(host) => { version => 'NN' (ea-phpNN digits or undef), fpm => 0/1 }.
+    # The fpm flag is the server-side handler answer: never guess it from
+    # the .htaccess handler block. Unknown shapes contribute nothing.
+    my %map;
+    my $data = _fetch_langphp_data($user);
+    _collect_site_php( $data, \%map );
+    return \%map;
+}
+
+sub _collect_site_php {
+    my ( $node, $map ) = @_;
+    if ( ref $node eq 'HASH' ) {
+        my ($dkey) = grep { /^(?:domain|vhost|servername)$/i } keys %{$node};
+        if ( defined $dkey && !ref $node->{$dkey} ) {
+            my ($host) = $node->{$dkey} =~ /(\S+)/;
+            if ( defined $host ) {
+                my ($vkey) = grep { /^(?:php_version|version|php)$/i } keys %{$node};
+                my $ver;
+                if ( defined $vkey && !ref $node->{$vkey} ) {
+                    ($ver) = $node->{$vkey} =~ /ea-php(\d\d)/;
+                }
+                my ($fkey) = grep { /^php_fpm$/i } keys %{$node};
+                my $has_info = ( defined $ver || defined $fkey ) ? 1 : 0;
+                if ($has_info) {
+                    $map->{ lc $host } = {
+                        version => $ver,
+                        fpm     => ( defined $fkey && $node->{$fkey} ) ? 1 : 0,
+                    };
+                }
+            }
+        }
+        for my $v ( values %{$node} ) {
+            _collect_site_php( $v, $map ) if ref $v;
+        }
+    }
+    elsif ( ref $node eq 'ARRAY' ) {
+        for my $v ( @{$node} ) {
+            _collect_site_php( $v, $map ) if ref $v;
+        }
+    }
+    return;
+}
+
+sub _site_domain_rec {
+    my ( $user, $domain, $targets_ar ) = @_;
+    # Server-side allowlist: the requested domain must be one of the
+    # account's own. Returns the record or (undef, reason).
+    return ( undef, 'choose one of your websites' )
+      unless defined $domain && $domain ne '';
+    my @targets = defined $targets_ar ? @{$targets_ar} : _site_targets($user);
+    for my $t (@targets) {
+        next unless ref $t eq 'HASH';
+        if ( defined $t->{domain} && lc( $t->{domain} ) eq lc($domain) ) {
+            return ( $t, undef );
+        }
+    }
+    return ( undef, 'unknown website' );
+}
+
+sub _doctor_verdicts {
+    my ( $rec, $php ) = @_;
+    # One plain-words line per finding, plus an attention flag the page
+    # uses for its banner. Pure function of the engine facts (isolated
+    # for tests); $php is {version, fpm}.
+    $php = {} unless ref $php eq 'HASH';
+    my @lines;
+    my $attention = 0;
+    my $say = sub { push @lines, $_[0]; $attention = 1 if $_[1]; };
+    my $domain = $rec->{domain} // '?';
+    if ( $rec->{deferred} ) {
+        return { lines => ["$domain was not checked ($rec->{reason})."], attention => 1 };
+    }
+    my $http = ref $rec->{http} eq 'HASH' ? $rec->{http} : {};
+    my $status = $http->{status} // 0;
+    if ( !$status ) {
+        $say->( "$domain did not answer: the connection failed "
+          . "(the site may be down, or its DNS may not point here yet).", 1 );
+    }
+    elsif ( $status == 200 ) {
+        my $ms = defined $http->{ms} ? " in $http->{ms} ms" : "";
+        push @lines, "$domain loads (HTTP 200$ms).";
+    }
+    elsif ( $status >= 300 && $status < 400 ) {
+        my $loc = $http->{location} // 'elsewhere';
+        $say->("$domain redirects (HTTP $status to $loc); "
+          . "only the first redirect is shown, it is not followed.", 1);
+    }
+    elsif ( $status == 403 ) {
+        $say->("$domain is forbidden (HTTP 403): check the .htaccess "
+          . "deny rules and the folder permissions.", 1);
+    }
+    elsif ( $status == 404 ) {
+        $say->("$domain returns not found (HTTP 404): check the "
+          . "document root and the default page.", 1);
+    }
+    elsif ( $status >= 500 ) {
+        $say->("$domain returns a server error (HTTP $status): "
+          . "check the error log below.", 1);
+    }
+    else {
+        $say->("$domain answered HTTP $status.", 1);
+    }
+    my $doc = ref $rec->{docroot} eq 'HASH' ? $rec->{docroot} : {};
+    if ( !$doc->{usable} ) {
+        $say->( "Document root problem: $doc->{reason}.", 1 );
+        return { lines => \@lines, attention => $attention };
+    }
+    if ( !$doc->{index} ) {
+        $say->("No index page found (index.html, index.htm or index.php).", 1);
+    }
+    if ( defined $doc->{mode} && $doc->{expected_mode} && $doc->{mode} ne $doc->{expected_mode} ) {
+        $say->("Document root permissions are $doc->{mode}, expected $doc->{expected_mode}.", 1);
+    }
+    if ( $doc->{owner_ok} ? 0 : 1 ) {
+        $say->("Document root is not owned by you.", 1);
+    }
+    my $ht = ref $rec->{htaccess} eq 'HASH' ? $rec->{htaccess} : {};
+    if ( $ht->{present} ) {
+        my @php_lines = ref $ht->{php_value_lines} eq 'ARRAY' ? @{ $ht->{php_value_lines} } : ();
+        if ( @php_lines && $php->{fpm} ) {
+            $say->("The .htaccess sets php_value/php_flag lines ("
+              . join( ', ', @php_lines )
+              . "), which PHP-FPM rejects: comment them out or the site "
+              . "returns 500.", 1);
+        }
+        elsif (@php_lines) {
+            $say->("The .htaccess sets php_value/php_flag lines ("
+              . join( ', ', @php_lines ) . ").", 1);
+        }
+        if ( $ht->{missing_rewrite_engine} ) {
+            $say->("The .htaccess has rewrite rules but no "
+              . "RewriteEngine On: the rules do nothing.", 1);
+        }
+    }
+    else {
+        push @lines, "No .htaccess in the document root.";
+    }
+    my $ssl = ref $rec->{ssl} eq 'HASH' ? $rec->{ssl} : {};
+    if ( $ssl->{ok} ) {
+        my $days = $ssl->{days_left} // 0;
+        if ( $days < 0 ) {
+            $say->("The TLS certificate expired " . ( -$days ) . " days ago.", 1);
+        }
+        elsif ( $days <= 30 ) {
+            $say->("The TLS certificate expires in $days days.", 1);
+        }
+        else {
+            push @lines, "The TLS certificate is valid ($days days left).";
+        }
+    }
+    else {
+        $say->( "The TLS certificate could not be checked"
+          . ( defined $ssl->{error} ? " ($ssl->{error})." : "." ), 1 );
+    }
+    return { lines => \@lines, attention => $attention };
+}
+
+sub _run_site_sync {
+    my ( $home, $args ) = @_;
+    # Run the site engine synchronously (quarantine move/restore touch one
+    # finding at a time, so no detached job is needed). Returns the decoded
+    # summary or (undef, reason).
+    my $py  = $TEST_ENGINE_BIN // $ENGINE_PYTHON;
+    my $bin = $TEST_SITE_ENGINE // $SITE_ENGINE_PATH;
+    my @cmd = ( $py, $bin, @{$args} );
+    if ( ( $ENV{USERTOOLS_TESTING} // '' ) eq '1' && defined $TEST_HOME ) {
+        push @cmd, '--home', $home;
+    }
+    my $env = {
+        PATH           => '/usr/bin:/bin',
+        USERTOOLS_TESTING => ( $ENV{USERTOOLS_TESTING} // '' ),
+    };
+    my $run = _spawn_sync( \@cmd, $home, $env, 300, 1048576 );
+    if ( !$run || $run->{error} ) {
+        return ( undef, $run ? $run->{error} : 'could not start the engine' );
+    }
+    if ( $run->{timed_out} ) {
+        return ( undef, 'the engine run timed out' );
+    }
+    if ( $run->{exit} != 0 ) {
+        return ( undef, 'the engine run failed' );
+    }
+    my $summary = eval { JSON::PP->new()->decode( $run->{output} ) };
+    if ( $@ || ref $summary ne 'HASH' ) {
+        return ( undef, 'the engine returned an unreadable summary' );
+    }
+    return ( $summary, undef );
+}
+
+sub _site_targets_argv {
+    my ( $targets, $php_map, $want_php ) = @_;
+    # Server-side targets to engine --target flags (joined with "|",
+    # which domains and absolute paths can never contain unescaped).
+    my @argv;
+    for my $t ( @{$targets} ) {
+        next unless defined $t->{domain} && defined $t->{documentroot};
+        next unless defined $t->{ip} && defined $t->{port};
+        my @parts = ( $t->{domain}, $t->{documentroot}, $t->{ip}, $t->{port} );
+        if ($want_php) {
+            my $php = ref $php_map eq 'HASH' ? $php_map->{ lc( $t->{domain} ) } : undef;
+            push @parts, ( ref $php eq 'HASH' && defined $php->{version} ) ? "ea-php$php->{version}" : 'unknown';
+            push @parts, ( ref $php eq 'HASH' && $php->{fpm} ) ? '1' : '0';
+        }
+        push @argv, ( '--target', join( '|', @parts ) );
+    }
+    return @argv;
+}
+
+sub _site_scan_busy {
+    my ( $result, $home ) = @_;
+    # A job is already running: reattach instead of spawning into the
+    # engine's exit-3 path, so the page shows progress, not an error.
+    my $live = _find_live_job($home);
+    $result->data(
+        {
+            state  => 'busy',
+            job_id => defined $live ? $live->{id} : undef,
+        }
+    );
+    return 1;
+}
+
+sub _site_scan_start {
+    my ( $result, $home, $user, $tool ) = @_;
+    # Shared scan start for Site Doctor and the Exposed Files Scanner.
+    # The caller has already gated (feature + policy). Domains come from
+    # the server-side list; the engine resolves nothing from the request.
+    my $want_php = $tool eq 'doctor-scan' ? 1 : 0;
+    my @targets = _site_targets($user);
+    if ( !@targets ) {
+        $result->error('Cannot list domains for this account, so nothing was checked.');
+        return;
+    }
+    if ( _engine_running($home) ) {
+        return _site_scan_busy( $result, $home );
+    }
+    my @engine_args = ( $tool eq 'doctor-scan' ? 'doctor-scan' : 'exposed-scan',
+        _site_targets_argv( \@targets, _site_php_map($user), $want_php ),
+        '--timeout', $SITE_TIMEOUT_SECONDS, '--budget', $SITE_BUDGET_SECONDS );
+    if ( defined $TEST_POLICY_FILE ) {
+        push @engine_args, '--policy', $TEST_POLICY_FILE;
+    }
+    return _job_spawn_and_record(
+        $result, $tool, $home, $home, [], \@engine_args,
+        1, {}, _site_engine_bin() );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   doctor_scan_start - Check homepages, docroots, TLS and error logs
+#   (up to 10 domains inside a 30 s budget; the rest are deferred).
+#-------------------------------------------------------------------------------------------------
+sub doctor_scan_start {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SITE_DOCTOR );
+    return unless _site_policy_enabled( $result, 'enable_site_doctor' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    return _site_scan_start( $result, $home, $user, 'doctor-scan' );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   doctor_scan_status - Progress JSON plus the fact records and verdicts.
+#-------------------------------------------------------------------------------------------------
+sub doctor_scan_status {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SITE_DOCTOR );
+    return unless _site_policy_enabled( $result, 'enable_site_doctor' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    my $job = _job_paths( $home, $job_id );
+    if ( !defined $job || !-f $job->{meta} ) {
+        $result->error('Unknown job.');
+        return;
+    }
+    my $meta = _read_json_file( $job->{meta} );
+    if ( !$meta || !$meta->{pid} ) {
+        $result->error('Unknown job.');
+        return;
+    }
+    my $progress = _read_json_file( $job->{progress} );
+    my $file     = _read_json_file( $job->{result} );
+    my $summary  = ( $file && ref $file->{counts} eq 'HASH' ) ? $file : undef;
+    my $alive    = kill( 0, $meta->{pid} ) ? 1 : 0;
+    my $state = defined $summary ? 'done' : ( $alive ? 'running' : 'failed' );
+    if ( -f $job->{cancelled} ) {
+        $state = 'cancelled';
+    }
+    my %data = (
+        job_id => $job_id, user => $user, state => $state,
+        dry_run => 1, progress => $progress, summary => $summary,
+    );
+    if ( defined $summary && ref $summary->{domains} eq 'ARRAY' ) {
+        my $php_map = _site_php_map($user);
+        my $fileprotect = _fileprotect_on($home);
+        my @with_verdicts;
+        for my $rec ( @{ $summary->{domains} } ) {
+            next unless ref $rec eq 'HASH';
+            my %r = %{$rec};
+            if ( ref $r{docroot} eq 'HASH' && $r{docroot}{usable} ) {
+                my $is_pub = defined $r{docroot}{abs} && $r{docroot}{abs} eq "$home/public_html";
+                $r{docroot} = {
+                    %{ $r{docroot} },
+                    expected_mode => ( $fileprotect && $is_pub ) ? '0750' : '0755',
+                };
+            }
+            my $php = $php_map->{ lc( $rec->{domain} // '' ) };
+            my $v = _doctor_verdicts( \%r, $php );
+            my %out = ( %r, verdict => $v->{lines},
+                attention => $v->{attention} ? 1 : 0 );
+            if ( ref $r{htaccess} eq 'HASH'
+                && ref $r{htaccess}{php_value_lines} eq 'ARRAY'
+                && @{ $r{htaccess}{php_value_lines} }
+                && ref $php eq 'HASH' && $php->{fpm} )
+            {
+                # The page's Fix button appears only for this case.
+                $out{fix_php_lines} = $r{htaccess}{php_value_lines};
+            }
+            push @with_verdicts, \%out;
+        }
+        $data{summary} = { %{$summary}, domains => \@with_verdicts };
+    }
+    $result->data( \%data );
+    return 1;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   doctor_scan_cancel - Stop the caller's own scan (same verification as
+#   the other cancel calls).
+#-------------------------------------------------------------------------------------------------
+sub doctor_scan_cancel {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SITE_DOCTOR );
+    return unless _site_policy_enabled( $result, 'enable_site_doctor' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    return _job_cancel_impl( $result, $home, $uid, $job_id );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   exposed_scan_start - Walk every docroot and probe risky names.
+#-------------------------------------------------------------------------------------------------
+sub exposed_scan_start {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_EXPOSED_FILES );
+    return unless _site_policy_enabled( $result, 'enable_exposed_files' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    return _site_scan_start( $result, $home, $user, 'exposed-scan' );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   exposed_scan_status - Progress JSON plus findings with exposed flags.
+#-------------------------------------------------------------------------------------------------
+sub exposed_scan_status {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_EXPOSED_FILES );
+    return unless _site_policy_enabled( $result, 'enable_exposed_files' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    return _job_status_impl( $result, $home, $job_id, undef );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   exposed_scan_cancel - Stop the caller's own scan.
+#-------------------------------------------------------------------------------------------------
+sub exposed_scan_cancel {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_EXPOSED_FILES );
+    return unless _site_policy_enabled( $result, 'enable_exposed_files' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    return _job_cancel_impl( $result, $home, $uid, $job_id );
+}
+
+sub _ht_named_section {
+    my ( $content, $begin, $end, $lines_ar ) = @_;
+    # Insert or replace ONE named marked section (see _ht_merge for the
+    # shared unnamed one); an empty replacement drops the section.
+    # Everything outside the markers keeps its bytes and order.
+    $content = '' unless defined $content;
+    $lines_ar = [] unless ref $lines_ar eq 'ARRAY';
+    my @lines = split( /\n/, $content );
+    my ( $bi, $ei );
+    for my $i ( 0 .. $#lines ) {
+        if ( !defined $bi && $lines[$i] eq $begin ) {
+            $bi = $i;
+        }
+        if ( $lines[$i] eq $end ) {
+            $ei = $i;
+        }
+    }
+    my @section;
+    if ( @{$lines_ar} ) {
+        @section = ( $begin, @{$lines_ar}, $end );
+    }
+    if ( defined $bi && defined $ei && $ei > $bi ) {
+        splice @lines, $bi, $ei - $bi + 1, @section;
+    }
+    elsif (@section) {
+        if ( @lines && $lines[-1] ne '' ) {
+            push @lines, '';
+        }
+        push @lines, @section;
+    }
+    my $out = join( "\n", @lines );
+    $out =~ s/\n{3,}/\n\n/g;
+    $out .= "\n" if $out ne '' && substr( $out, -1 ) ne "\n";
+    return $out;
+}
+
+sub _ht_section_rules {
+    my ( $content, $begin, $end ) = @_;
+    # Raw lines currently inside a named marked section (no markers).
+    $content = '' unless defined $content;
+    my @lines = split( /\n/, $content );
+    my ( $bi, $ei );
+    for my $i ( 0 .. $#lines ) {
+        if ( !defined $bi && $lines[$i] eq $begin ) {
+            $bi = $i;
+        }
+        if ( $lines[$i] eq $end ) {
+            $ei = $i;
+        }
+    }
+    return [] unless defined $bi && defined $ei && $ei > $bi;
+    return [ @lines[ $bi + 1 .. $ei - 1 ] ];
+}
+
+our $HT_DOC_BEGIN = '# BEGIN UserTools Site Doctor';
+our $HT_DOC_END   = '# END UserTools Site Doctor';
+our $HT_EXP_BEGIN = '# BEGIN UserTools Exposed Files';
+our $HT_EXP_END   = '# END UserTools Exposed Files';
+
+sub _expose_rule_lines {
+    my ( $relpath, $kind, $urlpath ) = @_;
+    # One deny rule keyed by the exact home-relative path. The match runs
+    # against the URL path the scan actually probed (docroot-relative):
+    # the home-relative path never appears in REQUEST_URI, so matching
+    # it would silently never fire.
+    $urlpath = '/' . $relpath
+      unless defined $urlpath && $urlpath =~ m{^/};
+    my $esc = $urlpath;
+    $esc =~ s/([\\^\$.|?*+()\[\]{}])/\\$1/g;
+    $esc =~ s/#/[#]/g;
+    my $pattern;
+    if ( $kind eq 'git_dir' ) {
+        $pattern = $esc;
+        $pattern =~ s{/HEAD$}{/};
+        $pattern .= '/' unless $pattern =~ m{/$};
+        $pattern = "^$pattern";
+    }
+    else {
+        $pattern = "^$esc\$";
+    }
+    return (
+        "# path: $relpath",
+        "# url: $urlpath",
+        "# Exposed Files: deny $relpath ($kind)",
+        "<If \"%{REQUEST_URI} =~ m#$pattern#\">",
+        "    Require all denied",
+        "</If>",
+    );
+}
+
+sub _expose_block_lines {
+    my (@rules) = @_;
+    # Full section body for a set of [relpath, kind, urlpath] triples,
+    # each rule traceable to its path so unblock removes exactly one rule.
+    my @lines = ('# Managed by UserTools Exposed Files: deny direct access',
+                 '# to files that must never be public. One rule per finding;',
+                 '# removing a rule restores access to that path only.');
+    for my $r (@rules) {
+        push @lines, '', _expose_rule_lines( @{$r} );
+    }
+    return \@lines;
+}
+
+sub _expose_parse_rules {
+    my ($lines_ar) = @_;
+    # Section body back into [relpath, kind, urlpath] triples, pairing
+    # each `# path:` marker (plus its `# url:` line) with the rule
+    # comment that follows it. Sections written before the url line
+    # existed yield an undef urlpath; the caller heals those from the
+    # docroot before rebuilding.
+    my @rules;
+    my ( $pending_rel, $pending_url );
+    for my $ln ( @{$lines_ar} ) {
+        if ( $ln =~ /^# path: (\S+)\s*$/ ) {
+            ( $pending_rel, $pending_url ) = ( $1, undef );
+            next;
+        }
+        if ( defined $pending_rel && $ln =~ /^# url: (.+?)\s*$/ ) {
+            $pending_url = $1;
+            next;
+        }
+        if ( defined $pending_rel && $ln =~ /^# Exposed Files: deny \S+ \((.*)\)\s*$/ ) {
+            push @rules, [ $pending_rel, $1, $pending_url ];
+            ( $pending_rel, $pending_url ) = ( undef, undef );
+        }
+    }
+    return \@rules;
+}
+
+sub _expose_heal_urlpaths {
+    my ( $rules, $home, $real ) = @_;
+    # Fill undef urlpaths (pre-url-line sections) from the docroot: the
+    # URL path is the home-relative path minus the docroot's own prefix.
+    my $prefix = $real;
+    $prefix =~ s{^\Q$home/\E}{};
+    for my $r ( @{$rules} ) {
+        next if defined $r->[2];
+        my $rel = $r->[0];
+        if ( $prefix ne '' && index( $rel, "$prefix/" ) == 0 ) {
+            $r->[2] = '/' . substr( $rel, length($prefix) + 1 );
+        }
+        else {
+            $r->[2] = '/' . $rel;
+        }
+    }
+    return;
+}
+
+sub _doctor_htaccess_plan {
+    my ( $domain, $real ) = @_;
+    # Preview plan for commenting out php_value/php_flag lines in one
+    # docroot .htaccess. $real is the resolved, home-confined docroot.
+    # Returns (plan) or (undef, reason). The file is read fresh here.
+    return ( undef, 'unknown website' ) unless defined $domain;
+    my $path = "$real/.htaccess";
+    my $current = eval { _read_text_file($path) };
+    if ($@) {
+        return ( undef, "cannot read the .htaccess file: $@" );
+    }
+    $current = '' unless defined $current;
+    my @lines = split( /\n/, $current );
+    # Only unguarded lines count: cPanel wraps its own php_value lines in
+    # <IfModule phpX_module>/<IfModule lsapi_module> blocks, which Apache
+    # skips under PHP-FPM, so those never 500. A negated guard does not
+    # protect (its body runs exactly when the module is absent).
+    my @php;
+    my @guards;
+    for my $i ( 0 .. $#lines ) {
+        my $code = $lines[$i];
+        $code =~ s/#.*$//;
+        if ( $code =~ m{^\s*</IfModule\b}i ) {
+            pop @guards if @guards;
+            next;
+        }
+        if ( $code =~ m{^\s*<IfModule\s+(!?)\s*([\w:.-]+)\s*>}i ) {
+            push @guards, $1 ? 0 : 1;
+            next;
+        }
+        next if $code =~ /^\s*</;
+        if ( $code =~ /^\s*(?:php_value|php_flag)\b/i ) {
+            push @php, $i + 1 unless grep { $_ } @guards;
+        }
+    }
+    if ( !@php ) {
+        return ( undef, 'no php_value or php_flag lines left to fix' );
+    }
+    if ( grep { $_ eq $HT_DOC_BEGIN } @lines ) {
+        return ( undef, 'a Site Doctor block is already applied' );
+    }
+    my %drop = map { $_ => 1 } @php;
+    my @kept;
+    my @moved;
+    for my $i ( 0 .. $#lines ) {
+        if ( $drop{ $i + 1 } ) {
+            push @moved, '# ' . $lines[$i];
+        }
+        else {
+            push @kept, $lines[$i];
+        }
+    }
+    my @section = (
+        $HT_DOC_BEGIN,
+        '# Disabled by Site Doctor: PHP-FPM rejects php_value/php_flag lines',
+        '# in .htaccess (they cause HTTP 500). Originals below, commented out.',
+        @moved,
+        $HT_DOC_END,
+    );
+    my $new = @kept ? join( "\n", @kept ) . "\n" : "";
+    $new .= "\n" if $new ne "";
+    $new .= join( "\n", @section ) . "\n";
+    return (
+        {
+            domain => $domain,
+            path   => $path,
+            lines  => \@php,
+            new    => $new,
+            diff   => _ht_diff( $current, $new ),
+        },
+        undef
+    );
+}
+
+sub _doctor_job_domains {
+    my ( $home, $job_id ) = @_;
+    # Domains enumerated by a finished doctor scan (server-side only).
+    my $job = _job_paths( $home, _valid_job_id($job_id) // '' );
+    return undef unless defined $job && -f $job->{result};
+    my $file = _read_json_file( $job->{result} );
+    return undef unless $file && ref $file->{domains} eq 'ARRAY';
+    return $file->{domains};
+}
+
+sub _doctor_docroot {
+    my ( $home, $user, $job_id, $domain ) = @_;
+    # The docroot a Site Doctor htaccess call may touch: the domain must
+    # have been scanned (job membership) and still belong to the account
+    # (live server-side lookup), resolved and home-confined.
+    my $domains = _doctor_job_domains( $home, $job_id );
+    return ( undef, 'Unknown job.' ) unless defined $domains;
+    my ($found) = grep { ref $_ eq 'HASH' && defined $_->{domain} && $_->{domain} eq $domain } @{$domains};
+    return ( undef, 'Unknown website for this scan.' ) unless defined $found;
+    my ( $rec, $err ) = _site_domain_rec( $user, $domain );
+    return ( undef, $err ) unless defined $rec;
+    my $real = Cwd::realpath( $rec->{documentroot} );
+    if ( !defined $real || !-d $real ) {
+        return ( undef, 'the document root is missing' );
+    }
+    if ( $real ne $home && index( $real, "$home/" ) != 0 ) {
+        return ( undef, 'the document root is outside your home folder' );
+    }
+    return ( $real, undef );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   doctor_htaccess_preview - Show what commenting out the php_value lines
+#   would change (changes nothing).
+#-------------------------------------------------------------------------------------------------
+sub doctor_htaccess_preview {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SITE_DOCTOR );
+    return unless _site_policy_enabled( $result, 'enable_site_doctor' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    my ($domain) = $args->get('domain');
+    my ( $real, $docroot_err ) = _doctor_docroot( $home, $user, $job_id, $domain );
+    if ( !defined $real ) {
+        if ( $docroot_err eq 'Unknown job.' || $docroot_err eq 'Unknown website for this scan.' ) {
+            $result->error($docroot_err);
+        }
+        else {
+            $result->error( 'Nothing to fix: [_1].', $docroot_err );
+        }
+        return;
+    }
+    my ( $plan, $err ) = _doctor_htaccess_plan( $domain, $real );
+    if ( !defined $plan ) {
+        $result->error( 'Nothing to fix: [_1].', $err );
+        return;
+    }
+    $result->data(
+        {
+            domain => $plan->{domain},
+            file   => '.htaccess',
+            lines  => $plan->{lines},
+            diff   => $plan->{diff},
+        }
+    );
+    return 1;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   doctor_htaccess_fix - Comment out php_value/php_flag lines (backup kept).
+#-------------------------------------------------------------------------------------------------
+sub doctor_htaccess_fix {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SITE_DOCTOR );
+    return unless _site_policy_enabled( $result, 'enable_site_doctor' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    my ($domain) = $args->get('domain');
+    my ( $real, $docroot_err ) = _doctor_docroot( $home, $user, $job_id, $domain );
+    if ( !defined $real ) {
+        if ( $docroot_err eq 'Unknown job.' || $docroot_err eq 'Unknown website for this scan.' ) {
+            $result->error($docroot_err);
+        }
+        else {
+            $result->error( 'Nothing to fix: [_1].', $docroot_err );
+        }
+        return;
+    }
+    my ( $plan, $err ) = _doctor_htaccess_plan( $domain, $real );
+    if ( !defined $plan ) {
+        $result->error( 'Nothing to fix: [_1].', $err );
+        return;
+    }
+    if ( !_ht_ensure_orig( $home, $plan->{path} ) ) {
+        $result->error('Could not preserve the original .htaccess; nothing was changed.');
+        return;
+    }
+    my $bak = _ht_backup( $plan->{path} );
+    if ( !defined $bak ) {
+        $result->error('Could not back up the .htaccess; nothing was changed.');
+        return;
+    }
+    if ( !_write_text_file( $plan->{path}, $plan->{new}, 0644 ) ) {
+        _ht_restore_exact( $plan->{path}, $bak );
+        $result->error('Could not write the .htaccess file; the backup was restored.');
+        return;
+    }
+    $result->data(
+        {
+            domain => $plan->{domain},
+            file   => '.htaccess',
+            lines  => $plan->{lines},
+            backup => $bak,
+            diff   => $plan->{diff},
+        }
+    );
+    return 1;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   doctor_htaccess_undo - Restore the newest backup of that .htaccess.
+#-------------------------------------------------------------------------------------------------
+sub doctor_htaccess_undo {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SITE_DOCTOR );
+    return unless _site_policy_enabled( $result, 'enable_site_doctor' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    my ($domain) = $args->get('domain');
+    my ( $real, $docroot_err ) = _doctor_docroot( $home, $user, $job_id, $domain );
+    if ( !defined $real ) {
+        $result->error($docroot_err);
+        return;
+    }
+    my $path = "$real/.htaccess";
+    my @cands = grep { -f $_ } glob "$path.usertools-bak-*";
+    if ( !@cands ) {
+        $result->error('No backup found: nothing to undo.');
+        return;
+    }
+    @cands = sort { ( ( stat($b) )[9] // 0 ) <=> ( ( stat($a) )[9] // 0 ) } @cands;
+    if ( rename( $cands[0], $path ) ) {
+        chmod 0644, $path;
+        $result->data( { domain => $domain, restored => 1 } );
+        return 1;
+    }
+    $result->error('Could not restore the backup.');
+    return;
+}
+
+sub _exposed_findings {
+    my ( $home, $job_id ) = @_;
+    # Findings recorded by a finished exposed scan (server-side only).
+    my $job = _job_paths( $home, _valid_job_id($job_id) // '' );
+    return ( undef, 'Unknown job.' ) unless defined $job && -f $job->{result};
+    my $file = _read_json_file( $job->{result} );
+    return ( undef, 'Unknown job.' )
+      unless $file && ref $file->{findings} eq 'ARRAY';
+    return ( $file->{findings}, undef );
+}
+
+sub _exposed_resolve {
+    my ( $home, $job_id, $finding_id ) = @_;
+    # Finding ids come from the scan (f1, f2, ...); anything else is refused
+    # before any path is touched. The relpath is revalidated home-relative.
+    if ( !defined $finding_id || $finding_id !~ /^[a-z0-9]{1,16}$/ ) {
+        return ( undef, 'Unknown finding.' );
+    }
+    my ( $findings, $err ) = _exposed_findings( $home, $job_id );
+    return ( undef, $err ) unless defined $findings;
+    for my $f ( @{$findings} ) {
+        next unless ref $f eq 'HASH' && defined $f->{id} && $f->{id} eq $finding_id;
+        my $rel = $f->{relpath} // '';
+        $rel =~ s{^/+}{};
+        $rel =~ s{/\z}{};
+        if ( $rel eq '' || $rel eq '.' || $rel =~ m{(?:^|/)\.\.(?:/|$)} ) {
+            return ( undef, 'Unknown finding.' );
+        }
+        my %copy = %{$f};
+        $copy{relpath} = $rel;
+        return ( \%copy, undef );
+    }
+    return ( undef, 'Unknown finding.' );
+}
+
+sub _exposed_reprobe {
+    my ( $home, $ip, $port, $host, $urlpath ) = @_;
+    # Re-probe one URL path after an action via the site engine (single,
+    # tested prober: HEAD then a capped GET, status + exposed only, never
+    # the body).
+    if ( defined $TEST_EXPOSED_PROBE ) {
+        return { %{$TEST_EXPOSED_PROBE} };
+    }
+    return { status => 0, exposed => 0 }
+      unless defined $home && defined $ip && defined $port
+      && defined $host && defined $urlpath;
+    my ( $summary, undef ) = _run_site_sync(
+        $home,
+        [ 'exposed-reprobe', '--ip', $ip, '--port', $port,
+          '--host', $host, '--path', $urlpath ] );
+    if ( ref $summary eq 'HASH' && ref $summary->{probe} eq 'HASH' ) {
+        my $p = $summary->{probe};
+        return {
+            status  => $p->{status} // 0,
+            exposed => $p->{exposed} ? 1 : 0,
+        };
+    }
+    return { status => 0, exposed => 0 };
+}
+
+sub _quarantine_list {
+    my ($home) = @_;
+    my $root = "$home/.usertools-quarantine";
+    my @batches;
+    if ( opendir( my $dh, $root ) ) {
+        while ( my $name = readdir $dh ) {
+            next unless $name =~ /^[0-9]{8}T[0-9]{6}$/;
+            my $dir = "$root/$name";
+            my @st = lstat $dir;
+            next unless @st && !-l _ && -d _;
+            my @entries;
+            eval {
+                open my $mfh, '<', "$dir/manifest.json" or die "no manifest\n";
+                local $/;
+                my $raw = <$mfh>;
+                close $mfh;
+                my $data = JSON::PP->new()->decode( $raw // '' );
+                if ( ref $data eq 'HASH' && ref $data->{entries} eq 'ARRAY' ) {
+                    for my $e ( @{ $data->{entries} } ) {
+                        push @entries, $e->{path} if ref $e eq 'HASH' && defined $e->{path};
+                    }
+                }
+            };
+            my $bytes = 0;
+            my $files = 0;
+            my @stack = ($dir);
+            while (@stack) {
+                my $cur = pop @stack;
+                my @cst = lstat $cur;
+                next unless @cst;
+                next if -l _;
+                if ( -d _ ) {
+                    if ( opendir( my $sdh, $cur ) ) {
+                        while ( my $n = readdir $sdh ) {
+                            next if $n eq '.' || $n eq '..';
+                            push @stack, "$cur/$n";
+                        }
+                        closedir $sdh;
+                    }
+                    next;
+                }
+                if ( -f _ ) {
+                    $bytes += $cst[7];
+                    $files++;
+                }
+            }
+            push @batches,
+              { batch => $name, created => $st[9], bytes => $bytes + 0,
+                files => $files + 0, entries => \@entries };
+        }
+        closedir $dh;
+    }
+    @batches = sort { $b->{batch} cmp $a->{batch} } @batches;
+    return \@batches;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   exposed_move - Quarantine one finding out of the public folder.
+#-------------------------------------------------------------------------------------------------
+sub exposed_move {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_EXPOSED_FILES );
+    return unless _site_policy_enabled( $result, 'enable_exposed_files' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    my ($finding_id) = $args->get('finding');
+    my ( $finding, $err ) = _exposed_resolve( $home, $job_id, $finding_id );
+    if ( !defined $finding ) {
+        $result->error( 'Unknown finding.' );
+        return;
+    }
+    my ( $summary, $run_err ) = _run_site_sync(
+        $home, [ 'exposed-move', '--job', $job_id, '--finding', $finding_id ] );
+    if ( !defined $summary ) {
+        $result->error( 'Move failed: [_1].', $run_err );
+        return;
+    }
+    my ($rec) = _site_domain_rec( $user, $finding->{domain} );
+    my $reprobe = { status => 0, exposed => 0 };
+    if ( defined $rec && defined $rec->{ip} && defined $rec->{port} ) {
+        my $upath = $finding->{urlpath} // ( '/' . ( $finding->{relpath} // '' ) );
+        $reprobe = _exposed_reprobe( $home, $rec->{ip}, $rec->{port}, $finding->{domain}, $upath );
+    }
+    $result->data(
+        {
+            finding  => $finding_id,
+            moved    => $summary->{counts}{moved} ? 1 : 0,
+            batch    => $summary->{quarantine_batch},
+            reprobed => $reprobe,
+        }
+    );
+    return 1;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   exposed_restore - Put a whole quarantine batch back.
+#-------------------------------------------------------------------------------------------------
+sub exposed_restore {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_EXPOSED_FILES );
+    return unless _site_policy_enabled( $result, 'enable_exposed_files' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($batch_p) = $args->get('batch');
+    my $batch = ( defined $batch_p && $batch_p =~ /^[0-9]{8}T[0-9]{6}$/ ) ? $batch_p : undef;
+    if ( !defined $batch ) {
+        $result->error('Invalid batch: pick one from the quarantine list.');
+        return;
+    }
+    my ( $summary, $err ) = _run_site_sync( $home, [ 'exposed-restore', '--batch', $batch ] );
+    if ( !defined $summary ) {
+        $result->error( 'Restore failed: [_1].', $err );
+        return;
+    }
+    $result->data(
+        {
+            batch     => $batch,
+            restored  => $summary->{counts}{restored} + 0,
+            conflicts => $summary->{counts}{restore_conflicts} + 0,
+            state     => 'done',
+        }
+    );
+    return 1;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   exposed_quarantine_list - Quarantine batches with their entries.
+#-------------------------------------------------------------------------------------------------
+sub exposed_quarantine_list {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_EXPOSED_FILES );
+    return unless _site_policy_enabled( $result, 'enable_exposed_files' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my $batches = _quarantine_list($home);
+    my $total = 0;
+    $total += $_->{bytes} for @{$batches};
+    $result->data(
+        {
+            batches         => $batches,
+            quarantine_bytes  => $total + 0,
+            quarantine_batches => scalar( @{$batches} ) + 0,
+        }
+    );
+    return 1;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   exposed_block - Deny one finding with a marked .htaccess block.
+#-------------------------------------------------------------------------------------------------
+sub exposed_block {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_EXPOSED_FILES );
+    return unless _site_policy_enabled( $result, 'enable_exposed_files' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    my ($finding_id) = $args->get('finding');
+    my ( $finding, $err ) = _exposed_resolve( $home, $job_id, $finding_id );
+    if ( !defined $finding ) {
+        $result->error('Unknown finding.');
+        return;
+    }
+    my ( $rec, $rec_err ) = _site_domain_rec( $user, $finding->{domain} );
+    if ( !defined $rec ) {
+        $result->error( $rec_err );
+        return;
+    }
+    my $real = realpath( $rec->{documentroot} );
+    if ( !defined $real || !-d $real || ( $real ne $home && index( $real, "$home/" ) != 0 ) ) {
+        $result->error('The document root is unusable.');
+        return;
+    }
+    my $path = "$real/.htaccess";
+    my $current = eval { _read_text_file($path) };
+    if ($@) {
+        $result->error( 'Cannot read the .htaccess file.' );
+        return;
+    }
+    $current = '' unless defined $current;
+    my $rules = _expose_parse_rules( _ht_section_rules( $current, $HT_EXP_BEGIN, $HT_EXP_END ) );
+    _expose_heal_urlpaths( $rules, $home, $real );
+    my $upath = $finding->{urlpath} // ( '/' . ( $finding->{relpath} // '' ) );
+    push @{$rules}, [ $finding->{relpath}, $finding->{kind}, $upath ]
+      unless grep { $_->[0] eq $finding->{relpath} } @{$rules};
+    my $new = _ht_named_section( $current, $HT_EXP_BEGIN, $HT_EXP_END, _expose_block_lines( @{$rules} ) );
+    if ( !$new || $new eq $current ) {
+        $result->data( { finding => $finding_id, blocked => 0, note => 'already blocked' } );
+        return 1;
+    }
+    if ( !_ht_ensure_orig( $home, $path ) ) {
+        $result->error('Could not preserve the original .htaccess; nothing was changed.');
+        return;
+    }
+    my $bak = _ht_backup($path);
+    if ( !defined $bak ) {
+        $result->error('Could not back up the .htaccess; nothing was changed.');
+        return;
+    }
+    if ( !_write_text_file( $path, $new, 0644 ) ) {
+        $result->error('Could not write the .htaccess file.');
+        return;
+    }
+    my $reprobe = { status => 0, exposed => 0 };
+    if ( defined $rec->{ip} && defined $rec->{port} ) {
+        my $upath = $finding->{urlpath} // ( '/' . ( $finding->{relpath} // '' ) );
+        $reprobe = _exposed_reprobe( $home, $rec->{ip}, $rec->{port}, $finding->{domain}, $upath );
+    }
+    $result->data(
+        {
+            finding  => $finding_id,
+            blocked  => 1,
+            reprobed => $reprobe,
+        }
+    );
+    return 1;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   exposed_unblock - Remove one finding's deny rule again.
+#-------------------------------------------------------------------------------------------------
+sub exposed_unblock {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_EXPOSED_FILES );
+    return unless _site_policy_enabled( $result, 'enable_exposed_files' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    my ($finding_id) = $args->get('finding');
+    my ( $finding, $err ) = _exposed_resolve( $home, $job_id, $finding_id );
+    if ( !defined $finding ) {
+        $result->error('Unknown finding.');
+        return;
+    }
+    my ( $rec, $rec_err ) = _site_domain_rec( $user, $finding->{domain} );
+    if ( !defined $rec ) {
+        $result->error( $rec_err );
+        return;
+    }
+    my $real = realpath( $rec->{documentroot} );
+    if ( !defined $real || !-d $real || ( $real ne $home && index( $real, "$home/" ) != 0 ) ) {
+        $result->error('The document root is unusable.');
+        return;
+    }
+    my $path = "$real/.htaccess";
+    my $current = eval { _read_text_file($path) };
+    if ($@) {
+        $result->error('Cannot read the .htaccess file.');
+        return;
+    }
+    $current = '' unless defined $current;
+    my $rules = _expose_parse_rules( _ht_section_rules( $current, $HT_EXP_BEGIN, $HT_EXP_END ) );
+    my @kept = grep { $_->[0] ne $finding->{relpath} } @{$rules};
+    if ( @kept == @{$rules} ) {
+        $result->data( { finding => $finding_id, unblocked => 0, note => 'no rule for this finding' } );
+        return 1;
+    }
+    _expose_heal_urlpaths( \@kept, $home, $real );
+    my $new = _ht_named_section( $current, $HT_EXP_BEGIN, $HT_EXP_END,
+        @kept ? _expose_block_lines(@kept) : [] );
+    if ( !_ht_ensure_orig( $home, $path ) ) {
+        $result->error('Could not preserve the original .htaccess; nothing was changed.');
+        return;
+    }
+    my $bak = _ht_backup($path);
+    if ( !defined $bak ) {
+        $result->error('Could not back up the .htaccess; nothing was changed.');
+        return;
+    }
+    if ( !_write_text_file( $path, $new, 0644 ) ) {
+        $result->error('Could not write the .htaccess file.');
+        return;
+    }
+    my $reprobe = { status => 0, exposed => 0 };
+    if ( defined $rec->{ip} && defined $rec->{port} ) {
+        my $upath = $finding->{urlpath} // ( '/' . ( $finding->{relpath} // '' ) );
+        $reprobe = _exposed_reprobe( $home, $rec->{ip}, $rec->{port}, $finding->{domain}, $upath );
+    }
+    $result->data(
+        {
+            finding  => $finding_id,
+            unblocked => 1,
+            reprobed => $reprobe,
         }
     );
     return 1;

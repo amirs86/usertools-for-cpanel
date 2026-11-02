@@ -41,10 +41,10 @@ my $stub_dir = "$FindBin::Bin/tt_stubs";
 my $stage    = "$root/build/stage/user_tools";
 
 make_path("$stage/shared");
-for my $f (qw(fix_home_permissions.html.tt bulk_permissions.html.tt ownership_report.html.tt manage_shell.html.tt app_helper.html.tt space_cleaner.html.tt)) {
+for my $f (qw(fix_home_permissions.html.tt bulk_permissions.html.tt ownership_report.html.tt manage_shell.html.tt app_helper.html.tt space_cleaner.html.tt site_doctor.html.tt exposed_files.html.tt)) {
     copy( "$page_dir/$f", "$stage/$f" ) or die "copy $f: $!\n";
 }
-for my $f (qw(fix_home_body.tt bulk_permissions_body.tt ownership_report_body.tt manage_shell_body.tt app_helper_body.tt space_cleaner_body.tt footer.tt)) {
+for my $f (qw(fix_home_body.tt bulk_permissions_body.tt ownership_report_body.tt manage_shell_body.tt app_helper_body.tt space_cleaner_body.tt site_doctor_body.tt exposed_files_body.tt footer.tt)) {
     copy( "$shared/$f", "$stage/shared/$f" ) or die "copy $f: $!\n";
 }
 
@@ -83,6 +83,16 @@ my %pages = (
         '<title>Space Cleaner</title>', 'ut-cat-error_logs',
         'ut-preview', 'ut-clean', 'UT_STR', 'as86.pro', 'Learn more',
         'ut-trash-list', 'Empty all trash', 'clearPending',
+    ],
+    'site_doctor.html.tt' => [
+        '<title>Site Doctor</title>', 'ut-verdicts', 'ut-scan',
+        'data-fix', 'UT_STR', 'as86.pro', 'Learn more', 'ut-dialog',
+        'doctor_scan_start', 'comments out',
+    ],
+    'exposed_files.html.tt' => [
+        '<title>Exposed Files</title>', 'ut-scan', 'ut-trash-list',
+        'UT_STR', 'as86.pro', 'Learn more', 'Quarantine',
+        'exposed_scan_start', 'Move to quarantine', 'data-block',
     ],
 );
 

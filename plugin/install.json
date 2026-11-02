@@ -76,5 +76,31 @@
         "featuremanager": 1,
         "feature": "usertools_space_cleaner",
         "description": "Preview and reclaim disk space and inodes (caches, big logs, crash dumps), with trash and restore."
+    },
+    {
+        "icon": "site_doctor.svg",
+        "group_id": "security",
+        "order": 6,
+        "name": "Site Doctor",
+        "type": "link",
+        "id": "usertools_site_doctor_page",
+        "key": "usertools_site_doctor",
+        "uri": "user_tools/site_doctor.html.tt",
+        "featuremanager": 1,
+        "feature": "usertools_site_doctor",
+        "description": "Check every website at a glance: homepage status, folders, .htaccess mistakes, certificates and recent errors."
+    },
+    {
+        "icon": "exposed_files.svg",
+        "group_id": "security",
+        "order": 7,
+        "name": "Exposed Files",
+        "type": "link",
+        "id": "usertools_exposed_files_page",
+        "key": "usertools_exposed_files",
+        "uri": "user_tools/exposed_files.html.tt",
+        "featuremanager": 1,
+        "feature": "usertools_exposed_files",
+        "description": "Find files that must never be public (backups, dumps, config copies) and move or block them."
     }
 ]

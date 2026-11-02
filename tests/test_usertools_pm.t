@@ -1129,6 +1129,571 @@ sub space_wait_done {
     ok( !-e "$home/core.2", 'second core deleted with its batch' );
 }
 
+# --- site doctor + exposed files ---------------------------------------------------------
+for my $fn (
+    qw(doctor_scan_start doctor_scan_status doctor_scan_cancel
+    doctor_htaccess_preview doctor_htaccess_fix doctor_htaccess_undo
+    exposed_scan_start exposed_scan_status exposed_scan_cancel
+    exposed_move exposed_restore exposed_quarantine_list
+    exposed_block exposed_unblock)
+  )
+{
+    my $want = $fn =~ /^doctor_/ ? 'usertools_site_doctor' : 'usertools_exposed_files';
+    is( $Cpanel::API::UserTools::API{$fn}{needs_feature}, $want,
+        "%API declares needs_feature for $fn" );
+}
+
+$Cpanel::API::UserTools::TEST_SITE_ENGINE =
+  "$FindBin::Bin/../engine/site_doctor.py";
+
+sub site_policy_file {
+    my ($home) = @_;
+    open my $fh, '>', "$home/policy.conf" or die $!;
+    print $fh "enable_site_doctor=1\nenable_exposed_files=1\n";
+    close $fh;
+    return "$home/policy.conf";
+}
+
+sub site_make_home {
+    my $home = make_home();
+    make_path("$home/public_html");
+    open my $fh, '>', "$home/public_html/index.html" or die $!;
+    print $fh "x\n";
+    close $fh;
+    return $home;
+}
+
+{
+    # Feature + policy gates for both tools.
+    my $home = site_make_home();
+    my $pconf = site_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    local $HAVE_FEATURE = 0;
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::doctor_scan_start( FakeArgs->new(), $res );
+    ok( !$ok, 'doctor scan refused without the feature' );
+    is( $res->{errors}[0][0], '_ERROR_FEATURE', 'feature error reported' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::exposed_scan_start( FakeArgs->new(), $res );
+    ok( !$ok, 'exposed scan refused without the feature' );
+}
+
+{
+    my $home = site_make_home();
+    open my $fh, '>', "$home/policy.conf" or die $!;
+    print $fh "enable_site_doctor=0\nenable_exposed_files=0\n";
+    close $fh;
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = "$home/policy.conf";
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::doctor_scan_start( FakeArgs->new(), $res );
+    ok( !$ok, 'doctor scan refused when the policy switch is off' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::exposed_move(
+        FakeArgs->new( job_id => 'x', finding => 'f1' ), $res );
+    ok( !$ok, 'exposed move refused when the policy switch is off' );
+}
+
+{
+    # Verdicts: plain words plus the attention flag.
+    my $good = {
+        domain   => 'example.test',
+        http     => { status => 200, ms => 12 },
+        docroot  => { usable => 1, index => 'index.html', mode => '0755', expected_mode => '0755', owner_ok => 1 },
+        htaccess => { present => 0 },
+        ssl      => { ok => 1, days_left => 300 },
+        logs     => {},
+    };
+    my $v = Cpanel::API::UserTools::_doctor_verdicts( $good, { version => '82', fpm => 1 } );
+    is( $v->{attention}, 0, 'clean site needs no attention' );
+    like( $v->{lines}[0], qr/loads \(HTTP 200/, 'homepage verdict' );
+
+    my $bad = {
+        domain   => 'example.test',
+        http     => { status => 500, ms => 30 },
+        docroot  => { usable => 1, index => undef, mode => '0755', expected_mode => '0755', owner_ok => 1 },
+        htaccess => { present => 1, php_value_lines => [4, 9], missing_rewrite_engine => 1 },
+        ssl      => { ok => 1, days_left => 9 },
+        logs     => {},
+    };
+    $v = Cpanel::API::UserTools::_doctor_verdicts( $bad, { version => '82', fpm => 1 } );
+    is( $v->{attention}, 1, 'broken site needs attention' );
+    ok( ( grep { /php_value.*comment them out/ } @{ $v->{lines} } ), 'FPM fix verdict present' );
+    ok( ( grep { /RewriteEngine/ } @{ $v->{lines} } ), 'rewrite verdict present' );
+    ok( ( grep { /expires in 9 days/ } @{ $v->{lines} } ), 'expiry verdict present' );
+    ok( ( grep { /No index page/ } @{ $v->{lines} } ), 'index verdict present' );
+
+    $v = Cpanel::API::UserTools::_doctor_verdicts( { domain => 'x.test', deferred => 1, reason => 'busy' }, {} );
+    is( $v->{attention}, 1, 'deferred domain needs attention' );
+
+    $v = Cpanel::API::UserTools::_doctor_verdicts(
+        { domain => 'x.test', http => { status => 0 }, docroot => { usable => 0, reason => 'missing' }, htaccess => {}, ssl => { ok => 0, error => 'nope' } }, {} );
+    ok( ( grep { /did not answer/ } @{ $v->{lines} } ), 'down verdict present' );
+
+    $v = Cpanel::API::UserTools::_doctor_verdicts(
+        { domain => 'x.test', http => { status => 200 }, docroot => { usable => 1, index => 'index.php' },
+          htaccess => { present => 1, php_value_lines => [2] }, ssl => { ok => 1, days_left => 400 } }, { fpm => 0 } );
+    ok( ( grep { /php_value/ } @{ $v->{lines} } ), 'php_value still reported without FPM' );
+    ok( !( grep { /PHP-FPM rejects/ } @{ $v->{lines} } ), 'no FPM wording without FPM' );
+}
+
+{
+    # PHP map: versions plus the server-side FPM flag.
+    my $langphp = { status => 1, data => [ { vhost => 'a.test', php_version => 'ea-php82', php_fpm => 1 }, { vhost => 'b.test', php_version => 'ea-php81' } ] };
+    no warnings 'redefine';
+    local *Cpanel::API::execute = sub {
+        my ( $mod, $fn, $args ) = @_;
+        return $langphp if $mod eq 'LangPHP';
+        return { status => 0 };
+    };
+    my $map = Cpanel::API::UserTools::_site_php_map('testuser');
+    is( $map->{'a.test'}{version}, '82', 'LangPHP version parsed' );
+    is( $map->{'a.test'}{fpm},     1,   'FPM flag parsed' );
+    is( $map->{'b.test'}{fpm},     0,   'missing flag means not FPM' );
+}
+
+sub site_domaininfo_mock {
+    my ( $home, $port ) = @_;
+    # DomainInfo shape with the probe address on every record.
+    return {
+        status => 1,
+        data   => {
+            main_domain => {
+                domain => 'primary.test', documentroot => "$home/public_html",
+                ip => '127.0.0.1', port => $port,
+            },
+            addon_domains  => [],
+            sub_domains    => [],
+            parked_domains => [],
+        },
+    };
+}
+
+sub site_wait_done {
+    my ( $status_fn, $job_id ) = @_;
+    for ( 1 .. 200 ) {
+        my $res = FakeResult->new();
+        my $ok = $status_fn->( FakeArgs->new( job_id => $job_id ), $res );
+        if ( $ok && $res->{data}{state} eq 'done' ) {
+            return $res;
+        }
+        select( undef, undef, undef, 0.1 );
+    }
+    die "site job $job_id did not finish";
+}
+
+{
+    # Site targets come from DomainInfo with ip/port, falling back to
+    # userdata files that carry ip:/port: lines.
+    my $home = site_make_home();
+    my $pconf = site_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    my $udir = "$home/userdata";
+    make_path("$udir/testuser");
+    no warnings 'redefine';
+    local *Cpanel::API::execute = sub {
+        my ( $mod, $fn, $args ) = @_;
+        return site_domaininfo_mock( $home, 8080 ) if $mod eq 'DomainInfo';
+        return { status => 1, data => [] };
+    };
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::doctor_scan_start( FakeArgs->new(), $res );
+    ok( $ok, 'doctor scan accepted' );
+    like( $res->{data}{job_id}, qr/^doctor-/, 'doctor job id shape' );
+    my $st = site_wait_done( \&Cpanel::API::UserTools::doctor_scan_status,
+        $res->{data}{job_id} );
+    my $summary = $st->{data}{summary};
+    is( $summary->{command}, 'doctor-scan', 'engine ran the doctor command' );
+    my ($rec) = grep { $_->{domain} eq 'primary.test' } @{ $summary->{domains} };
+    ok( defined $rec, 'domain record present' );
+    ok( $rec->{attention}, 'unreachable homepage needs attention' );
+    ok( ( grep { /did not answer/ } @{ $rec->{verdict} } ), 'down verdict rendered' );
+    ok( ( grep { /No .htaccess/ } @{ $rec->{verdict} } ), 'missing htaccess verdict' );
+}
+
+{
+    # Unknown job ids and unknown domains are refused.
+    my $home = site_make_home();
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = site_policy_file($home);
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::doctor_scan_status(
+        FakeArgs->new( job_id => 'doctor-nope' ), $res );
+    ok( !$ok, 'unknown doctor job refused' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_htaccess_fix(
+        FakeArgs->new( job_id => 'doctor-nope', domain => 'x.test' ), $res );
+    ok( !$ok, 'fix without a scan refused' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::exposed_move(
+        FakeArgs->new( job_id => 'exposed-nope', finding => 'f1' ), $res );
+    ok( !$ok, 'move without a scan refused' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::exposed_block(
+        FakeArgs->new( job_id => 'exposed-nope', finding => 'f1' ), $res );
+    ok( !$ok, 'block without a scan refused' );
+}
+
+{
+    # Doctor htaccess fix: preview diff, apply comments the lines, undo
+    # restores the exact original bytes.
+    my $home = site_make_home();
+    my $pconf = site_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    make_path("$home/.cpanel/usertools/jobs");
+    my $udir = "$home/userdata";
+    make_path("$udir/testuser");
+    local $Cpanel::API::UserTools::TEST_DOMAIN_DATA_DIR = $udir;
+    open my $duf, '>', "$udir/testuser/primary.test" or die $!;
+    print $duf "---\ndocumentroot: $home/public_html\nip: 127.0.0.1\nport: 9\n";
+    close $duf;
+    open my $hf, '>', "$home/public_html/.htaccess" or die $!;
+    print $hf "RewriteEngine On\nphp_value upload_max_filesize 64M\nAddType text/plain .log\nphp_flag display_errors Off\n<IfModule php8_module>\nphp_value guarded_only 1\n</IfModule>\n<IfModule !mod_php.c>\nphp_value negated_counts 1\n</IfModule>\n";
+    close $hf;
+    my $job = {
+        counts  => {},
+        domains => [ { domain => 'primary.test' } ],
+    };
+    open my $jf, '>', "$home/.cpanel/usertools/jobs/doctor-1.result.json" or die $!;
+    print $jf JSON::PP->new()->encode($job);
+    close $jf;
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::doctor_htaccess_preview(
+        FakeArgs->new( job_id => 'doctor-1', domain => 'primary.test' ), $res );
+    ok( $ok, 'preview accepted' );
+    is_deeply( $res->{data}{lines}, [2, 4, 9], 'bare and negated-guard lines found; guarded ones skipped' );
+    like( $res->{data}{diff}, qr/# php_value upload_max_filesize/, 'diff comments the lines' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_htaccess_fix(
+        FakeArgs->new( job_id => 'doctor-1', domain => 'primary.test' ), $res );
+    ok( $ok, 'fix applied' );
+    my $after = do { open my $rfh, '<', "$home/public_html/.htaccess" or die $!; local $/; <$rfh> };
+    like( $after, qr/# BEGIN UserTools Site Doctor/, 'marked block added' );
+    like( $after, qr/# php_value upload_max_filesize 64M/, 'line commented' );
+    unlike( $after, qr/^php_value upload_max_filesize/m, 'bare php_value gone' );
+    unlike( $after, qr/^php_flag display_errors/m, 'bare php_flag gone' );
+    unlike( $after, qr/^php_value negated_counts/m, 'negated-guard php_value gone' );
+    like( $after, qr/^php_value guarded_only 1$/m, 'guarded php_value stays (IfModule protects it)' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_htaccess_fix(
+        FakeArgs->new( job_id => 'doctor-1', domain => 'primary.test' ), $res );
+    ok( !$ok, 'second apply refused (already fixed)' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_htaccess_undo(
+        FakeArgs->new( job_id => 'doctor-1', domain => 'primary.test' ), $res );
+    ok( $ok, 'undo accepted' );
+    is( $res->{data}{restored}, 1, 'undo restored the file' );
+    my $back = do { open my $rfh, '<', "$home/public_html/.htaccess" or die $!; local $/; <$rfh> };
+    is( $back, "RewriteEngine On\nphp_value upload_max_filesize 64M\nAddType text/plain .log\nphp_flag display_errors Off\n<IfModule php8_module>\nphp_value guarded_only 1\n</IfModule>\n<IfModule !mod_php.c>\nphp_value negated_counts 1\n</IfModule>\n",
+        'original bytes back' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_htaccess_fix(
+        FakeArgs->new( job_id => 'doctor-1', domain => 'nosuch.test' ), $res );
+    ok( !$ok, 'fix for a foreign domain refused' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::exposed_block(
+        FakeArgs->new( job_id => 'exposed-nope', finding => '../x' ), $res );
+    ok( !$ok, 'traversal finding id refused' );
+}
+
+{
+    # doctor_scan_status annotates verdict, attention, expected_mode and
+    # fix_php_lines (FPM + php_value lines => the page shows Fix).
+    my $home = site_make_home();
+    my $pconf = site_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    my $udir = "$home/userdata";
+    make_path("$udir/testuser");
+    local $Cpanel::API::UserTools::TEST_DOMAIN_DATA_DIR = $udir;
+    open my $duf, '>', "$udir/testuser/primary.test" or die $!;
+    print $duf "---\ndocumentroot: $home/public_html\nip: 127.0.0.1\nport: 9\n";
+    close $duf;
+    no warnings 'redefine';
+    local *Cpanel::API::execute = sub {
+        my ( $mod, $fn, $args ) = @_;
+        if ( $mod eq 'LangPHP' ) {
+            return { status => 1,
+                     data => [ { vhost => 'primary.test',
+                                 php_version => 'ea-php82', php_fpm => 1 } ] };
+        }
+        return { status => 0 };
+    };
+    my $jobs = "$home/.cpanel/usertools/jobs";
+    make_path($jobs);
+    open my $mf, '>', "$jobs/doctor-9.job.json" or die $!;
+    print $mf JSON::PP->new()->encode( { id => 'doctor-9', pid => $$ } );
+    close $mf;
+    my $summary = {
+        counts  => {},
+        command => 'doctor-scan',
+        domains => [
+            { domain  => 'primary.test',
+              docroot => { usable => 1, index => 'index.html',
+                           mode => '0750', owner_ok => 1,
+                           abs => "$home/public_html", hrel => 'public_html' },
+              http     => { status => 200, ms => 3 },
+              htaccess => { present => 1, php_value_lines => [22] },
+              ssl      => { ok => 1, days_left => 300 },
+              logs     => {} },
+        ],
+    };
+    open my $rf, '>', "$jobs/doctor-9.result.json" or die $!;
+    print $rf JSON::PP->new()->encode($summary);
+    close $rf;
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::doctor_scan_status(
+        FakeArgs->new( job_id => 'doctor-9' ), $res );
+    ok( $ok, 'status accepted' );
+    my ($rec) = grep { $_->{domain} eq 'primary.test' }
+      @{ $res->{data}{summary}{domains} };
+    ok( defined $rec, 'domain record present' );
+    is_deeply( $rec->{fix_php_lines}, [22],
+        'Fix button data present for FPM php_value lines' );
+    is( $rec->{attention}, 1, 'attention set' );
+    is( $rec->{docroot}{expected_mode}, '0755',
+        'expected mode default without fileprotect' );
+}
+
+{
+    # Exposed block/unblock round trip on a fixture docroot, with a canned
+    # re-probe (no network in unit tests).
+    my $home = site_make_home();
+    my $pconf = site_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    local $Cpanel::API::UserTools::TEST_EXPOSED_PROBE = { status => 403, exposed => 0 };
+    my $udir = "$home/userdata";
+    make_path("$udir/testuser");
+    local $Cpanel::API::UserTools::TEST_DOMAIN_DATA_DIR = $udir;
+    open my $duf, '>', "$udir/testuser/primary.test" or die $!;
+    print $duf "---\ndocumentroot: $home/public_html\nip: 127.0.0.1\nport: 9\n";
+    close $duf;
+    open my $hf, '>', "$home/public_html/.htaccess" or die $!;
+    print $hf "RewriteEngine On\n";
+    close $hf;
+    open my $bf, '>', "$home/public_html/backup.sql" or die $!;
+    print $bf "dump\n";
+    close $bf;
+    my $jobs = "$home/.cpanel/usertools/jobs";
+    make_path($jobs);
+    my $job = {
+        counts  => {},
+        findings => [ { id => 'f1', domain => 'primary.test',
+                       relpath => 'public_html/backup.sql',
+                       urlpath => '/backup.sql',
+                       kind => 'sql_dump' } ],
+        domains => [ { domain => 'primary.test' } ],
+    };
+    open my $jf, '>', "$jobs/exposed-1.result.json" or die $!;
+    print $jf JSON::PP->new()->encode($job);
+    close $jf;
+    local $Cpanel::API::UserTools::TEST_SITE_ENGINE = "$FindBin::Bin/../engine/site_doctor.py";
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, @_ };
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::exposed_block(
+        FakeArgs->new( job_id => 'exposed-1', finding => 'f1' ), $res );
+    ok( $ok, 'block accepted' );
+    is( scalar(@warnings), 0, 'no warnings while building the deny rule' );
+    is( $res->{data}{reprobed}{status}, 403, 'canned re-probe reported' );
+    my $ht = do { open my $rfh, '<', "$home/public_html/.htaccess" or die $!; local $/; <$rfh> };
+    like( $ht, qr/# BEGIN UserTools Exposed Files/, 'marked deny block added' );
+    like( $ht, qr/Require all denied/, 'deny rule present' );
+    ok( index( $ht, '<If "%{REQUEST_URI} =~ m#^/backup\\.sql$#">' ) >= 0,
+        'rule matches the probed URL path, not the home-relative path' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::exposed_unblock(
+        FakeArgs->new( job_id => 'exposed-1', finding => 'f1' ), $res );
+    ok( $ok, 'unblock accepted' );
+    $ht = do { open my $rfh, '<', "$home/public_html/.htaccess" or die $!; local $/; <$rfh> };
+    unlike( $ht, qr/BEGIN UserTools Exposed Files/, 'marked block gone' );
+    like( $ht, qr/RewriteEngine On/, 'original content kept' );
+}
+
+{
+    # Deny rules match the probed URL path; legacy sections without a
+    # url line are healed from the docroot on rebuild.
+    my @file = Cpanel::API::UserTools::_expose_rule_lines(
+        'public_html/backup.sql', 'sql_dump', '/backup.sql' );
+    ok( index( join( "\n", @file ), '<If "%{REQUEST_URI} =~ m#^/backup\\.sql$#">' ) >= 0,
+        'file rule matches its URL path' );
+    my @git = Cpanel::API::UserTools::_expose_rule_lines(
+        'public_html/.git', 'git_dir', '/.git/HEAD' );
+    ok( index( join( "\n", @git ), '<If "%{REQUEST_URI} =~ m#^/\\.git/#">' ) >= 0,
+        'git rule covers the directory' );
+    my $parsed = Cpanel::API::UserTools::_expose_parse_rules( \@file );
+    is_deeply( $parsed, [ [ 'public_html/backup.sql', 'sql_dump', '/backup.sql' ] ],
+        'rule round-trips with its url' );
+    my $legacy = Cpanel::API::UserTools::_expose_parse_rules(
+        [ '# path: public_html/old.sql',
+          '# Exposed Files: deny public_html/old.sql (sql_dump)' ] );
+    Cpanel::API::UserTools::_expose_heal_urlpaths(
+        $legacy, '/home/example', '/home/example/public_html' );
+    is( $legacy->[0][2], '/old.sql', 'legacy rule healed from the docroot' );
+}
+
+{
+    # Quarantine list/move/restore round trip through the real engine.
+    my $home = site_make_home();
+    my $pconf = site_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    local $Cpanel::API::UserTools::TEST_EXPOSED_PROBE = { status => 404, exposed => 0 };
+    open my $bf, '>', "$home/public_html/backup.sql" or die $!;
+    print $bf "dump\n";
+    close $bf;
+    my $jobs = "$home/.cpanel/usertools/jobs";
+    make_path($jobs);
+    my $job = {
+        counts  => {},
+        findings => [ { id => 'f1', domain => 'primary.test',
+                       relpath => 'public_html/backup.sql',
+                       kind => 'sql_dump' } ],
+        domains => [ { domain => 'primary.test' } ],
+    };
+    open my $jf, '>', "$jobs/exposed-1.result.json" or die $!;
+    print $jf JSON::PP->new()->encode($job);
+    close $jf;
+    local $Cpanel::API::UserTools::TEST_SITE_ENGINE = "$FindBin::Bin/../engine/site_doctor.py";
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::exposed_move(
+        FakeArgs->new( job_id => 'exposed-1', finding => 'f1' ), $res );
+    ok( $ok, 'move accepted' );
+    ok( defined $res->{data}{batch}, 'quarantine batch reported' );
+    ok( !-f "$home/public_html/backup.sql", 'file moved out' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::exposed_quarantine_list( FakeArgs->new(), $res );
+    ok( $ok, 'quarantine list accepted' );
+    is( $res->{data}{quarantine_batches}, 1, 'one batch listed' );
+    is( $res->{data}{batches}[0]{files}, 2, 'batch holds file plus manifest' );
+    my $batch = $res->{data}{batches}[0]{batch};
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::exposed_restore( FakeArgs->new( batch => $batch ), $res );
+    ok( $ok, 'restore accepted' );
+    is( $res->{data}{restored}, 1, 'one file restored' );
+    ok( -f "$home/public_html/backup.sql", 'file really back' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::exposed_quarantine_list( FakeArgs->new(), $res );
+    is( $res->{data}{quarantine_batches}, 0, 'quarantine empty afterwards' );
+}
+
+sub start_probe_server {
+    my ($routes) = @_;
+    # Tiny local HTTP server for probe tests: path => [status, body].
+    pipe( my $rd, my $wr ) or die $!;
+    my $pid = fork();
+    die "fork failed: $!" unless defined $pid;
+    if ( $pid == 0 ) {
+        close $rd;
+        require IO::Socket::INET;
+        my $srv = IO::Socket::INET->new(
+            LocalAddr => '127.0.0.1:0', Listen => 5,
+            Proto => 'tcp', ReuseAddr => 1,
+        );
+        if ( !$srv ) {
+            POSIX::_exit(99);
+        }
+        print $wr $srv->sockport(), "\n";
+        close $wr;
+        while ( my $cl = $srv->accept() ) {
+            my $req = '';
+            $cl->recv( $req, 4096 );
+            my ( $method, $path ) = $req =~ /^(\w+)\s+(\S+)/;
+            $path = '/' unless defined $path;
+            my $hit = exists $routes->{$path} ? $routes->{$path} : [ 404, 'nope' ];
+            my $body = $hit->[1];
+            my $out  = "HTTP/1.1 $hit->[0] Test\r\nContent-Length: " . length($body) . "\r\nConnection: close\r\n\r\n";
+            $out .= $body if ( $method // '' ) ne 'HEAD';
+            send( $cl, $out, 0 );
+            close $cl;
+        }
+        POSIX::_exit(0);
+    }
+    close $wr;
+    my $port = <$rd>;
+    chomp $port;
+    close $rd;
+    return ( $pid, $port );
+}
+
+sub stop_probe_server {
+    my ($pid) = @_;
+    kill 'TERM', $pid;
+    waitpid( $pid, 0 );
+}
+
+{
+    # Full round trips through the real engine against a local server:
+    # homepage verdict, exposed finding, quarantine move/restore.
+    my $home = site_make_home();
+    my $pconf = site_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    open my $ef, '>', "$home/public_html/backup.sql" or die $!;
+    print $ef "dump\n";
+    close $ef;
+    open my $lf, '>', "$home/public_html/error_log" or die $!;
+    print $lf "boom\n";
+    close $lf;
+    my ( $pid, $port ) = start_probe_server(
+        { '/' => [ 200, 'home' ], '/backup.sql' => [ 200, "dump\n" ] } );
+    no warnings 'redefine';
+    local *Cpanel::API::execute = sub {
+        my ( $mod, $fn, $args ) = @_;
+        if ( $mod eq 'DomainInfo' ) {
+            return {
+                status => 1,
+                data   => {
+                    main_domain    => make_domaininfo_rec( 'primary.test', "$home/public_html", 'main_domain', 'testuser' ),
+                    addon_domains  => [],
+                    sub_domains    => [],
+                    parked_domains => [],
+                },
+            };
+        }
+        if ( $mod eq 'LangPHP' ) {
+            return { status => 1, data => [ { vhost => 'primary.test', php_version => 'ea-php82', php_fpm => 1 } ] };
+        }
+        return { status => 0 };
+    };
+    # point the fixture records at the local server
+    # (make_domaininfo_rec hardcodes the trial-style address)
+    no warnings 'once';
+    $Cpanel::API::UserTools::TEST_SITE_IP_OVERRIDE = '127.0.0.1';
+    $Cpanel::API::UserTools::TEST_SITE_PORT_OVERRIDE = $port;
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::doctor_scan_start( FakeArgs->new(), $res );
+    ok( $ok, 'doctor scan accepted against a live server' );
+    my $st = site_wait_done( \&Cpanel::API::UserTools::doctor_scan_status, $res->{data}{job_id} );
+    my $rec = ( grep { $_->{domain} eq 'primary.test' } @{ $st->{data}{summary}{domains} } )[0];
+    ok( defined $rec, 'doctor saw the domain' );
+    ok( ( grep { /loads \(HTTP 200/ } @{ $rec->{verdict} } ), 'homepage 200 verdict' );
+    is( $rec->{attention}, 1, 'attention only because TLS has no local server' );
+    ok( ( grep { /TLS certificate could not be checked/ } @{ $rec->{verdict} } ), 'TLS failure verdict shown' );
+    like( $rec->{php}{version} || '', qr/ea-php82/, 'engine carried the PHP version' );
+    ok( $rec->{logs}{docroot_log}, 'error tail attached' );
+
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::exposed_scan_start( FakeArgs->new(), $res );
+    ok( $ok, 'exposed scan accepted against a live server' );
+    $st = site_wait_done( \&Cpanel::API::UserTools::exposed_scan_status, $res->{data}{job_id} );
+    my $found = ( grep { $_->{relpath} eq 'public_html/backup.sql' } @{ $st->{data}{summary}{findings} } )[0];
+    ok( defined $found, 'backup.sql found' );
+    is( $found->{exposed}, 1, 'served backup counts as exposed' );
+    is( $found->{http_status}, 200, 'probe status recorded' );
+    my $job_id = $res->{data}{job_id};
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::exposed_move(
+        FakeArgs->new( job_id => $job_id, finding => $found->{id} ), $res );
+    ok( $ok, 'quarantine move accepted' );
+    ok( !-f "$home/public_html/backup.sql", 'file really quarantined' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::exposed_quarantine_list( FakeArgs->new(), $res );
+    is( $res->{data}{quarantine_batches}, 1, 'one quarantine batch' );
+    my $batch = $res->{data}{batches}[0]{batch};
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::exposed_restore( FakeArgs->new( batch => $batch ), $res );
+    ok( $ok, 'quarantine restore accepted' );
+    is( $res->{data}{restored}, 1, 'one file restored' );
+    ok( -f "$home/public_html/backup.sql", 'file really back' );
+    stop_probe_server($pid);
+}
+
 # --- CSV rules (Perl mirror of the usertools.js builders) -------------------------------
 # No JS runtime exists in this environment, so the exact escaping and
 # formula-injection rules are pinned here AND asserted present in the

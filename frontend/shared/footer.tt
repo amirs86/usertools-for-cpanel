@@ -1,7 +1,7 @@
 [%# Copyright 2026 Amir Sibaee (https://as86.pro)
     SPDX-License-Identifier: Apache-2.0
     Shared footer partial for every UserTools page.
-    Included with: [% PROCESS 'shared/footer.tt' -%] %]
+    Included with PROCESS shared/footer.tt from each shared body. %]
 <div class="ut-footer">
   UserTools for cPanel &copy; 2026 Amir Sibaee &middot;
   <a href="https://as86.pro" target="_blank" rel="noopener noreferrer">as86.pro</a>

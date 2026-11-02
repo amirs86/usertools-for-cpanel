@@ -7,6 +7,19 @@ All notable changes to this project are documented here. Versions follow
 
 ### Added
 
+- Site Doctor: read-only check of every website (homepage status, document
+  root, `.htaccess` pitfalls, TLS certificate, both error logs) with one
+  plain-words verdict per domain, plus one fix (comment out php_value
+  lines under PHP-FPM) with preview, backup and undo. Off by default:
+  `enable_site_doctor=0` policy key, WHM checkbox, and its own Feature
+  Manager feature.
+- Exposed Files Scanner: engine walk of every document root for files
+  that must never be public, probed over HTTP (status + size only);
+  exposed files can be moved to quarantine (restore available) or blocked
+  with a marked `.htaccess` deny rule (undo removes it), with a re-probe
+  after each action. Off by default: `enable_exposed_files=0` policy key,
+  WHM checkbox, and its own Feature Manager feature.
+
 - Space Cleaner: preview and reclaim disk space and inodes across six
   fixed categories (big `error_log` and per-website PHP logs truncated
   in place; crash dumps, framework and WordPress caches, and developer

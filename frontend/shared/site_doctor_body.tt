@@ -1,0 +1,288 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    Shared Site Doctor page body. Included once by each theme adapter.
+    Flow: Scan (up to 10 websites, 30 s budget) with one plain-words
+    verdict per domain plus expandable details, Fix for the one auto-fix
+    (commenting out php_value lines) behind a confirm dialog showing the
+    diff, progress with Cancel, Undo. A stored job id reattaches the page
+    to a running job after a reload. %]
+<div class="ut-wrap">
+  <p class="ut-lead">[% locale.maketext('Check every website at a glance: homepage status, folders, .htaccess mistakes, certificates and recent errors. This page changes nothing unless you apply a fix.') %]</p>
+  <details class="ut-learn">
+    <summary>[% locale.maketext('Learn more') %]</summary>
+    <p>[% locale.maketext('Each website gets one plain-words verdict. Details show the homepage check, the document root, the .htaccess findings, the certificate and the last error lines. The only automatic fix comments out php_value lines when the domain runs PHP-FPM (they cause HTTP 500 there); the original file is backed up and the change can be undone.') %]</p>
+  </details>
+  <div class="ut-banner warn" id="ut-banner" role="status" aria-live="polite">[% locale.maketext('Run a scan to check your websites.') %]</div>
+  <div class="ut-controls">
+    <button class="ut-btn" id="ut-scan" type="button">[% locale.maketext('Scan') %]</button>
+    <button class="ut-btn secondary" id="ut-undo" type="button" hidden>[% locale.maketext('Undo last fix') %]</button>
+  </div>
+  <div class="ut-progress" id="ut-progress" hidden>
+    <progress id="ut-bar" aria-label="[% locale.maketext('Progress') %]"></progress>
+    <div class="ut-path" id="ut-progtext" aria-live="polite"></div>
+    <button class="ut-btn secondary" id="ut-cancel" type="button">[% locale.maketext('Cancel') %]</button>
+  </div>
+  <div class="ut-grid" id="ut-verdicts" aria-live="polite"></div>
+  <div class="ut-lists" id="ut-lists"></div>
+  <dialog class="ut-dialog" id="ut-dialog" aria-labelledby="ut-dialog-title">
+    <h2 id="ut-dialog-title"></h2>
+    <p id="ut-dialog-body"></p>
+    <pre class="ut-out" id="ut-dialog-diff" hidden></pre>
+    <div class="ut-dialog-actions">
+      <button class="ut-btn" id="ut-dialog-apply" type="button"></button>
+      <button class="ut-btn secondary" id="ut-dialog-cancel" type="button">[% locale.maketext('Cancel') %]</button>
+    </div>
+  </dialog>
+[% PROCESS 'shared/footer.tt' -%]
+</div>
+<script>
+var UT_STR = {
+    scanFailed: "[% locale.maketext('Scan failed: ') %]",
+    scanning: "[% locale.maketext('Checking websites.') %]",
+    progtextOne: "[% locale.maketext('Checked 1 website.') %]",
+    progtextMany: "[% locale.maketext('Checked COUNT websites.') %]",
+    cancelling: "[% locale.maketext('Cancelling.') %]",
+    cancelled: "[% locale.maketext('Cancelled.') %]",
+    doneOk: "[% locale.maketext('Finished: all websites answered.') %]",
+    doneBadOne: "[% locale.maketext('Finished: 1 website needs attention.') %]",
+    doneBadMany: "[% locale.maketext('Finished: COUNT websites need attention.') %]",
+    failed: "[% locale.maketext('The scan failed. Please try again.') %]",
+    startFailed: "[% locale.maketext('Could not start: ') %]",
+    details: "[% locale.maketext('Details') %]",
+    fix: "[% locale.maketext('Fix') %]",
+    fixing: "[% locale.maketext('Fixing.') %]",
+    fixTitle: "[% locale.maketext('Confirm fix') %]",
+    fixBodyOne: "[% locale.maketext('This comments out 1 line in the .htaccess file. The original file is backed up first.') %]",
+    fixBodyMany: "[% locale.maketext('This comments out COUNT lines in the .htaccess file. The original file is backed up first.') %]",
+    fixApply: "[% locale.maketext('Comment out now') %]",
+    fixed: "[% locale.maketext('Fixed. The change can be undone.') %]",
+    fixFailed: "[% locale.maketext('Fix failed: ') %]",
+    undoDone: "[% locale.maketext('Fix undone: the original file is back.') %]",
+    undoFailed: "[% locale.maketext('Undo failed: ') %]",
+    homepage: "[% locale.maketext('Homepage') %]",
+    docroot: "[% locale.maketext('Document root') %]",
+    htaccess: "[% locale.maketext('.htaccess') %]",
+    php: "[% locale.maketext('PHP') %]",
+    tls: "[% locale.maketext('Certificate') %]",
+    errors: "[% locale.maketext('Recent errors') %]",
+    noVerdict: "[% locale.maketext('No verdict yet.') %]"
+};
+</script>
+<script>
+"use strict";
+window.addEventListener("DOMContentLoaded", function () {
+    if (!window.UserTools) {
+        document.getElementById("ut-banner").textContent = "UserTools failed to load.";
+        return;
+    }
+    var bannerEl = document.getElementById("ut-banner");
+    var scanBtn = document.getElementById("ut-scan");
+    var undoBtn = document.getElementById("ut-undo");
+    var cancelBtn = document.getElementById("ut-cancel");
+    var progWrap = document.getElementById("ut-progress");
+    var progText = document.getElementById("ut-progtext");
+    var verdictsEl = document.getElementById("ut-verdicts");
+    var listsEl = document.getElementById("ut-lists");
+    var dlg = document.getElementById("ut-dialog");
+    var dlgTitle = document.getElementById("ut-dialog-title");
+    var dlgBody = document.getElementById("ut-dialog-body");
+    var dlgDiff = document.getElementById("ut-dialog-diff");
+    var dlgApply = document.getElementById("ut-dialog-apply");
+    var dlgCancel = document.getElementById("ut-dialog-cancel");
+    var lastApply = null;
+    var lastFocus = null;
+    var pollTimer = null;
+    var currentJob = null;
+    var pendingFix = null;
+    var JOB_KEY = "ut_doctor_scan_last_job";
+
+    function tok(s, name, value) { return String(s).split(name).join(value); }
+    function setBanner(kind, text) {
+        bannerEl.className = "ut-banner " + kind;
+        bannerEl.textContent = text;
+    }
+    function setBusy(busy) {
+        scanBtn.disabled = busy;
+        undoBtn.disabled = busy;
+    }
+    function openDialog(title, body, diff, applyLabel, onApply) {
+        lastFocus = document.activeElement;
+        dlgTitle.textContent = title;
+        dlgBody.textContent = body;
+        if (diff) { dlgDiff.textContent = diff; dlgDiff.hidden = false; }
+        else { dlgDiff.textContent = ""; dlgDiff.hidden = true; }
+        dlgApply.textContent = applyLabel;
+        lastApply = onApply;
+        if (dlg.showModal) { dlg.showModal(); } else { dlg.setAttribute("open", ""); }
+        dlgCancel.focus();
+    }
+    function closeDialog() {
+        if (dlg.close) { dlg.close(); } else { dlg.removeAttribute("open"); }
+        lastApply = null;
+        if (lastFocus && lastFocus.focus) { lastFocus.focus(); }
+    }
+    dlgApply.addEventListener("click", function () {
+        var fn = lastApply;
+        closeDialog();
+        if (fn) { fn(); }
+    });
+    dlgCancel.addEventListener("click", closeDialog);
+
+    function escList(lines) {
+        return (lines || []).map(function (l) {
+            return "<li>" + UserTools.escHtml(l) + "</li>";
+        }).join("");
+    }
+    function startJob(onDone) {
+        setBusy(true);
+        UserTools.callApi("doctor_scan_start", {}, "POST").then(function (data) {
+            if (data.state === "busy") {
+                setBusy(false);
+                setBanner("warn", UT_STR.scanning);
+                return;
+            }
+            currentJob = data.job_id;
+            try { window.localStorage.setItem(JOB_KEY, data.job_id); } catch (e) { /* ignore */ }
+            pollJob(onDone);
+        }).catch(function (err) {
+            setBusy(false);
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    }
+    function pollJob(onDone) {
+        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+        if (!currentJob) { return; }
+        UserTools.callApi("doctor_scan_status", { job_id: currentJob }, "GET").then(function (data) {
+            if (data.state === "running") {
+                progWrap.hidden = false;
+                var p = data.progress || {};
+                progText.textContent = UserTools.plural(p.scanned || 0, UT_STR.progtextOne, UT_STR.progtextMany);
+                setBanner("warn", UT_STR.scanning);
+                pollTimer = setTimeout(function () { pollJob(onDone); }, 1000);
+            } else {
+                progWrap.hidden = true;
+                setBusy(false);
+                if (data.state === "done") {
+                    renderResult(data.summary || {});
+                } else if (data.state === "cancelled") {
+                    setBanner("warn", UT_STR.cancelling);
+                } else {
+                    setBanner("err", UT_STR.failed);
+                }
+                if (onDone) { onDone(data); }
+            }
+        }).catch(function (err) {
+            setBusy(false);
+            progWrap.hidden = true;
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    }
+    function detailBlock(title, bodyHtml) {
+        if (!bodyHtml) { return ""; }
+        return "<details><summary>" + UserTools.escHtml(title) + "</summary>" + bodyHtml + "</details>";
+    }
+    function renderResult(summary) {
+        var domains = summary.domains || [];
+        var bad = 0;
+        var html = "";
+        domains.forEach(function (d) {
+            var verdict = d.verdict || [UT_STR.noVerdict];
+            if (d.attention) { bad++; }
+            html += '<div class="ut-card"><h2>' + UserTools.escHtml(d.domain || "?") + "</h2><ul>";
+            verdict.forEach(function (v) { html += "<li>" + UserTools.escHtml(v) + "</li>"; });
+            html += "</ul>";
+            var det = "";
+            det += detailBlock(UT_STR.homepage, "<ul>" + escList([
+                "HTTP " + ((d.http || {}).status || 0) +
+                ((d.http || {}).location ? " -> " + (d.http || {}).location : ""),
+            ].filter(function (x) { return x; })) + "</ul>");
+            html += det;
+            var logHtml = "";
+            [["docroot_log", "error_log"], ["php_log", "PHP error log"]].forEach(function (pair) {
+                var lines = ((d.logs || {})[pair[0]]) || [];
+                if (lines.length) {
+                    logHtml += "<h3>" + UserTools.escHtml(pair[1]) + "</h3><pre>" +
+                        UserTools.escHtml(lines.join("\n")) + "</pre>";
+                }
+            });
+            html += detailBlock(UT_STR.errors, logHtml);
+            if (d.fix_php_lines) {
+                html += '<div class="ut-controls"><button class="ut-btn" type="button" data-fix="' +
+                    UserTools.escHtml(d.domain || "") + '">' + UserTools.escHtml(UT_STR.fix) + "</button></div>";
+            }
+            html += "</div>";
+        });
+        verdictsEl.innerHTML = html;
+        if (!domains.length) {
+            setBanner("warn", UT_STR.noVerdict);
+        } else if (bad > 0) {
+            setBanner("warn", UserTools.plural(bad, UT_STR.doneBadOne, UT_STR.doneBadMany));
+        } else {
+            setBanner("ok", UT_STR.doneOk);
+        }
+        Array.prototype.forEach.call(verdictsEl.querySelectorAll("[data-fix]"), function (btn) {
+            btn.addEventListener("click", function () { previewFix(btn.getAttribute("data-fix")); });
+        });
+    }
+    function previewFix(domain) {
+        if (!currentJob) { return; }
+        setBanner("warn", UT_STR.fixing);
+        UserTools.callApi("doctor_htaccess_preview", { job_id: currentJob, domain: domain }, "GET").then(function (data) {
+            var n = (data.lines || []).length;
+            var body = n === 1 ? UT_STR.fixBodyOne : tok(UT_STR.fixBodyMany, "COUNT", n);
+            pendingFix = { domain: domain };
+            openDialog(UT_STR.fixTitle, body, data.diff || "", UT_STR.fixApply, applyFix);
+        }).catch(function (err) {
+            setBanner("err", UT_STR.fixFailed + err.message);
+        });
+    }
+    function applyFix() {
+        if (!pendingFix || !currentJob) { return; }
+        var domain = pendingFix.domain;
+        pendingFix = null;
+        UserTools.callApi("doctor_htaccess_fix", { job_id: currentJob, domain: domain }, "POST").then(function () {
+            setBanner("ok", UT_STR.fixed);
+            undoBtn.hidden = false;
+        }).catch(function (err) {
+            setBanner("err", UT_STR.fixFailed + err.message);
+        });
+    }
+    scanBtn.addEventListener("click", function () {
+        verdictsEl.innerHTML = "";
+        listsEl.innerHTML = "";
+        undoBtn.hidden = true;
+        startJob(null);
+    });
+    cancelBtn.addEventListener("click", function () {
+        if (!currentJob) { return; }
+        setBanner("warn", UT_STR.cancelling);
+        UserTools.callApi("doctor_scan_cancel", { job_id: currentJob }, "POST").then(function () {
+            if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+            pollJob(null);
+        }).catch(function (err) {
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    });
+    undoBtn.addEventListener("click", function () {
+        if (!currentJob) { return; }
+        var sel = verdictsEl.querySelector("[data-fix]");
+        var domain = sel ? sel.getAttribute("data-fix") : null;
+        if (!domain) { return; }
+        setBanner("warn", UT_STR.fixing);
+        UserTools.callApi("doctor_htaccess_undo", { job_id: currentJob, domain: domain }, "POST").then(function () {
+            setBanner("ok", UT_STR.undoDone);
+            undoBtn.hidden = true;
+        }).catch(function (err) {
+            setBanner("err", UT_STR.undoFailed + err.message);
+        });
+    });
+    try {
+        var last = window.localStorage.getItem(JOB_KEY);
+        if (last) {
+            currentJob = last;
+            setBusy(true);
+            pollJob(null);
+        }
+    } catch (e) { /* ignore */ }
+});
+</script>

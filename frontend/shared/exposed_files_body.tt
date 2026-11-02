@@ -1,0 +1,278 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    Shared Exposed Files Scanner page body. Included once by each theme
+    adapter. Flow: scan every document root for files that must never be
+    public (backups, dumps, config copies, info pages), probe each one
+    over HTTP, then move findings out of the public folder (quarantine
+    with restore) or block them with a marked .htaccess deny block
+    (undo removes the rule). A stored job id reattaches the page to a
+    running job after a reload. %]
+<div class="ut-wrap">
+  <p class="ut-lead">[% locale.maketext('Find files that must never be public: backups, dumps, config copies and info pages. Only files the web server actually serves are flagged.') %]</p>
+  <details class="ut-learn">
+    <summary>[% locale.maketext('Learn more') %]</summary>
+    <p>[% locale.maketext('Every document root is walked for risky names (.git folders, SQL dumps, archives, backup copies, config copies, info pages, logs). Each match is probed over HTTP exactly as a visitor would fetch it; only downloadable files count as exposed. Move sends a file to quarantine with restore; Block denies it with a marked .htaccess rule that undo removes.') %]</p>
+  </details>
+  <div class="ut-banner warn" id="ut-banner" role="status" aria-live="polite">[% locale.maketext('Run a scan to find exposed files.') %]</div>
+  <div class="ut-controls">
+    <button class="ut-btn" id="ut-scan" type="button">[% locale.maketext('Scan') %]</button>
+  </div>
+  <div class="ut-progress" id="ut-progress" hidden>
+    <progress id="ut-bar" aria-label="[% locale.maketext('Progress') %]"></progress>
+    <div class="ut-path" id="ut-progtext" aria-live="polite"></div>
+    <button class="ut-btn secondary" id="ut-cancel" type="button">[% locale.maketext('Cancel') %]</button>
+  </div>
+  <div class="ut-lists" id="ut-lists" aria-live="polite"></div>
+  <h2>[% locale.maketext('Quarantine') %]</h2>
+  <p class="ut-path" id="ut-trash-size" aria-live="polite"></p>
+  <div id="ut-trash-list"></div>
+[% PROCESS 'shared/footer.tt' -%]
+</div>
+<script>
+var UT_STR = {
+    scanning: "[% locale.maketext('Scanning document roots.') %]",
+    progtextOne: "[% locale.maketext('Scanned 1 entry.') %]",
+    progtextMany: "[% locale.maketext('Scanned COUNT entries.') %]",
+    cancelling: "[% locale.maketext('Cancelling.') %]",
+    cancelled: "[% locale.maketext('Cancelled.') %]",
+    noneFound: "[% locale.maketext('No exposed files found.') %]",
+    foundOne: "[% locale.maketext('1 finding needs a look:') %]",
+    foundMany: "[% locale.maketext('COUNT findings need a look:') %]",
+    failed: "[% locale.maketext('The scan failed. Please try again.') %]",
+    startFailed: "[% locale.maketext('Could not start: ') %]",
+    exposedYes: "[% locale.maketext('exposed') %]",
+    exposedNo: "[% locale.maketext('not downloadable') %]",
+    notProbed: "[% locale.maketext('not checked') %]",
+    move: "[% locale.maketext('Move to quarantine') %]",
+    block: "[% locale.maketext('Block') %]",
+    unblock: "[% locale.maketext('Unblock') %]",
+    restore: "[% locale.maketext('Restore') %]",
+    moved: "[% locale.maketext('Moved to quarantine.') %]",
+    blocked: "[% locale.maketext('Blocked.') %]",
+    unblocked: "[% locale.maketext('Block removed.') %]",
+    restored: "[% locale.maketext('Restored.') %]",
+    reprobed: "[% locale.maketext('Re-probe: HTTP STATUS.') %]",
+    stillExposed: "[% locale.maketext('Still downloadable after the action: check the result.') %]",
+    actionFailed: "[% locale.maketext('Action failed: ') %]",
+    quarantineEmpty: "[% locale.maketext('Quarantine is empty.') %]",
+    quarantineSize: "[% locale.maketext('Quarantine holds FILES files (SIZE).') %]",
+    batchFiles: "[% locale.maketext('FILES files, SIZE') %]"
+};
+</script>
+<script>
+"use strict";
+window.addEventListener("DOMContentLoaded", function () {
+    if (!window.UserTools) {
+        document.getElementById("ut-banner").textContent = "UserTools failed to load.";
+        return;
+    }
+    var bannerEl = document.getElementById("ut-banner");
+    var scanBtn = document.getElementById("ut-scan");
+    var cancelBtn = document.getElementById("ut-cancel");
+    var progWrap = document.getElementById("ut-progress");
+    var progText = document.getElementById("ut-progtext");
+    var listsEl = document.getElementById("ut-lists");
+    var trashSizeEl = document.getElementById("ut-trash-size");
+    var trashListEl = document.getElementById("ut-trash-list");
+    var pollTimer = null;
+    var currentJob = null;
+    var lastFindings = [];
+    var JOB_KEY = "ut_exposed_scan_last_job";
+
+    function tok(s, name, value) { return String(s).split(name).join(value); }
+    function fmtBytes(n) {
+        n = Number(n) || 0;
+        if (n < 1024) { return n + " B"; }
+        var units = ["KB", "MB", "GB", "TB"];
+        var u = -1;
+        var v = n;
+        do { v = v / 1024; u++; } while (v >= 1024 && u < units.length - 1);
+        return (Math.round(v * 10) / 10) + " " + units[u];
+    }
+    function setBanner(kind, text) {
+        bannerEl.className = "ut-banner " + kind;
+        bannerEl.textContent = text;
+    }
+    function setBusy(busy) { scanBtn.disabled = busy; }
+    function badge(f) {
+        if (f.exposed) { return UserTools.escHtml(UT_STR.exposedYes); }
+        if (f.http_status) { return UserTools.escHtml(UT_STR.exposedNo); }
+        return UserTools.escHtml(UT_STR.notProbed);
+    }
+    function startJob() {
+        setBusy(true);
+        UserTools.callApi("exposed_scan_start", {}, "POST").then(function (data) {
+            if (data.state === "busy") {
+                setBusy(false);
+                setBanner("warn", UT_STR.scanning);
+                return;
+            }
+            currentJob = data.job_id;
+            try { window.localStorage.setItem(JOB_KEY, data.job_id); } catch (e) { /* ignore */ }
+            pollJob();
+        }).catch(function (err) {
+            setBusy(false);
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    }
+    function pollJob() {
+        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+        if (!currentJob) { return; }
+        UserTools.callApi("exposed_scan_status", { job_id: currentJob }, "GET").then(function (data) {
+            if (data.state === "running") {
+                progWrap.hidden = false;
+                var p = data.progress || {};
+                progText.textContent = UserTools.plural(p.scanned || 0, UT_STR.progtextOne, UT_STR.progtextMany);
+                setBanner("warn", UT_STR.scanning);
+                pollTimer = setTimeout(pollJob, 1000);
+            } else {
+                progWrap.hidden = true;
+                setBusy(false);
+                if (data.state === "done") {
+                    renderResult(data.summary || {});
+                } else {
+                    setBanner("err", UT_STR.failed);
+                }
+            }
+        }).catch(function (err) {
+            setBusy(false);
+            progWrap.hidden = true;
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    }
+    function renderResult(summary) {
+        var findings = summary.findings || [];
+        lastFindings = findings;
+        if (!findings.length) {
+            setBanner("ok", UT_STR.noneFound);
+            listsEl.innerHTML = "";
+            return;
+        }
+        setBanner("warn", UserTools.plural(findings.length, UT_STR.foundOne, UT_STR.foundMany));
+        var html = '<table class="ut-table"><thead><tr><th>File</th><th>Status</th><th></th></tr></thead><tbody>';
+        findings.forEach(function (f) {
+            html += "<tr><td>" + UserTools.escHtml(f.relpath || "?") + "<br><span class=\"ut-path\">" +
+                UserTools.escHtml(f.kind || "") + (f.http_status ? ", HTTP " + f.http_status : "") + "</span></td>";
+            html += "<td>" + badge(f) + "</td><td>";
+            html += '<button class="ut-btn small" type="button" data-move="' + UserTools.escHtml(f.id || "") + '">' +
+                UserTools.escHtml(UT_STR.move) + "</button> ";
+            html += '<button class="ut-btn small secondary" type="button" data-block="' + UserTools.escHtml(f.id || "") + '">' +
+                UserTools.escHtml(UT_STR.block) + "</button>";
+            html += "</td></tr>";
+        });
+        listsEl.innerHTML = html + "</tbody></table>";
+        Array.prototype.forEach.call(listsEl.querySelectorAll("[data-move]"), function (btn) {
+            btn.addEventListener("click", function () { moveFinding(btn.getAttribute("data-move"), btn); });
+        });
+        Array.prototype.forEach.call(listsEl.querySelectorAll("[data-block]"), function (btn) {
+            btn.addEventListener("click", function () { blockFinding(btn.getAttribute("data-block"), btn); });
+        });
+        refreshQuarantine();
+    }
+    function noteFor(btn, text) {
+        var td = btn.parentNode;
+        var note = document.createElement("div");
+        note.className = "ut-path";
+        note.textContent = text;
+        td.appendChild(note);
+    }
+    function moveFinding(id, btn) {
+        if (!currentJob) { return; }
+        btn.disabled = true;
+        UserTools.callApi("exposed_move", { job_id: currentJob, finding: id }, "POST").then(function (data) {
+            var msg = UT_STR.moved + " " + tok(UT_STR.reprobed, "STATUS", (data.reprobed || {}).status || 0);
+            if (data.reprobed && data.reprobed.exposed) { msg += " " + UT_STR.stillExposed; }
+            noteFor(btn, msg);
+            refreshQuarantine();
+        }).catch(function (err) {
+            btn.disabled = false;
+            setBanner("err", UT_STR.actionFailed + err.message);
+        });
+    }
+    function blockFinding(id, btn) {
+        if (!currentJob) { return; }
+        btn.disabled = true;
+        UserTools.callApi("exposed_block", { job_id: currentJob, finding: id }, "POST").then(function (data) {
+            var msg = UT_STR.blocked + " " + tok(UT_STR.reprobed, "STATUS", (data.reprobed || {}).status || 0);
+            noteFor(btn, msg);
+            var row = btn.parentNode;
+            var un = document.createElement("button");
+            un.className = "ut-btn small secondary";
+            un.type = "button";
+            un.textContent = UT_STR.unblock;
+            un.addEventListener("click", function () { unblockFinding(id, un); });
+            row.appendChild(un);
+        }).catch(function (err) {
+            btn.disabled = false;
+            setBanner("err", UT_STR.actionFailed + err.message);
+        });
+    }
+    function unblockFinding(id, btn) {
+        if (!currentJob) { return; }
+        btn.disabled = true;
+        UserTools.callApi("exposed_unblock", { job_id: currentJob, finding: id }, "POST").then(function (data) {
+            var msg = UT_STR.unblocked + " " + tok(UT_STR.reprobed, "STATUS", (data.reprobed || {}).status || 0);
+            noteFor(btn, msg);
+        }).catch(function (err) {
+            btn.disabled = false;
+            setBanner("err", UT_STR.actionFailed + err.message);
+        });
+    }
+    function refreshQuarantine() {
+        UserTools.callApi("exposed_quarantine_list", {}, "GET").then(function (data) {
+            var batches = data.batches || [];
+            if (!batches.length) {
+                trashSizeEl.textContent = UT_STR.quarantineEmpty;
+                trashListEl.innerHTML = "";
+                return;
+            }
+            var files = 0;
+            batches.forEach(function (b) { files += b.files || 0; });
+            trashSizeEl.textContent = tok(tok(UT_STR.quarantineSize, "FILES", files), "SIZE", fmtBytes(data.quarantine_bytes || 0));
+            var html = "";
+            batches.forEach(function (b) {
+                html += '<div class="ut-card"><h2>' + UserTools.escHtml(b.batch) + "</h2>";
+                html += '<div class="ut-path">' + UserTools.escHtml(tok(tok(UT_STR.batchFiles, "FILES", b.files || 0), "SIZE", fmtBytes(b.bytes || 0))) + "</div>";
+                html += '<div class="ut-controls"><button class="ut-btn secondary" type="button" data-restore="' +
+                    UserTools.escHtml(b.batch) + '">' + UserTools.escHtml(UT_STR.restore) + "</button></div></div>";
+            });
+            trashListEl.innerHTML = html;
+            Array.prototype.forEach.call(trashListEl.querySelectorAll("[data-restore]"), function (btn) {
+                btn.addEventListener("click", function () {
+                    btn.disabled = true;
+                    UserTools.callApi("exposed_restore", { batch: btn.getAttribute("data-restore") }, "POST").then(function (data) {
+                        setBanner("ok", UT_STR.restored + " (" + (data.restored || 0) + ")");
+                        refreshQuarantine();
+                    }).catch(function (err) {
+                        btn.disabled = false;
+                        setBanner("err", UT_STR.actionFailed + err.message);
+                    });
+                });
+            });
+        }).catch(function () { /* quarantine list is best-effort here */ });
+    }
+    scanBtn.addEventListener("click", function () {
+        listsEl.innerHTML = "";
+        startJob();
+    });
+    cancelBtn.addEventListener("click", function () {
+        if (!currentJob) { return; }
+        setBanner("warn", UT_STR.cancelling);
+        UserTools.callApi("exposed_scan_cancel", { job_id: currentJob }, "POST").then(function () {
+            if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+            pollJob();
+        }).catch(function (err) {
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    });
+    try {
+        var last = window.localStorage.getItem(JOB_KEY);
+        if (last) {
+            currentJob = last;
+            setBusy(true);
+            pollJob();
+        }
+    } catch (e) { /* ignore */ }
+    refreshQuarantine();
+});
+</script>

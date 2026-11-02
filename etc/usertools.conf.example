@@ -19,6 +19,10 @@ cleaner_log_min_mb=50                   ; error_log and per-website PHP logs
                                         ; for truncating (1-1024)
 cleaner_trash_days=7                    ; trash batches older than this many
                                         ; days are pruned (1-90)
+enable_site_doctor=0                    ; 0 = Site Doctor off even when
+                                        ; the feature is ticked (default off)
+enable_exposed_files=0                  ; 0 = Exposed Files off even when
+                                        ; the feature is ticked (default off)
 allow_user_app_docroot=0               ; 1 lets users point their MAIN domain
                                        ; at public_html/public themselves
                                        ; (Admin SET_APP_DOCROOT); default off
