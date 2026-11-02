@@ -137,6 +137,18 @@ def seed_wp(home, rel="blog"):
     return blog
 
 
+def seed_core(path, size=64, endian="<", etype=4):
+    """Write a minimal valid ELF header (default ET_CORE) + padding."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    order = "little" if endian == "<" else "big"
+    data_byte = 1 if endian == "<" else 2
+    ident = b"\x7fELF" + bytes([2, data_byte, 1, 0, 0]) + b"\x00" * 7
+    assert len(ident) == 16
+    with open(str(path), "wb") as fh:
+        fh.write(ident + etype.to_bytes(2, order))
+        fh.truncate(size)
+
+
 # ---------------------------------------------------------------------------
 # error_logs (classic error_log files + per-domain PHP logs)
 # ---------------------------------------------------------------------------
@@ -164,6 +176,27 @@ def test_error_log_scan_and_truncate(tmp_path):
     assert os.stat(str(big)).st_size == 0
     assert stat.S_IMODE(os.stat(str(big)).st_mode) == mode_before
     assert small.read_bytes() == b"x" * 10
+
+
+def test_core_requires_elf_header(tmp_path):
+    home = make_home(tmp_path)
+    (home / "core").write_text("this is a text file called core\n" * 10)
+    # A normal executable named like a dump is not a dump (ET_EXEC = 2).
+    seed_core(home / "public_html" / "core.123", size=100, etype=2)
+    # Big-endian dumps count too (byte order from EI_DATA).
+    seed_core(home / "public_html" / "core.9", size=70, endian=">")
+
+    rc, summary, _ = scan(home, "core_dumps")
+    assert rc == 0
+    cat = summary["categories"]["core_dumps"]
+    assert cat["files"] == 1
+    assert [e["path"] for e in cat["largest"]] == ["public_html/core.9"]
+
+    rc, summary, _ = clean(home, "core_dumps")
+    assert rc == 0
+    assert summary["counts"]["trashed_files"] == 1
+    assert (home / "core").read_text().startswith("this is a text file")
+    assert os.path.lexists(str(home / "public_html" / "core.123"))
 
 
 def test_php_error_logs_only_pattern(tmp_path):
@@ -224,8 +257,8 @@ def test_error_log_below_floor_untouched(tmp_path):
 
 def test_core_dumps_trash(tmp_path):
     home = make_home(tmp_path)
-    (home / "core").write_bytes(b"c" * 40)
-    (home / "public_html" / "core.12345").write_bytes(b"d" * 60)
+    seed_core(home / "core", size=40)
+    seed_core(home / "public_html" / "core.12345", size=60)
     (home / "public_html" / "core.txt").write_text("keep")
     (home / "mycore").write_text("keep")
 
@@ -366,23 +399,41 @@ def _old(path, days=40):
     os.utime(str(path), (stamp, stamp))
 
 
+def seed_job(home, tool, stamp, pid, files, age_days=40):
+    """Seed one multi-file job; every file gets the same old mtime."""
+    jobs = home / ".cpanel" / "usertools" / "jobs"
+    jobs.mkdir(parents=True, exist_ok=True)
+    base = "%s-%s-%s-1" % (tool, stamp, pid)
+    for suffix, text in files:
+        p = jobs / (base + suffix)
+        p.write_text(text)
+        _old(p, age_days)
+    return base
+
+
 def seed_jobs_undo(home):
     jobs = home / ".cpanel" / "usertools" / "jobs"
     jobs.mkdir(parents=True)
     undo = home / ".cpanel" / "usertools" / "undo"
     undo.mkdir(parents=True)
-    # five old bulk jobs: only the newest three survive
-    for i in range(5):
-        p = jobs / ("bulk-20200101T00000%d-1-1.result.json" % i)
-        p.write_text("{}")
-        _old(p)
-    fresh = jobs / "bulk-20260101T000000-9-9.result.json"
-    fresh.write_text("{}")
+    two = [(".job.json", "{}"), (".result.json", "{}")]
+    # four old multi-file bulk jobs; the newest three survive as units
+    for i in range(4):
+        seed_job(home, "bulk", "20200101T00000%d" % i, 1000 + i, two)
+    # a fifth bulk job with one fresh file: the whole job stays
+    base = seed_job(home, "bulk", "20200101T000005", 2005, two)
+    fresh_file = jobs / (base + ".result.json")
+    now = time.time()
+    os.utime(str(fresh_file), (now, now))
+    # an old job that is still alive (meta names this process):
+    # never touched despite its age
+    live_base = seed_job(home, "bulk", "20190101T000000", 4242, two)
+    with open(str(jobs / (live_base + ".job.json")), "w",
+              encoding="utf-8") as fh:
+        fh.write('{"id": "%s", "pid": %d}' % (live_base, os.getpid()))
     # two old report jobs: fewer than three, both survive
     for i in range(2):
-        p = jobs / ("report-20200101T00000%d-1-1.result.json" % i)
-        p.write_text("{}")
-        _old(p)
+        seed_job(home, "report", "20200101T00000%d" % i, 3000 + i, two)
     # unknown suffix: never touched
     mystery = jobs / "bulk-20200101T000000-0-0.notes.txt"
     mystery.write_text("mystery")
@@ -404,23 +455,32 @@ def test_usertools_old_delete_rules(tmp_path):
     rc, summary, _ = scan(home, "usertools_old")
     assert rc == 0
     cat = summary["categories"]["usertools_old"]
-    # deletable: bulk-0..2 (old beyond newest 3 incl. the fresh job)
-    # + app-0, app-1 (old beyond newest 3 incl. the fresh journal)
-    assert cat["files"] == 5
+    # deletable: bulk jobs 0 and 1, whole (2 files each)
+    # + app-0, app-1 journals; the live, mixed-age and newest jobs stay
+    assert cat["files"] == 6
 
     rc, summary, _ = clean(home, "usertools_old")
     assert rc == 0
-    assert summary["counts"]["deleted_files"] == 5
-    remaining_jobs = sorted(p.name for p in jobs.iterdir())
-    assert "bulk-20200101T000003-1-1.result.json" in remaining_jobs
-    assert "bulk-20200101T000004-1-1.result.json" in remaining_jobs
-    assert "bulk-20260101T000000-9-9.result.json" in remaining_jobs
-    assert "bulk-20200101T000000-1-1.result.json" not in remaining_jobs
-    assert "bulk-20200101T000001-1-1.result.json" not in remaining_jobs
-    assert "bulk-20200101T000002-1-1.result.json" not in remaining_jobs
-    assert "report-20200101T000000-1-1.result.json" in remaining_jobs
-    assert "report-20200101T000001-1-1.result.json" in remaining_jobs
-    assert "bulk-20200101T000000-0-0.notes.txt" in remaining_jobs
+    assert summary["counts"]["deleted_files"] == 6
+    remaining = sorted(p.name for p in jobs.iterdir())
+    # newest three bulk jobs complete (both files each)
+    for suffix in (".job.json", ".result.json"):
+        assert ("bulk-20200101T000002-1002-1" + suffix) in remaining
+        assert ("bulk-20200101T000003-1003-1" + suffix) in remaining
+        assert ("bulk-20200101T000005-2005-1" + suffix) in remaining
+    # the live job is complete too (its meta names a running pid)
+    live = "bulk-20190101T000000-4242-1"
+    for suffix in (".job.json", ".result.json"):
+        assert (live + suffix) in remaining
+    # older jobs are gone completely: no partial job left behind
+    for dead in ("bulk-20200101T000000-1000-1",
+                 "bulk-20200101T000001-1001-1"):
+        for suffix in (".job.json", ".result.json", ".progress.json",
+                       ".stderr.log", ".log", ".recipe.json", ".cancelled"):
+            assert (dead + suffix) not in remaining
+    assert "report-20200101T000000-3000-1.result.json" in remaining
+    assert "report-20200101T000001-3001-1.result.json" in remaining
+    assert "bulk-20200101T000000-0-0.notes.txt" in remaining
     remaining_undo = sorted(p.name for p in undo.iterdir())
     assert "app-20200101T000000.jsonl.gz" not in remaining_undo
     assert "app-20200101T000001.jsonl.gz" not in remaining_undo
@@ -435,8 +495,8 @@ def test_usertools_old_delete_rules(tmp_path):
 
 def test_trash_empty_and_list(tmp_path):
     home = make_home(tmp_path)
-    (home / "core.1").write_bytes(b"1" * 25)
-    (home / "core.2").write_bytes(b"2" * 35)
+    seed_core(home / "core.1", size=25)
+    seed_core(home / "core.2", size=35)
     rc, summary, _ = clean(home, "core_dumps")
     assert rc == 0
     batch = summary["trash_batch"]
@@ -454,29 +514,137 @@ def test_trash_empty_and_list(tmp_path):
     assert rc == 0
 
     # --all across two batches
-    (home / "core.3").write_bytes(b"3")
+    seed_core(home / "core.3", size=30)
     clean(home, "core_dumps")
-    (home / "core.4").write_bytes(b"4")
+    seed_core(home / "core.4", size=40)
     clean(home, "core_dumps")
     rc, summary, _ = lockless("trash-empty", "--all", home=home)
     assert rc == 0
     assert os.listdir(os.path.join(str(home), ".usertools-trash")) == []
 
 
-def test_trash_prune_by_age(tmp_path):
+def test_trash_prune_uses_batch_name_age(tmp_path):
     home = make_home(tmp_path)
     trash = home / ".usertools-trash"
+    trash.mkdir()
+    # Old name but fresh folder mtime: still pruned (name decides).
     old_batch = trash / "20200101T000000"
     (old_batch / "sub").mkdir(parents=True)
     (old_batch / "sub" / "f").write_bytes(b"old")
-    _old(old_batch)
-    (home / "core.9").write_bytes(b"9")
+    # Fresh name but old folder mtime: still kept.
+    fresh = time.strftime("%Y%m%dT%H%M%S", time.gmtime(time.time()))
+    fresh_batch = trash / fresh
+    fresh_batch.mkdir()
+    (fresh_batch / "g").write_bytes(b"new")
+    _old(fresh_batch)
+    # Unparseable names are skipped, never deleted.
+    odd = trash / "notes.txt"
+    odd.write_text("do not touch")
+    seed_core(home / "core.9", size=90)
     # clean runs the same prune first, then trashes the fresh file
     rc, summary, _ = clean(home, "core_dumps")
     assert rc == 0
     assert summary["counts"]["trashed_files"] == 1
     assert not os.path.lexists(str(old_batch))
-    assert summary["trash"]["batches"] == 1
+    assert os.path.lexists(str(fresh_batch / "g"))
+    assert odd.read_text() == "do not touch"
+    assert summary["trash"]["batches"] == 2
+
+
+def test_full_restore_removes_batch(tmp_path):
+    home = make_home(tmp_path)
+    seed_app(home)
+    rc, summary, _ = clean(home, "app_cache")
+    assert rc == 0
+    batch = summary["trash_batch"]
+    rc, summary, _ = lockless("trash-restore", "--batch", batch, home=home)
+    assert rc == 0
+    assert summary["counts"]["restored_files"] == 3
+    assert summary["counts"]["restore_conflicts"] == 0
+    # nothing left: no manifest, no folders, no batch dir
+    assert not os.path.lexists(
+        os.path.join(str(home), ".usertools-trash", batch))
+    assert sc.trash_size(str(home)) == (0, 0, 0)
+
+
+def test_partial_restore_keeps_only_conflicts(tmp_path):
+    home = make_home(tmp_path)
+    seed_app(home)
+    rc, summary, _ = clean(home, "app_cache")
+    assert rc == 0
+    batch = summary["trash_batch"]
+    target = home / "myapp" / "storage" / "framework" / "views" / "aaa.php"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"recreated")
+    rc, summary, _ = lockless("trash-restore", "--batch", batch, home=home)
+    assert rc == 0
+    assert summary["counts"]["restored_files"] == 2
+    assert summary["counts"]["restore_conflicts"] == 1
+    assert target.read_bytes() == b"recreated"
+    with open(os.path.join(str(home), ".usertools-trash", batch,
+                           "manifest.json")) as fh:
+        manifest = json.load(fh)
+    assert [e["path"] for e in manifest["entries"]] == [
+        "myapp/storage/framework/views/aaa.php"]
+    # a second restore reports the same single conflict, nothing lost
+    rc, summary, _ = lockless("trash-restore", "--batch", batch, home=home)
+    assert rc == 0
+    assert summary["counts"]["restored_files"] == 0
+    assert summary["counts"]["restore_conflicts"] == 1
+
+
+def test_restore_never_overwrites_race(tmp_path, monkeypatch):
+    home = make_home(tmp_path)
+    seed_core(home / "core.8", size=32)
+    rc, summary, _ = clean(home, "core_dumps")
+    assert rc == 0
+    batch = summary["trash_batch"]
+    summary2 = sc.new_clean_summary("trash-restore", str(home), False)
+    real_link = os.link
+
+    def racy_link(src, dst):
+        # a file appears at the destination between check and move
+        (home / "core.8").write_bytes(b"racer won")
+        return real_link(src, dst)
+
+    monkeypatch.setattr(os, "link", racy_link)
+    ok = sc._restore_one(str(home), os.getuid(), summary2,
+                         os.path.join(str(home), ".usertools-trash", batch),
+                         "core.8")
+    assert ok is False
+    assert (home / "core.8").read_bytes() == b"racer won"
+    assert summary2["counts"]["restore_conflicts"] == 1
+    assert os.path.isfile(os.path.join(
+        str(home), ".usertools-trash", batch, "core.8"))
+
+
+def test_cache_folders_counted_once(tmp_path):
+    home = make_home(tmp_path)
+    blog = seed_wp(home)
+    seed_core(blog / "wp-content" / "cache" / "core.7", size=90)
+    rc, summary, _ = scan(home)
+    assert rc == 0
+    # the dump belongs to the cache walk only, never to core_dumps
+    assert summary["categories"]["wp_cache"]["files"] == 3
+    assert summary["categories"]["core_dumps"]["files"] == 0
+    by_size = {e["path"]: e["bytes"] for e in summary["top_dirs_size"]}
+    assert by_size.get("blog") == 6 + 6 + 70 + 80 + 90
+
+
+def test_stock_www_link_hidden(tmp_path):
+    home = make_home(tmp_path)
+    os.symlink("public_html", str(home / "www"))
+    os.symlink("/etc/hostname", str(home / "link-out"))
+    (home / "other").mkdir()
+    os.symlink("/etc/hostname", str(home / "other" / "www"))
+    os.symlink(str(home / "public_html"), str(home / "www2"))
+    rc, summary, _ = scan(home)
+    assert rc == 0
+    skipped = {e["path"] for e in summary["paths"]["skipped_symlink"]}
+    assert "www" not in skipped
+    assert "link-out" in skipped
+    assert "other/www" in skipped
+    assert "www2" in skipped
 
 
 def test_trash_batch_and_empty_shape_errors(tmp_path):
@@ -501,7 +669,7 @@ def test_restore_blocked_by_symlink_parent(tmp_path):
     home = make_home(tmp_path)
     sub = home / "public_html" / "cacheme"
     sub.mkdir()
-    (sub / "core.5").write_bytes(b"5" * 12)
+    seed_core(sub / "core.5", size=60)
     rc, summary, _ = clean(home, "core_dumps")
     assert rc == 0
     batch = summary["trash_batch"]
@@ -638,9 +806,10 @@ def test_protected_paths_untouched(tmp_path):
     home = make_home(tmp_path)
     for rel in ("mail/error_log", "etc/error_log", "ssl/error_log",
                 "tmp/error_log", "logs/access.log", ".trash/error_log",
-                "core.1"):
+                ".trash/nested/core", "core.1"):
         p = home / rel
         if rel == "core.1":
+            # not a real core header: not a candidate anywhere
             p.write_bytes(b"z" * 10)
             continue
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -651,11 +820,11 @@ def test_protected_paths_untouched(tmp_path):
     rc, summary, _ = scan(home)
     assert rc == 0
     assert summary["categories"]["error_logs"]["files"] == 0
-    # core.1 at the top level is fair game; protected ones are not
-    assert summary["categories"]["core_dumps"]["files"] == 1
-    assert summary["counts"]["skipped_protected"] >= 5
+    assert summary["categories"]["core_dumps"]["files"] == 0
+    assert summary["counts"]["skipped_protected"] >= 6
     for rel in ("mail/error_log", "etc/error_log", "logs/access.log",
-                ".trash/error_log", ".ssh/error_log"):
+                ".trash/error_log", ".ssh/error_log",
+                ".trash/nested/core"):
         assert (home / rel).read_bytes() == b"p" * 10 or \
             (home / rel).read_bytes() == b"s" * 10
 
@@ -700,7 +869,7 @@ def test_top_dirs_and_largest(tmp_path):
 
 def test_category_filtering(tmp_path):
     home = make_home(tmp_path)
-    (home / "core.7").write_bytes(b"7")
+    seed_core(home / "core.7", size=70)
     sparse(home / "public_html" / "error_log", 2 * 1024 * 1024)
     rc, summary, _ = scan(home, "core_dumps")
     assert rc == 0

@@ -1059,8 +1059,11 @@ sub space_wait_done {
     open my $fh, '>', "$home/public_html/error_log" or die $!;
     truncate $fh, 2 * 1024 * 1024 or die $!;
     close $fh;
+    # Real ELF core header (ET_CORE): bare text no longer counts.
     open $fh, '>', "$home/core.1" or die $!;
-    print $fh "x" x 25;
+    binmode $fh;
+    print $fh "\x7fELF" . chr(2) . chr(1) . chr(1) . ( "\x00" x 9 )
+      . chr(4) . chr(0) . ( "x" x 25 );
     close $fh;
 
     my $res = FakeResult->new();
@@ -1105,7 +1108,9 @@ sub space_wait_done {
     ok( -f "$home/core.1", 'core really back' );
 
     open $fh, '>', "$home/core.2" or die $!;
-    print $fh "y" x 10;
+    binmode $fh;
+    print $fh "\x7fELF" . chr(2) . chr(1) . chr(1) . ( "\x00" x 9 )
+      . chr(4) . chr(0) . ( "y" x 10 );
     close $fh;
     $res = FakeResult->new();
     $ok  = Cpanel::API::UserTools::space_clean_start(

@@ -63,6 +63,8 @@ Exit codes: 0 ok, 2 usage/validation/refusal, 3 another job running,
 """
 
 import argparse
+import calendar
+import errno
 import json
 import os
 import re
@@ -151,6 +153,20 @@ def trash_dir(home):
 def new_batch_id():
     # type: () -> str
     return time.strftime("%Y%m%dT%H%M%S", time.gmtime(time.time()))
+
+
+def batch_age_seconds(name):
+    # type: (str) -> float
+    """Age of a batch id in seconds, or -1 when it does not parse.
+
+    Batch names are UTC; calendar.timegm (not mktime) keeps the age
+    right regardless of the server timezone.
+    """
+    try:
+        stamp = calendar.timegm(time.strptime(name, "%Y%m%dT%H%M%S"))
+    except (ValueError, OverflowError):
+        return -1.0
+    return time.time() - stamp
 
 
 def policy_int(policy, key, default, low, high):
@@ -435,16 +451,22 @@ def trash_size(home):
 
 def prune_trash(home, summary, max_days):
     # type: (str, dict, int) -> int
-    """Delete trash batches older than max_days; returns batches pruned."""
+    """Delete trash batches older than max_days; returns batches pruned.
+
+    Age comes from the batch name (UTC); names that do not parse are
+    skipped, so a stray write can never silently extend retention.
+    """
     root = trash_dir(home)
     try:
         names = os.listdir(root)
     except OSError:
         return 0
-    cutoff = time.time() - max_days * 86400
+    cutoff = max_days * 86400
     pruned = 0
     for name in names:
         if not BATCH_RE.match(name):
+            continue
+        if batch_age_seconds(name) < cutoff:
             continue
         full = os.path.join(root, name)
         try:
@@ -452,8 +474,6 @@ def prune_trash(home, summary, max_days):
         except OSError:
             continue
         if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
-            continue
-        if st.st_mtime > cutoff:
             continue
         try:
             safe_rmtree(full)
@@ -537,6 +557,7 @@ class Cleaner(object):
         self.acting = acting
         self.done = 0
         self.top_stats = {}  # type: dict
+        self.handled = set()  # type: set
         self.trash_batch = None  # type: object
         self.trash_entries = []  # type: list
 
@@ -587,13 +608,16 @@ class Cleaner(object):
 
     # -- entry handling ----------------------------------------------------
 
-    def examine(self, dir_fd, name, hrel):
-        # type: (int, str, str) -> object
+    def examine(self, dir_fd, name, hrel, collect_cid=None):
+        # type: (int, str, str, object) -> object
         """Classify one entry; returns (kind, stat-result-or-None).
 
         "dir" entries are owned directories to descend; "file" entries are
         owned single-link regular files (category checks run on them);
-        anything else is already recorded ("skip").
+        anything else is already recorded ("skip"). When collect_cid names
+        a category walk, owned files are only reported through it: the
+        error_logs/core_dumps checks below run solely for the main walk,
+        so each file belongs to exactly one category.
         """
         try:
             st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
@@ -608,6 +632,8 @@ class Cleaner(object):
         self.done += 1
         self.poll()
         if stat.S_ISLNK(st.st_mode):
+            if hrel == "www" and self.is_stock_www_link(name, dir_fd):
+                return ("skip", None)
             self.record_skip("skipped_symlink", hrel)
             return ("skip", None)
         if st.st_dev != self.top_dev:
@@ -630,17 +656,89 @@ class Cleaner(object):
                              "more than one hard link; left alone")
             return ("skip", None)
         self.tally_top(hrel, st.st_size)
+        if collect_cid is not None:
+            return ("file", st)
         base = hrel.rsplit("/", 1)[-1]
         if base == ERROR_LOG_BASENAME and self.selected("error_logs") \
                 and st.st_size >= self.log_min_bytes:
             self.found("error_logs", hrel, st.st_size,
                        lambda: self.truncate(hrel))
             return ("file", st)
-        if CORE_RE.match(base) and self.selected("core_dumps"):
+        if CORE_RE.match(base) and self.selected("core_dumps") \
+                and self.is_core_dump(dir_fd, name):
             self.found("core_dumps", hrel, st.st_size,
                        lambda: self.move_to_trash(hrel))
             return ("file", st)
         return ("file", st)
+
+    def is_stock_www_link(self, name, dir_fd):
+        # type: (str, int) -> bool
+        """True for the stock top-level www link to public_html.
+
+        cPanel creates www as a symlink to public_html in every home; it
+        is plumbing, not user data, so the scan hides it. Anything else —
+        even another link called www pointing elsewhere — stays listed.
+        """
+        try:
+            target = os.readlink(name, dir_fd=dir_fd)
+        except OSError:
+            return False
+        if target == "public_html":
+            return True
+        if os.path.isabs(target):
+            try:
+                return os.path.realpath(
+                    os.path.join(self.home, target)) == os.path.join(
+                    self.home, "public_html")
+            except OSError:
+                return False
+        return False
+
+    def is_core_dump(self, dir_fd, name):
+        # type: (int, str) -> bool
+        """True only for real ELF core dumps (ET_CORE), never by name.
+
+        Reads the first 18 bytes through the same verified fd the walk
+        uses (O_NOFOLLOW, owner and single-link re-checked on the open
+        file): magic \\x7fELF, a known byte order, and e_type == 4. A text
+        file called "core" or a normal executable is not a candidate.
+        """
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=dir_fd)
+        except OSError:
+            return False
+        try:
+            try:
+                st = os.fstat(fd)
+            except OSError:
+                return False
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != self.uid \
+                    or st.st_nlink != 1 or st.st_dev != self.top_dev:
+                return False
+            head = b""
+            while len(head) < 18:
+                try:
+                    chunk = os.read(fd, 18 - len(head))
+                except OSError:
+                    return False
+                if not chunk:
+                    break
+                head += chunk
+            if len(head) < 18 or head[:4] != b"\x7fELF":
+                return False
+            if head[5] == 1:
+                etype = head[16] | (head[17] << 8)
+            elif head[5] == 2:
+                etype = (head[16] << 8) | head[17]
+            else:
+                return False
+            return etype == 4
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     def found(self, cid, hrel, size, act):
         # type: (str, str, int, object) -> None
@@ -844,7 +942,11 @@ class Cleaner(object):
 
     def open_sub(self, fd, rel):
         # type: (int, str) -> object
-        """Open a known cache subfolder O_NOFOLLOW; None when absent."""
+        """Open a known cache subfolder O_NOFOLLOW; None when absent.
+
+        Handled folders are recorded so the main walk never descends
+        into them again (each file is counted once).
+        """
         try:
             sub = os.open(rel, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                            dir_fd=fd)
@@ -859,6 +961,7 @@ class Cleaner(object):
                 or st.st_dev != self.top_dev:
             os.close(sub)
             return None
+        self.handled.add((st.st_dev, st.st_ino))
         return sub
 
     def walk_sub(self, fd, hrel, rel, cid):
@@ -908,7 +1011,9 @@ class Cleaner(object):
 
         enforce_protected skips rule-1 paths (the main home walk).
         collect_cid (or None) collects owned files into that category
-        (explicit cache roots and their subfolders).
+        (explicit cache roots and their subfolders). Folders a category
+        walk already handled are never descended into again, so each
+        file is tallied and categorized exactly once.
         """
         names = self.list_dir(fd, hrel)
         if names is None:
@@ -919,7 +1024,7 @@ class Cleaner(object):
             if enforce_protected and pe.is_protected_entry(child):
                 self.record_skip("skipped_protected", child)
                 continue
-            kind, st = self.examine(fd, name, child)
+            kind, st = self.examine(fd, name, child, collect_cid)
             if kind == "dir":
                 pending.append((child, st, collect_cid))
             elif kind == "file" and collect_cid is not None \
@@ -927,6 +1032,8 @@ class Cleaner(object):
                 self.found(collect_cid, child, st.st_size,
                            lambda h=child: self.move_to_trash(h))
         for child, st, cid in pending:
+            if (st.st_dev, st.st_ino) in self.handled:
+                continue
             sub = self.open_dir(os.path.join(self.home, child),
                                 (st.st_dev, st.st_ino), child)
             if sub is None:
@@ -954,6 +1061,7 @@ class Cleaner(object):
         if st.st_uid != self.uid or st.st_dev != self.top_dev:
             self.note_not_owned(hrel, st)
             return
+        self.handled.add((st.st_dev, st.st_ino))
         fd = self.open_dir(full, (st.st_dev, st.st_ino), hrel)
         if fd is None:
             return
@@ -1019,24 +1127,88 @@ def scan_dev_caches(cleaner):
         cleaner.walk_explicit_dir(rel, "dev_caches")
 
 
+def parse_job_id(base):
+    # type: (str) -> object
+    """Split a job file base into (tool, timestamp).
+
+    Bases look like <tool>-<ts>-<pid>-<rand> where the tool itself may
+    contain dashes (space-scan); split from the right. Only the tool and
+    the UTC timestamp are used (liveness comes from the job meta file,
+    whose pid is the detached worker). Returns None when the base does
+    not have that shape.
+    """
+    parts = base.rsplit("-", 3)
+    if len(parts) != 4:
+        return None
+    tool, stamp, _pid, _rand = parts
+    if not tool:
+        return None
+    try:
+        when = calendar.timegm(time.strptime(stamp, "%Y%m%dT%H%M%S"))
+    except (ValueError, OverflowError):
+        return None
+    return tool, when
+
+
+def job_is_live(jobs_dir, base):
+    # type: (str, str) -> bool
+    """True when the job's worker pid from its meta file is running.
+
+    The meta file (<base>.job.json) records the detached engine worker.
+    Absent or unreadable meta means "unknown": the age rule decides.
+    Fail safe: an unreadable /proc entry counts as alive.
+    """
+    try:
+        with open(os.path.join(jobs_dir, base + ".job.json"),
+                  "r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(meta, dict):
+        return False
+    pid = meta.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            return False
+        if pid <= 0:
+            return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
 def scan_usertools_old(cleaner):
     # type: (Cleaner) -> None
     """The plugin's own job files and undo journals (delete, 30d+ only).
 
-    Per tool prefix (first filename segment) the newest three entries are
-    always kept, whatever their age; anything younger than 30 days is kept
-    too. Unknown files and live-job files are never touched.
+    Jobs are handled as a unit: files group by job id, the newest three
+    jobs per tool are always kept, a live job is never touched, and a job
+    is deleted only when ALL its files are older than 30 days — removed
+    together, so partial jobs are impossible. Undo journals keep the
+    per-file rule (one file each).
     """
     if not cleaner.selected("usertools_old"):
         return
     cutoff = time.time() - USERTOOLS_OLD_DAYS * 86400
-    scan_old_dir(cleaner, JOBS_DIR_REL, True, cutoff)
-    scan_old_dir(cleaner, UNDO_DIR_REL, False, cutoff)
+    scan_old_jobs(cleaner, cutoff)
+    scan_old_dir(cleaner, UNDO_DIR_REL, cutoff)
 
 
-def scan_old_dir(cleaner, rel, is_jobs, cutoff):
-    # type: (Cleaner, str, bool, float) -> None
-    """Collect stale plugin files in one fixed directory for deletion."""
+def scan_old_dir(cleaner, rel, cutoff):
+    # type: (Cleaner, str, float) -> None
+    """Collect stale undo journals for deletion (one file each).
+
+    Per tool prefix the newest three journals are always kept, whatever
+    their age; anything younger than 30 days is kept too.
+    """
     home = cleaner.home
     full = os.path.join(home, rel)
     try:
@@ -1056,18 +1228,8 @@ def scan_old_dir(cleaner, rel, is_jobs, cutoff):
         return
     entries = []
     for name in names:
-        if is_jobs:
-            base = None
-            for suffix in JOB_SUFFIXES:
-                if name.endswith(suffix):
-                    base = name[: -len(suffix)]
-                    break
-            if base is None or not base:
-                continue
-        else:
-            if not name.endswith(".jsonl.gz") or "-" not in name:
-                continue
-            base = name
+        if not name.endswith(".jsonl.gz") or "-" not in name:
+            continue
         path = os.path.join(full, name)
         try:
             st = os.lstat(path)
@@ -1084,21 +1246,105 @@ def scan_old_dir(cleaner, rel, is_jobs, cutoff):
             cleaner.record_skip("skipped_hardlink", rel + "/" + name,
                                 "more than one hard link; left alone")
             continue
-        entries.append((name, base, st))
+        entries.append((name, st))
     groups = {}
-    for name, base, st in entries:
-        prefix = base.split("-", 1)[0]
-        groups.setdefault(prefix, []).append((name, base, st))
+    for name, st in entries:
+        prefix = name.split("-", 1)[0]
+        groups.setdefault(prefix, []).append((name, st))
     for prefix, group in groups.items():
-        group.sort(key=lambda e: (e[2].st_mtime, e[0]))
+        group.sort(key=lambda e: (e[1].st_mtime, e[0]))
         keep = set(e[0] for e in group[-UNDO_KEEP:])
-        for name, base, st in group:
+        for name, st in group:
             hrel = rel + "/" + name
             if name in keep or st.st_mtime > cutoff:
                 continue
             cleaner.tally_top(hrel, st.st_size)
             cleaner.found("usertools_old", hrel, st.st_size,
                           lambda h=hrel: delete_old_file(cleaner, h))
+
+
+def scan_old_jobs(cleaner, cutoff):
+    # type: (Cleaner, float) -> None
+    """Delete stale whole jobs from the plugin's jobs folder.
+
+    A job is deleted only as a unit: every file sharing its job id must
+    be older than 30 days, the job must not be one of the tool's newest
+    three, and its pid must not be alive. Anything unparseable is left
+    alone.
+    """
+    home = cleaner.home
+    full = os.path.join(home, JOBS_DIR_REL)
+    try:
+        dst = os.lstat(full)
+    except OSError:
+        return
+    if not stat.S_ISDIR(dst.st_mode) or stat.S_ISLNK(dst.st_mode):
+        return
+    if dst.st_uid != cleaner.uid or dst.st_dev != cleaner.top_dev:
+        return
+    try:
+        names = sorted(os.listdir(full))
+    except OSError as exc:
+        cleaner.summary["counts"]["errors"] += 1
+        _add_capped(cleaner.summary, "errors",
+                    {"path": JOBS_DIR_REL,
+                     "reason": "cannot list: %s" % exc})
+        return
+    jobs = {}  # type: dict
+    for name in names:
+        base = None
+        for suffix in JOB_SUFFIXES:
+            if name.endswith(suffix):
+                base = name[: -len(suffix)]
+                break
+        if not base:
+            continue
+        parsed = parse_job_id(base)
+        if parsed is None:
+            continue
+        tool, when = parsed
+        path = os.path.join(full, name)
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        cleaner.done += 1
+        cleaner.poll()
+        if not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
+            continue
+        if st.st_uid != cleaner.uid or st.st_dev != cleaner.top_dev:
+            cleaner.note_not_owned(JOBS_DIR_REL + "/" + name, st)
+            continue
+        if st.st_nlink != 1:
+            cleaner.record_skip("skipped_hardlink", JOBS_DIR_REL + "/" + name,
+                                "more than one hard link; left alone")
+            continue
+        job = jobs.get(base)
+        if job is None:
+            job = {"tool": tool, "when": when,
+                   "files": [], "newest": st.st_mtime}
+            jobs[base] = job
+        job["files"].append((name, st))
+        if st.st_mtime > job["newest"]:
+            job["newest"] = st.st_mtime
+    by_tool = {}  # type: dict
+    for base, job in jobs.items():
+        by_tool.setdefault(job["tool"], []).append((base, job))
+    for tool, group in by_tool.items():
+        group.sort(key=lambda e: (e[1]["when"], e[1]["newest"], e[0]))
+        keep = set(b for b, _j in group[-UNDO_KEEP:])
+        for base, job in group:
+            if base in keep:
+                continue
+            if job_is_live(full, base):
+                continue
+            if any(st.st_mtime > cutoff for _n, st in job["files"]):
+                continue
+            for name, st in sorted(job["files"]):
+                hrel = JOBS_DIR_REL + "/" + name
+                cleaner.tally_top(hrel, st.st_size)
+                cleaner.found("usertools_old", hrel, st.st_size,
+                              lambda h=hrel: delete_old_file(cleaner, h))
 
 
 def delete_old_file(cleaner, hrel):
@@ -1156,21 +1402,50 @@ def run_restore(home, uid, summary, batch):
         raise pe.UsageError("trash batch is not yours; left alone")
     entries = read_manifest(root)
     restored = 0
+    remaining = []
     for ent in entries:
         hrel = ent["path"]
         try:
             if _restore_one(home, uid, summary, root, hrel):
                 restored += 1
+            else:
+                remaining.append(ent)
         except pe.UsageError as exc:
             summary["counts"]["errors"] += 1
             _add_capped(summary, "errors",
                         {"path": hrel, "reason": str(exc)})
+            remaining.append(ent)
         except OSError as exc:
             summary["counts"]["errors"] += 1
             _add_capped(summary, "errors",
                         {"path": hrel, "reason": "cannot restore: %s" % exc})
+            remaining.append(ent)
     summary["counts"]["restored_files"] = restored
     summary["counts"]["changed"] = restored
+    if remaining:
+        write_manifest(root, remaining)
+    else:
+        try:
+            os.unlink(os.path.join(root, "manifest.json"))
+        except OSError:
+            pass
+    _remove_empty_dirs(root)
+
+
+def _remove_empty_dirs(root):
+    # type: (str) -> None
+    """Remove left-over empty folders under a batch, then the batch.
+
+    dirnames from os.walk go stale as children are removed, so emptiness
+    is decided by rmdir itself: it only succeeds on truly empty folders.
+    """
+    for dirpath, _dirnames, filenames in os.walk(root, topdown=False):
+        if filenames:
+            continue
+        try:
+            os.rmdir(dirpath)
+        except OSError:
+            pass
     try:
         os.rmdir(root)
     except OSError:
@@ -1179,7 +1454,12 @@ def run_restore(home, uid, summary, batch):
 
 def _restore_one(home, uid, summary, root, hrel):
     # type: (str, int, dict, str, str) -> bool
-    """Restore one manifest entry; True when the file came back."""
+    """Restore one manifest entry; True when the file came back.
+
+    The link is the atomic check: when anything already sits at the
+    destination, link() fails with EEXIST and the trash copy stays put —
+    nothing is ever overwritten, however it got there.
+    """
     src = os.path.join(root, hrel)
     dst_path = os.path.join(home, hrel)
     try:
@@ -1189,14 +1469,25 @@ def _restore_one(home, uid, summary, root, hrel):
     if not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode) \
             or st.st_uid != uid or st.st_nlink != 1:
         raise pe.UsageError("trash copy changed; left in trash")
-    if os.path.lexists(dst_path):
-        summary["counts"]["restore_conflicts"] += 1
-        _add_capped(summary, "errors",
-                    {"path": hrel,
-                     "reason": "already exists; left the trash copy in place"})
-        return False
     _ensure_restore_parents(home, hrel)
-    os.rename(src, dst_path)
+    try:
+        os.link(src, dst_path)
+    except OSError as exc:
+        if exc.errno == errno.EEXIST:
+            summary["counts"]["restore_conflicts"] += 1
+            _add_capped(summary, "errors",
+                        {"path": hrel,
+                         "reason": "already exists; left the trash copy in place"})
+            return False
+        raise
+    try:
+        os.unlink(src)
+    except OSError:
+        try:
+            os.unlink(dst_path)
+        except OSError:
+            pass
+        raise pe.UsageError("restored but the trash copy stayed; left in trash")
     _add_capped(summary, "restored", {"path": hrel})
     return True
 
