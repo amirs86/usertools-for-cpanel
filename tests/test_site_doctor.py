@@ -160,6 +160,126 @@ def test_doctor_redirect_and_errors(tmp_path, web):
     rec = summary["domains"][0]
     assert rec["http"]["status"] == 301
     assert rec["http"]["location"] == "https://example.test/home"
+    assert rec["http"]["scheme"] == "http"
+
+
+def _tls_http_server(tmp_path, body=b"served-target", status=200):
+    """HTTPS server on 127.0.0.1 answering one fixed body (logging off)."""
+    import ssl as _ssl
+    key, crt, _der = _make_self_signed(tmp_path)
+    ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(crt, key)
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(5)
+    port = srv.getsockname()[1]
+    stop = threading.Event()
+
+    def serve():
+        srv.settimeout(0.5)
+        while not stop.is_set():
+            try:
+                raw, _addr = srv.accept()
+            except socket.timeout:
+                continue
+            try:
+                with ctx.wrap_socket(raw, server_side=True) as tls:
+                    tls.settimeout(5)
+                    data = b""
+                    try:
+                        while b"\r\n\r\n" not in data:
+                            chunk = tls.recv(4096)
+                            if not chunk:
+                                break
+                            data += chunk
+                    except OSError:
+                        pass
+                    is_head = data.startswith(b"HEAD")
+                    tls.sendall(
+                        ("HTTP/1.1 %d Test\r\nContent-Length: %d\r\n"
+                         "Connection: close\r\n\r\n"
+                         % (status, len(body))).encode()
+                        + (b"" if is_head else body))
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return srv, stop, thread, port
+
+
+def test_https_hop_followed_same_host(tmp_path, web):
+    port, app = web
+    srv, stop, thread, tlsport = _tls_http_server(tmp_path)
+    try:
+        app.routes["/start"] = (
+            301, {"Location": "https://example.test:%d/target" % tlsport},
+            b"")
+        out = sd.http_probe("127.0.0.1", port, "example.test", "/start", 5,
+                            https_port=tlsport)
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+        srv.close()
+    assert out["status"] == 200, out
+    assert out["scheme"] == "https"
+    assert out["exposed"] is True
+    assert out["length"] == len(b"served-target")
+
+
+def test_https_hop_other_host_ignored(tmp_path, web):
+    port, app = web
+    app.routes["/"] = (301, {"Location": "https://other.test/"}, b"")
+    out = sd.http_probe("127.0.0.1", port, "example.test", "/", 5)
+    assert out["status"] == 301
+    assert out["scheme"] == "http"
+
+
+def test_https_hop_plain_http_kept(tmp_path, web):
+    port, app = web
+    app.routes["/"] = (301, {"Location": "http://example.test/other"}, b"")
+    out = sd.http_probe("127.0.0.1", port, "example.test", "/", 5)
+    assert out["status"] == 301
+    assert out["scheme"] == "http"
+
+
+def test_https_hop_failure_keeps_redirect(tmp_path, web):
+    port, app = web
+    app.routes["/"] = (
+        301, {"Location": "https://example.test:1/gone"}, b"")
+    out = sd.http_probe("127.0.0.1", port, "example.test", "/", 5,
+                        https_port=1)
+    assert out["status"] == 301
+    assert out["scheme"] == "http"
+    assert out["location"] == "https://example.test:1/gone"
+    assert "https follow failed" in (out["error"] or "")
+
+
+def test_doctor_follows_same_host_https(tmp_path, web):
+    port, app = web
+    srv, stop, thread, tlsport = _tls_http_server(
+        tmp_path, body=b"secure home")
+    try:
+        app.routes["/"] = (
+            301, {"Location": "https://example.test:%d/" % tlsport}, b"")
+        home = make_home(tmp_path)
+        summary = sd.new_clean_summary("doctor-scan", str(home), True)
+        checker = sd.Checker(
+            str(home), os.getuid(), summary, lambda d, s: None,
+            time.monotonic() + 30, 0, os.stat(str(home)).st_dev, 5,
+            tlsport)
+        rec = checker.check_one({
+            "domain": "example.test",
+            "docroot": str(home / "public_html"),
+            "ip": "127.0.0.1", "port": port,
+            "php": "ea-php82", "fpm": True})
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+        srv.close()
+    assert rec["http"]["status"] == 200
+    assert rec["http"]["scheme"] == "https"
 
 
 def test_doctor_htaccess_flags(tmp_path, web):
@@ -331,6 +451,118 @@ def test_doctor_deferral_and_validation(tmp_path):
     assert rec["docroot"]["usable"] is False
 
 
+def test_blockable_names():
+    assert sd.is_blockable_name("public_html/backup.sql")
+    assert sd.is_blockable_name("/backup.sql")
+    assert sd.is_blockable_name("a b.sql")
+    for bad in ('we"ird.sql', "quo'te.sql", "back\\slash.sql",
+                "back`tick.sql", "new\nline.sql", "tab\there.sql",
+                "caf\xc3\xa9.sql", "del\x7f.sql", "ctl\x01.sql",
+                "", None, 123):
+        assert not sd.is_blockable_name(bad), repr(bad)
+
+
+def test_exposed_scan_marks_unsafe_names(tmp_path):
+    home = make_home(tmp_path)
+    seed_exposed(home)
+    (home / "public_html" / 'we"ird.sql').write_text("dump\n")
+    srv, thread = _file_server(home / "public_html")
+    try:
+        tgt = etarget_for("example.test", str(home / "public_html"),
+                          srv.server_address[1])
+        rc, summary, _ = lockless("exposed-scan", "--target", tgt, home=home)
+    finally:
+        srv.shutdown()
+        thread.join(timeout=10)
+    assert rc == 0
+    by_rel = {f["relpath"]: f for f in summary["findings"]}
+    assert by_rel["public_html/backup.sql"]["blockable"] is True
+    assert by_rel['public_html/we"ird.sql']["blockable"] is False
+    assert by_rel['public_html/we"ird.sql']["exposed"] is True
+
+
+def test_get_never_reads_more_than_cap(tmp_path):
+    # The server advertises 5 MB but drips one byte per half second: a
+    # probe that read the body would take forever; header-only returns
+    # in milliseconds with the right status and length.
+    body_len = 5000000
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(5)
+    port = srv.getsockname()[1]
+    stop = threading.Event()
+
+    def serve():
+        srv.settimeout(0.5)
+        while not stop.is_set():
+            try:
+                raw, _addr = srv.accept()
+            except socket.timeout:
+                continue
+            try:
+                raw.settimeout(5)
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = raw.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                raw.sendall(
+                    ("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n"
+                     "Connection: close\r\n\r\n" % body_len).encode())
+                for _ in range(600):
+                    if stop.is_set():
+                        break
+                    try:
+                        raw.sendall(b"x")
+                    except OSError:
+                        break
+                    time.sleep(0.5)
+            except OSError:
+                pass
+            finally:
+                try:
+                    raw.close()
+                except OSError:
+                    pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        t0 = time.monotonic()
+        out = sd.http_probe("127.0.0.1", port, "example.test", "/big",
+                            5)
+        dt = time.monotonic() - t0
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+        srv.close()
+    assert out["status"] == 200, out
+    assert out["length"] == body_len
+    assert out["exposed"] is True
+    assert dt < 4.0, dt
+
+
+def test_confidence_confirmed_and_likely(tmp_path, web):
+    port, app = web
+    home = make_home(tmp_path)
+    seed_exposed(home)
+    # backup.sql served byte-identical (5 on disk, 5 served): confirmed.
+    # info.php (17 on disk) served as 5 bytes: downloadable but likely.
+    app.routes["/backup.sql"] = (200, {}, b"dump\n")
+    app.routes["/info.php"] = (200, {}, b"short")
+    app.routes["/.git/HEAD"] = (200, {}, b"ref: refs/heads/main\n")
+    tgt = etarget_for("example.test", str(home / "public_html"), port)
+    rc, summary, _ = lockless("exposed-scan", "--target", tgt, home=home)
+    assert rc == 0
+    by_rel = {f["relpath"]: f for f in summary["findings"]}
+    assert by_rel["public_html/backup.sql"]["confidence"] == "confirmed"
+    assert by_rel["public_html/backup.sql"]["scheme"] == "http"
+    assert by_rel["public_html/info.php"]["confidence"] == "likely"
+    assert by_rel["public_html/.git"]["confidence"] == "confirmed"
+
+
 def test_classify_exposed_names():
     cases = {
         ".git": "git_dir",
@@ -407,6 +639,9 @@ def test_exposed_scan_and_probe(tmp_path):
     assert by_rel["public_html/backup.sql"]["http_status"] == 200
     assert by_rel["public_html/backup.sql"]["exposed"] is True
     assert by_rel["public_html/backup.sql"]["urlpath"] == "/backup.sql"
+    assert by_rel["public_html/backup.sql"]["confidence"] == "confirmed"
+    assert by_rel["public_html/backup.sql"]["scheme"] == "http"
+    assert by_rel["public_html/backup.sql"]["blockable"] is True
     assert by_rel["public_html/wp-config.php.bak"]["kind"] == "wp_config_copy"
     assert "public_html/wp-config.php" not in by_rel
     assert "public_html/.env" in by_rel

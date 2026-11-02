@@ -101,7 +101,7 @@ Full removal including settings and log:
 - App Helper: find web apps, run maintenance commands, install dependencies, view logs, manage the scheduler, check `.env` safety, and adjust document roots and `.htaccess` files.
 - Space Cleaner: preview, then reclaim disk space and inodes (big logs, crash dumps, framework and WordPress caches, developer caches, old plugin files), with trash, restore, and empty.
 - Site Doctor: check every website at a glance (homepage status, folders, `.htaccess` mistakes, certificates, recent errors), with one fix for php_value lines under PHP-FPM and undo.
-- Exposed Files: find files that must never be public and probe whether the web server serves them, then move them to quarantine (restore) or block them with a marked `.htaccess` rule (undo).
+- Exposed Files: find files that must never be public and probe whether the web server serves them (following a same-host HTTPS hop, capping every read), then move them to quarantine (restore) or block them with a marked `.htaccess` rule that matches the mapped file (undo). Served lengths matching the file on disk read confirmed, otherwise likely; unquotable names are Move-only.
 
 ## Tested
 

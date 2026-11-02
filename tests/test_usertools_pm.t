@@ -1496,8 +1496,8 @@ sub site_wait_done {
     my $ht = do { open my $rfh, '<', "$home/public_html/.htaccess" or die $!; local $/; <$rfh> };
     like( $ht, qr/# BEGIN UserTools Exposed Files/, 'marked deny block added' );
     like( $ht, qr/Require all denied/, 'deny rule present' );
-    ok( index( $ht, '<If "%{REQUEST_URI} =~ m#^/backup\\.sql$#">' ) >= 0,
-        'rule matches the probed URL path, not the home-relative path' );
+    ok( index( $ht, '<If "%{REQUEST_FILENAME} == \'' . "$home/public_html/backup.sql" . '\'">' ) >= 0,
+        'file rule matches the mapped filename, not the URL' );
     $res = FakeResult->new();
     $ok  = Cpanel::API::UserTools::exposed_unblock(
         FakeArgs->new( job_id => 'exposed-1', finding => 'f1' ), $res );
@@ -1508,16 +1508,20 @@ sub site_wait_done {
 }
 
 {
-    # Deny rules match the probed URL path; legacy sections without a
-    # url line are healed from the docroot on rebuild.
+    # Deny rules match the mapped filename; names that could break the
+    # quoting never reach the file.
     my @file = Cpanel::API::UserTools::_expose_rule_lines(
-        'public_html/backup.sql', 'sql_dump', '/backup.sql' );
-    ok( index( join( "\n", @file ), '<If "%{REQUEST_URI} =~ m#^/backup\\.sql$#">' ) >= 0,
-        'file rule matches its URL path' );
+        'public_html/backup.sql', 'sql_dump', '/backup.sql',
+        '/home/example/public_html/backup.sql' );
+    ok( index( join( "\n", @file ),
+            q{<If "%{REQUEST_FILENAME} == '/home/example/public_html/backup.sql'">} ) >= 0,
+        'file rule matches the mapped filename' );
     my @git = Cpanel::API::UserTools::_expose_rule_lines(
-        'public_html/.git', 'git_dir', '/.git/HEAD' );
-    ok( index( join( "\n", @git ), '<If "%{REQUEST_URI} =~ m#^/\\.git/#">' ) >= 0,
-        'git rule covers the directory' );
+        'public_html/.git', 'git_dir', '/.git/HEAD',
+        '/home/example/public_html/.git' );
+    ok( index( join( "\n", @git ),
+            q{<If "%{REQUEST_FILENAME} =~ m#^/home/example/public_html/\.git/#">} ) >= 0,
+        'git rule covers the mapped folder' );
     my $parsed = Cpanel::API::UserTools::_expose_parse_rules( \@file );
     is_deeply( $parsed, [ [ 'public_html/backup.sql', 'sql_dump', '/backup.sql' ] ],
         'rule round-trips with its url' );
@@ -1525,8 +1529,62 @@ sub site_wait_done {
         [ '# path: public_html/old.sql',
           '# Exposed Files: deny public_html/old.sql (sql_dump)' ] );
     Cpanel::API::UserTools::_expose_heal_urlpaths(
-        $legacy, '/home/example', '/home/example/public_html' );
+        $legacy, '/home/example', '/home/example/public_html',
+        '/home/example/public_html' );
     is( $legacy->[0][2], '/old.sql', 'legacy rule healed from the docroot' );
+    is( $legacy->[0][3], '/home/example/public_html/old.sql',
+        'legacy rule gains the mapped filename' );
+    my @nasty = ( 'we"ird.sql', "new\nline.sql", "tab\there.sql",
+        'back\\.sql', "quo'te.sql", 'back`tick.sql', "caf\xc3\xa9.sql" );
+    my $n = 0;
+    for my $bad ( @nasty, '', undef ) {
+        $n++;
+        ok( !Cpanel::API::UserTools::_expose_safe_path($bad),
+            "unsafe name $n refused" );
+        eval {
+            Cpanel::API::UserTools::_expose_rule_lines(
+                'public_html/x', 'sql_dump', '/x', $bad );
+        };
+        ok( $@, "writer dies on unsafe abspath $n" );
+    }
+    ok( Cpanel::API::UserTools::_expose_safe_path('public_html/backup.sql'),
+        'ordinary names stay blockable' );
+}
+
+{
+    # A finding whose name cannot be quoted safely is refused for Block
+    # (with a clean error, file untouched); Move still works.
+    my $home = site_make_home();
+    my $pconf = site_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    my $udir = "$home/userdata";
+    make_path("$udir/testuser");
+    local $Cpanel::API::UserTools::TEST_DOMAIN_DATA_DIR = $udir;
+    open my $duf, '>', "$udir/testuser/primary.test" or die $!;
+    print $duf "---\ndocumentroot: $home/public_html\nip: 127.0.0.1\nport: 9\n";
+    close $duf;
+    open my $bf, '>', "$home/public_html/weird.sql" or die $!;
+    print $bf "dump\n";
+    close $bf;
+    my $jobs = "$home/.cpanel/usertools/jobs";
+    make_path($jobs);
+    my $job = {
+        counts  => {},
+        findings => [ { id => 'f9', domain => 'primary.test',
+                       relpath => 'public_html/we"ird.sql',
+                       urlpath => '/we"ird.sql',
+                       kind => 'sql_dump' } ],
+        domains => [ { domain => 'primary.test' } ],
+    };
+    open my $jf, '>', "$jobs/exposed-9.result.json" or die $!;
+    print $jf JSON::PP->new()->encode($job);
+    close $jf;
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::exposed_block(
+        FakeArgs->new( job_id => 'exposed-9', finding => 'f9' ), $res );
+    ok( !$ok, 'block refused for the unsafe name' );
+    like( $res->{errors}[0][0], qr/unsafe/i, 'refusal says why' );
+    ok( !-f "$home/public_html/.htaccess", 'nothing written' );
 }
 
 {

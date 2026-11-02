@@ -14,11 +14,16 @@ All notable changes to this project are documented here. Versions follow
   `enable_site_doctor=0` policy key, WHM checkbox, and its own Feature
   Manager feature.
 - Exposed Files Scanner: engine walk of every document root for files
-  that must never be public, probed over HTTP (status + size only);
-  exposed files can be moved to quarantine (restore available) or blocked
-  with a marked `.htaccess` deny rule (undo removes it), with a re-probe
-  after each action. Off by default: `enable_exposed_files=0` policy key,
-  WHM checkbox, and its own Feature Manager feature.
+  that must never be public, probed over HTTP (status + size only,
+  bodies never read past a cap); findings served only over a same-host
+  HTTPS hop are probed again over TLS. A finding counts as confirmed
+  when the served length matches the file on disk, otherwise likely.
+  Exposed files can be moved to quarantine (restore available) or
+  blocked with a marked `.htaccess` deny rule that matches the mapped
+  file (undo removes it), with a re-probe after each action. Names that
+  cannot be quoted safely are never written to `.htaccess` (Move only).
+  Off by default: `enable_exposed_files=0` policy key, WHM checkbox,
+  and its own Feature Manager feature.
 
 - Space Cleaner: preview and reclaim disk space and inodes across six
   fixed categories (big `error_log` and per-website PHP logs truncated

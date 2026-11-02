@@ -2578,41 +2578,53 @@ our $HT_DOC_END   = '# END UserTools Site Doctor';
 our $HT_EXP_BEGIN = '# BEGIN UserTools Exposed Files';
 our $HT_EXP_END   = '# END UserTools Exposed Files';
 
+sub _expose_safe_path {
+    my ($s) = @_;
+    # Printable ASCII only, without `"`, `'`, backslash or backtick: a
+    # quote would close the rule's quoting and anything outside
+    # printable ASCII (controls, DEL, newlines, non-ASCII bytes) could
+    # smuggle extra lines into the file, either of which makes Apache
+    # reject the whole .htaccess (site down). True when $s may be
+    # embedded in a deny rule.
+    return 0 unless defined $s && $s ne '';
+    return $s =~ /\A[\x20\x21\x23-\x26\x28-\x5B\x5D-\x5F\x61-\x7E]+\z/ ? 1 : 0;
+}
+
 sub _expose_rule_lines {
-    my ( $relpath, $kind, $urlpath ) = @_;
-    # One deny rule keyed by the exact home-relative path. The match runs
-    # against the URL path the scan actually probed (docroot-relative):
-    # the home-relative path never appears in REQUEST_URI, so matching
-    # it would silently never fire.
-    $urlpath = '/' . $relpath
-      unless defined $urlpath && $urlpath =~ m{^/};
-    my $esc = $urlpath;
+    my ( $relpath, $kind, $urlpath, $abspath ) = @_;
+    # One deny rule keyed by the exact home-relative path. The match
+    # runs against what Apache mapped the request to (REQUEST_FILENAME,
+    # an absolute filesystem path), not the URL: trailing slashes,
+    # doubled slashes and path info never reach the filename, so URL
+    # variants of the same file cannot dodge the rule. Dies before
+    # building anything when a name is unsafe for the file.
+    for my $s ( $relpath, $urlpath, $abspath ) {
+        die "unsafe path for .htaccess rule\n"
+          unless _expose_safe_path($s);
+    }
+    my $esc = $abspath;
     $esc =~ s/([\\^\$.|?*+()\[\]{}])/\\$1/g;
     $esc =~ s/#/[#]/g;
-    my $pattern;
-    if ( $kind eq 'git_dir' ) {
-        $pattern = $esc;
-        $pattern =~ s{/HEAD$}{/};
-        $pattern .= '/' unless $pattern =~ m{/$};
-        $pattern = "^$pattern";
-    }
-    else {
-        $pattern = "^$esc\$";
-    }
-    return (
+    my @out = (
         "# path: $relpath",
         "# url: $urlpath",
         "# Exposed Files: deny $relpath ($kind)",
-        "<If \"%{REQUEST_URI} =~ m#$pattern#\">",
-        "    Require all denied",
-        "</If>",
     );
+    if ( $kind eq 'git_dir' ) {
+        push @out, "<If \"%{REQUEST_FILENAME} =~ m#^$esc/#\">";
+    }
+    else {
+        push @out, "<If \"%{REQUEST_FILENAME} == '$abspath'\">";
+    }
+    push @out, '    Require all denied', '</If>';
+    return @out;
 }
 
 sub _expose_block_lines {
     my (@rules) = @_;
-    # Full section body for a set of [relpath, kind, urlpath] triples,
-    # each rule traceable to its path so unblock removes exactly one rule.
+    # Full section body for a set of [relpath, kind, urlpath, abspath]
+    # quads, each rule traceable to its path so unblock removes exactly
+    # one rule.
     my @lines = ('# Managed by UserTools Exposed Files: deny direct access',
                  '# to files that must never be public. One rule per finding;',
                  '# removing a rule restores access to that path only.');
@@ -2648,20 +2660,56 @@ sub _expose_parse_rules {
     return \@rules;
 }
 
+sub _expose_rule_abspath {
+    my ( $home, $real, $configured, $rel ) = @_;
+    # Absolute path as Apache sees it (REQUEST_FILENAME): prefer the
+    # vhost-configured docroot string (filenames use the path as
+    # configured, not the resolved one), else the resolved docroot.
+    # Returns undef when the finding is not under a known docroot.
+    for my $base ( $configured, $real ) {
+        next unless defined $base && $base ne '';
+        ( my $norm = $base ) =~ s{/+\z}{};
+        my $prefix = '';
+        if ( $norm eq $home ) {
+            $prefix = '';
+        }
+        elsif ( index( $norm, "$home/" ) == 0 ) {
+            $prefix = substr( $norm, length("$home/") );
+        }
+        else {
+            next;
+        }
+        next if $rel eq '' || $rel eq '.';
+        if ( $prefix eq '' || index( $rel, "$prefix/" ) == 0 ) {
+            my $rest = $prefix eq '' ? $rel
+              : substr( $rel, length($prefix) + 1 );
+            next if $rest eq '' || $rest =~ m{(?:^|/)\.\.(?:/|$)};
+            return "$norm/$rest";
+        }
+    }
+    return undef;
+}
+
 sub _expose_heal_urlpaths {
-    my ( $rules, $home, $real ) = @_;
-    # Fill undef urlpaths (pre-url-line sections) from the docroot: the
-    # URL path is the home-relative path minus the docroot's own prefix.
+    my ( $rules, $home, $real, $configured ) = @_;
+    # Fill urlpaths (pre-url-line sections) from the docroot, and the
+    # absolute match path for every rule; abspath prefers the
+    # vhost-configured docroot string.
     my $prefix = $real;
     $prefix =~ s{^\Q$home/\E}{};
     for my $r ( @{$rules} ) {
-        next if defined $r->[2];
-        my $rel = $r->[0];
-        if ( $prefix ne '' && index( $rel, "$prefix/" ) == 0 ) {
-            $r->[2] = '/' . substr( $rel, length($prefix) + 1 );
+        if ( !defined $r->[2] ) {
+            my $rel = $r->[0];
+            if ( $prefix ne '' && index( $rel, "$prefix/" ) == 0 ) {
+                $r->[2] = '/' . substr( $rel, length($prefix) + 1 );
+            }
+            else {
+                $r->[2] = '/' . $rel;
+            }
         }
-        else {
-            $r->[2] = '/' . $rel;
+        if ( !defined $r->[3] ) {
+            $r->[3] = _expose_rule_abspath( $home, $real, $configured,
+                $r->[0] );
         }
     }
     return;
@@ -3157,11 +3205,22 @@ sub exposed_block {
     }
     $current = '' unless defined $current;
     my $rules = _expose_parse_rules( _ht_section_rules( $current, $HT_EXP_BEGIN, $HT_EXP_END ) );
-    _expose_heal_urlpaths( $rules, $home, $real );
+    _expose_heal_urlpaths( $rules, $home, $real, $rec->{documentroot} );
     my $upath = $finding->{urlpath} // ( '/' . ( $finding->{relpath} // '' ) );
-    push @{$rules}, [ $finding->{relpath}, $finding->{kind}, $upath ]
+    my $abspath = _expose_rule_abspath( $home, $real, $rec->{documentroot},
+        $finding->{relpath} );
+    if ( !defined $abspath ) {
+        $result->error('Cannot block this file: it is not under the website folder.');
+        return;
+    }
+    push @{$rules}, [ $finding->{relpath}, $finding->{kind}, $upath, $abspath ]
       unless grep { $_->[0] eq $finding->{relpath} } @{$rules};
-    my $new = _ht_named_section( $current, $HT_EXP_BEGIN, $HT_EXP_END, _expose_block_lines( @{$rules} ) );
+    my $lines = eval { _expose_block_lines( @{$rules} ) };
+    if ( $@ || !$lines ) {
+        $result->error('Cannot block this file: its name is unsafe for .htaccess rules. Move it out of the public folder instead.');
+        return;
+    }
+    my $new = _ht_named_section( $current, $HT_EXP_BEGIN, $HT_EXP_END, $lines );
     if ( !$new || $new eq $current ) {
         $result->data( { finding => $finding_id, blocked => 0, note => 'already blocked' } );
         return 1;
@@ -3236,9 +3295,14 @@ sub exposed_unblock {
         $result->data( { finding => $finding_id, unblocked => 0, note => 'no rule for this finding' } );
         return 1;
     }
-    _expose_heal_urlpaths( \@kept, $home, $real );
+    _expose_heal_urlpaths( \@kept, $home, $real, $rec->{documentroot} );
+    my $kept_lines = eval { _expose_block_lines(@kept) };
+    if ( $@ || ( @kept && !$kept_lines ) ) {
+        $result->error('Cannot rewrite the deny rules: a listed name is unsafe for .htaccess rules.');
+        return;
+    }
     my $new = _ht_named_section( $current, $HT_EXP_BEGIN, $HT_EXP_END,
-        @kept ? _expose_block_lines(@kept) : [] );
+        @kept ? $kept_lines : [] );
     if ( !_ht_ensure_orig( $home, $path ) ) {
         $result->error('Could not preserve the original .htaccess; nothing was changed.');
         return;

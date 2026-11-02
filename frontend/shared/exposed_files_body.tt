@@ -41,8 +41,11 @@ var UT_STR = {
     failed: "[% locale.maketext('The scan failed. Please try again.') %]",
     startFailed: "[% locale.maketext('Could not start: ') %]",
     exposedYes: "[% locale.maketext('exposed') %]",
+    exposedConfirmed: "[% locale.maketext('exposed (confirmed)') %]",
+    exposedLikely: "[% locale.maketext('exposed (likely)') %]",
     exposedNo: "[% locale.maketext('not downloadable') %]",
     notProbed: "[% locale.maketext('not checked') %]",
+    moveOnlyReason: "[% locale.maketext('Block is unavailable for this file name; use Move to quarantine instead.') %]",
     move: "[% locale.maketext('Move to quarantine') %]",
     block: "[% locale.maketext('Block') %]",
     unblock: "[% locale.maketext('Unblock') %]",
@@ -95,7 +98,11 @@ window.addEventListener("DOMContentLoaded", function () {
     }
     function setBusy(busy) { scanBtn.disabled = busy; }
     function badge(f) {
-        if (f.exposed) { return UserTools.escHtml(UT_STR.exposedYes); }
+        if (f.exposed) {
+            if (f.confidence === "confirmed") { return UserTools.escHtml(UT_STR.exposedConfirmed); }
+            if (f.confidence === "likely") { return UserTools.escHtml(UT_STR.exposedLikely); }
+            return UserTools.escHtml(UT_STR.exposedYes);
+        }
         if (f.http_status) { return UserTools.escHtml(UT_STR.exposedNo); }
         return UserTools.escHtml(UT_STR.notProbed);
     }
@@ -155,9 +162,13 @@ window.addEventListener("DOMContentLoaded", function () {
                 UserTools.escHtml(f.kind || "") + (f.http_status ? ", HTTP " + f.http_status : "") + "</span></td>";
             html += "<td>" + badge(f) + "</td><td>";
             html += '<button class="ut-btn small" type="button" data-move="' + UserTools.escHtml(f.id || "") + '">' +
-                UserTools.escHtml(UT_STR.move) + "</button> ";
-            html += '<button class="ut-btn small secondary" type="button" data-block="' + UserTools.escHtml(f.id || "") + '">' +
-                UserTools.escHtml(UT_STR.block) + "</button>";
+                UserTools.escHtml(UT_STR.move) + "</button>";
+            if (f.blockable === false) {
+                html += ' <span class="ut-path">' + UserTools.escHtml(UT_STR.moveOnlyReason) + "</span>";
+            } else {
+                html += ' <button class="ut-btn small secondary" type="button" data-block="' + UserTools.escHtml(f.id || "") + '">' +
+                    UserTools.escHtml(UT_STR.block) + "</button>";
+            }
             html += "</td></tr>";
         });
         listsEl.innerHTML = html + "</tbody></table>";

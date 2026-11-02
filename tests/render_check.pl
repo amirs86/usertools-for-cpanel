@@ -93,6 +93,8 @@ my %pages = (
         '<title>Exposed Files</title>', 'ut-scan', 'ut-trash-list',
         'UT_STR', 'as86.pro', 'Learn more', 'Quarantine',
         'exposed_scan_start', 'Move to quarantine', 'data-block',
+        'exposed (confirmed)', 'exposed (likely)',
+        'use Move to quarantine instead',
     ],
 );
 

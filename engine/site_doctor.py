@@ -23,8 +23,15 @@ Security properties (each covered by tests/test_site_doctor.py):
     line; quarantine and restore resolve finding ids against the scan job's
     own result file, never against request data. Probe URLs are built from
     the server-side domain plus the walked relative path only.
-  * Probing is status and size only: HEAD first, then a capped GET. Response
-    bodies are read up to a cap and discarded, never stored or returned.
+  * Probing is status and size only: HEAD first, then a capped GET.
+    Bodies are read up to a cap and discarded, never stored or returned.
+    A plain-HTTP redirect to https://<same host> is followed once over
+    TLS to the same literal IP (SNI = domain, never verified) so that
+    forced-HTTPS sites report the real page; the scheme that answered
+    is recorded. Served bytes count as confirmed only when their length
+    matches the file on disk, otherwise likely (soft 404s answer 200
+    for anything). Names that cannot appear in a .htaccess rule are
+    marked unblockable: those are moved, never blocked.
   * One live job per user: the same lock file as the other engines, so a
     scan never overlaps another job.
 
@@ -211,21 +218,97 @@ def _add_capped(summary, key, value):
 
 
 # ---------------------------------------------------------------------------
-# HTTP probing (status only, capped bodies, no redirects followed)
+# HTTP probing (status only, capped bodies, one same-host HTTPS hop)
 # ---------------------------------------------------------------------------
 
-def http_probe(ip, port, host, path, timeout):
-    # type: (str, int, str, str, float) -> dict
-    """Probe one URL path: HEAD, then a capped GET fallback.
+HTTPS_PORT = 443
 
-    Returns {status, location, ms, length, exposed, error}. exposed is
-    true only when the server actually serves the bytes (200/206).
-    Bodies are read up to READ_CAP and discarded.
+
+def _open_conn(ip, port, host, timeout, use_tls):
+    # type: (str, int, str, float, bool) -> object
+    """Plain or TLS connection to a literal IP (SNI = host for TLS).
+
+    Certificate validation is off on purpose: the probe only needs the
+    status line, and self-signed or AutoSSL-pending hosts must still
+    answer. Timeouts bound the TCP connect and the TLS handshake alike.
     """
-    quoted = urllib.parse.quote(path, safe="/")
+    if not use_tls:
+        return http.client.HTTPConnection(ip, port, timeout=timeout)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    raw = socket.create_connection((ip, port), timeout=timeout)
+    try:
+        tls = ctx.wrap_socket(raw, server_hostname=host)
+    except Exception:
+        try:
+            raw.close()
+        except OSError:
+            pass
+        raise
+    try:
+        tls.settimeout(timeout)
+    except OSError:
+        pass
+    # The socket is already connected and wrapped: http.client only
+    # formats requests on top of it (connect() is skipped when sock
+    # is set) and never sees the IP, so no Host header override is
+    # needed to keep SNI and Host aligned on the domain.
+    conn = http.client.HTTPSConnection(host, port, context=ctx,
+                                       timeout=timeout)
+    conn.sock = tls
+    return conn
+
+
+def _same_host_https_path(location, host, https_port):
+    # type: (object, str, int) -> object
+    """Path to re-probe when a redirect points at the same host over TLS.
+
+    Returns None unless the Location is exactly https://<host>[:port]
+    with a sane port and path: no other host, no userinfo, no NUL, no
+    dot-dot segments. Only the query string may ride along; the
+    fragment never leaves the client.
+    """
+    if not location or not isinstance(location, str):
+        return None
+    try:
+        parts = urllib.parse.urlsplit(location)
+    except ValueError:
+        return None
+    if parts.scheme.lower() != "https":
+        return None
+    if (parts.hostname or "").lower() != host.lower():
+        return None
+    if parts.username or parts.password:
+        return None
+    try:
+        port = parts.port or 443
+    except ValueError:
+        return None
+    if port != https_port:
+        return None
+    path = parts.path or "/"
+    if "\x00" in path:
+        return None
+    if ".." in path.split("/"):
+        return None
+    if parts.query:
+        path += "?" + parts.query
+    return path
+
+
+def _probe_scheme(ip, port, host, quoted, timeout, use_tls):
+    # type: (str, int, str, str, float, bool) -> dict
+    """One HEAD, then a capped GET fallback on 405/501/500.
+
+    Returns {status, location, ms, length, exposed, error}. Bodies are
+    never stored: with a known Content-Length nothing is read at all
+    (the connection closes anyway); otherwise at most READ_CAP + 1
+    bytes are read to learn the length. Length None means unknown.
+    """
     t0 = time.monotonic()
     try:
-        conn = http.client.HTTPConnection(ip, port, timeout=timeout)
+        conn = _open_conn(ip, port, host, timeout, use_tls)
         try:
             conn.request("HEAD", quoted,
                          headers={"Host": host, "Connection": "close",
@@ -234,10 +317,14 @@ def http_probe(ip, port, host, path, timeout):
             status = resp.status
             location = resp.getheader("Location")
             length = _content_length(resp)
-            resp.read()
+            try:
+                resp.read(READ_CAP + 1)
+            except (OSError, http.client.HTTPException):
+                pass
         finally:
             conn.close()
-    except (OSError, http.client.HTTPException) as exc:
+    except (OSError, http.client.HTTPException, ssl.SSLError,
+            ValueError) as exc:
         return {"status": 0, "location": None, "ms": None, "length": None,
                 "exposed": False, "error": "request failed: %s" % exc}
     ms = round((time.monotonic() - t0) * 1000, 1)
@@ -249,7 +336,7 @@ def http_probe(ip, port, host, path, timeout):
                 "length": None, "exposed": False, "error": None}
     t0 = time.monotonic()
     try:
-        conn = http.client.HTTPConnection(ip, port, timeout=timeout)
+        conn = _open_conn(ip, port, host, timeout, use_tls)
         try:
             conn.request("GET", quoted,
                          headers={"Host": host, "Connection": "close",
@@ -263,20 +350,54 @@ def http_probe(ip, port, host, path, timeout):
                     length = len(resp.read(READ_CAP + 1))
                 except (OSError, http.client.HTTPException):
                     length = None
-            else:
-                try:
-                    resp.read()
-                except (OSError, http.client.HTTPException):
-                    pass
+            # Known length: read nothing. A huge dump is never
+            # downloaded just to learn what the header already says.
         finally:
             conn.close()
-    except (OSError, http.client.HTTPException) as exc:
+    except (OSError, http.client.HTTPException, ssl.SSLError,
+            ValueError) as exc:
         return {"status": 0, "location": None, "ms": None, "length": None,
                 "exposed": False, "error": "request failed: %s" % exc}
     ms = round((time.monotonic() - t0) * 1000, 1)
     return {"status": status, "location": location, "ms": ms,
             "length": length, "exposed": status in (200, 206),
             "error": None}
+
+
+def http_probe(ip, port, host, path, timeout, https_port=None):
+    # type: (str, int, str, str, float, object) -> dict
+    """Probe one URL path: HEAD, then a capped GET fallback.
+
+    Returns {status, location, ms, length, exposed, error, scheme}.
+    exposed is true only when the server actually serves the bytes
+    (200/206). When plain HTTP answers 3xx to https://<same host>,
+    the probe is repeated once over TLS to the same literal IP
+    (SNI = host, never verified) and that verdict wins; scheme
+    records which one answered. Anything else is reported as-is —
+    only the first redirect is ever shown, never followed further.
+    Bodies are read up to READ_CAP and discarded, never stored.
+    https_port overrides the TLS port (tests point it at a fixture;
+    the default is 443).
+    """
+    if https_port is None:
+        https_port = HTTPS_PORT
+    quoted = urllib.parse.quote(path, safe="/")
+    first = _probe_scheme(ip, port, host, quoted, timeout, False)
+    first["scheme"] = "http"
+    if first["status"] in (301, 302, 303, 307, 308):
+        hop = _same_host_https_path(first.get("location"), host,
+                                    https_port)
+        if hop is not None:
+            second = _probe_scheme(ip, https_port, host,
+                                   urllib.parse.quote(hop, safe="/?=&%"),
+                                   timeout, True)
+            second["scheme"] = "https"
+            if second["status"] == 0 and second.get("error"):
+                first["error"] = ("https follow failed: %s"
+                                  % second["error"])
+                return first
+            return second
+    return first
 
 
 def _content_length(resp):
@@ -615,8 +736,8 @@ class Checker(object):
     """Per-domain fact gathering with a shared deadline."""
 
     def __init__(self, home, uid, summary, progress_cb, deadline,
-                 progress_every, top_dev, timeout):
-        # type: (str, int, dict, object, object, int, int, float) -> None
+                 progress_every, top_dev, timeout, https_port=HTTPS_PORT):
+        # type: (str, int, dict, object, object, int, int, float, int) -> None
         self.home = home
         self.uid = uid
         self.summary = summary
@@ -625,6 +746,7 @@ class Checker(object):
         self.progress_every = progress_every
         self.top_dev = top_dev
         self.timeout = timeout
+        self.https_port = https_port
         self.done = 0
 
     def poll(self):
@@ -652,7 +774,7 @@ class Checker(object):
         rec["docroot"] = docroot
         if docroot.get("usable"):
             rec["http"] = http_probe(target["ip"], target["port"], domain,
-                                     "/", self.timeout)
+                                     "/", self.timeout, self.https_port)
             rec["htaccess"] = self.check_htaccess(
                 docroot["abs"], docroot["hrel"])
             rec["logs"] = self.check_logs(domain, docroot["abs"],
@@ -770,11 +892,11 @@ class Checker(object):
 
 
 def doctor_scan(home, uid, summary, progress_cb, deadline, progress_every,
-                top_dev, timeout, targets):
-    # type: (str, int, dict, object, object, int, int, float, list) -> list
+                top_dev, timeout, targets, https_port=HTTPS_PORT):
+    # type: (str, int, dict, object, object, int, int, float, list, int) -> list
     """Fact records for up to MAX_DOMAINS websites inside the budget."""
     checker = Checker(home, uid, summary, progress_cb, deadline,
-                      progress_every, top_dev, timeout)
+                      progress_every, top_dev, timeout, https_port)
     records = []
     for pos, target in enumerate(targets[:MAX_DOMAINS]):
         if deadline is not None and time.monotonic() >= deadline:
@@ -840,12 +962,32 @@ def probe_path_for(domain_rel, kind):
     return domain_rel
 
 
+def is_blockable_name(text):
+    # type: (object) -> bool
+    """True when text may be embedded in a .htaccess deny rule.
+
+    Only printable ASCII without `"`, `'`, backslash or backtick: a
+    quote would close the rule's quoting and a newline would write
+    extra lines, either of which makes Apache reject the whole file
+    (site down). Anything else is moved, never blocked.
+    """
+    if not text or not isinstance(text, str):
+        return False
+    for ch in text:
+        if ch in "\"'\\`":
+            return False
+        if ord(ch) < 0x20 or ord(ch) > 0x7E:
+            return False
+    return True
+
+
 class ExposedWalker(object):
     """Depth-capped docroot walker that collects + probes risky names."""
 
     def __init__(self, home, uid, summary, progress_cb, deadline,
-                 progress_every, top_dev, timeout, ip, port, domain):
-        # type: (str, int, dict, object, object, int, int, float, str, int, str) -> None
+                 progress_every, top_dev, timeout, ip, port, domain,
+                 https_port=HTTPS_PORT):
+        # type: (str, int, dict, object, object, int, int, float, str, int, str, int) -> None
         self.home = home
         self.uid = uid
         self.summary = summary
@@ -857,6 +999,7 @@ class ExposedWalker(object):
         self.ip = ip
         self.port = port
         self.domain = domain
+        self.https_port = https_port
         self.done = 0
         self.findings = []  # type: list
 
@@ -930,8 +1073,16 @@ class ExposedWalker(object):
         return ("skip", None)
 
     def probe_finding(self, hrel, rrel, kind, size):
-        # type: (str, str, str, int) -> None
-        """HTTP-probe one candidate; record it with its verdict."""
+        # type: (str, str, str, object) -> None
+        """HTTP-probe one candidate; record it with its verdict.
+
+        exposed means the server served the bytes (200/206). confidence
+        is "confirmed" only when the served length matches the file size
+        on disk (known sizes only); anything else downloadable is
+        "likely", since front controllers often answer 200 for any
+        path (soft 404). blockable is false for names that can never
+        appear in a .htaccess rule; those are moved, never blocked.
+        """
         if self.deadline is not None and time.monotonic() >= self.deadline:
             self.summary["counts"]["errors"] += 1
             _add_capped(self.summary, "errors",
@@ -939,10 +1090,17 @@ class ExposedWalker(object):
             return
         url_path = "/" + probe_path_for(rrel, kind)
         probe = http_probe(self.ip, self.port, self.domain, url_path,
-                           self.timeout)
+                           self.timeout, self.https_port)
         self.summary["counts"]["probed"] += 1
         if probe["exposed"]:
             self.summary["counts"]["exposed"] += 1
+        confidence = None
+        if probe["exposed"]:
+            if probe["length"] is not None and size is not None \
+                    and probe["length"] == size:
+                confidence = "confirmed"
+            else:
+                confidence = "likely"
         self.findings.append({
             "domain": self.domain,
             "relpath": hrel,
@@ -952,6 +1110,10 @@ class ExposedWalker(object):
             "http_status": probe["status"],
             "http_length": probe["length"],
             "exposed": probe["exposed"],
+            "scheme": probe.get("scheme", "http"),
+            "confidence": confidence,
+            "blockable": is_blockable_name(hrel)
+            and is_blockable_name(url_path),
         })
 
     def walk_open(self, fd, hrel, rrel, depth):
@@ -995,13 +1157,26 @@ class ExposedWalker(object):
 
     def probe_git_dir(self, hrel, rrel):
         # type: (str, str) -> None
-        """Probe a .git folder through its HEAD file."""
-        self.probe_finding(hrel, rrel, "git_dir", 0)
+        """Probe a .git folder through its HEAD file.
+
+        The HEAD size on disk feeds the confirmed/likely verdict the
+        same way file sizes do; when HEAD cannot be statted the size
+        stays unknown and a served HEAD is only "likely".
+        """
+        size = None
+        try:
+            st = os.stat(os.path.join(self.home, hrel, "HEAD"))
+        except OSError:
+            st = None
+        if st is not None and stat.S_ISREG(st.st_mode) \
+                and st.st_uid == self.uid and st.st_dev == self.top_dev:
+            size = st.st_size
+        self.probe_finding(hrel, rrel, "git_dir", size)
 
 
 def exposed_scan(home, uid, summary, progress_cb, deadline, progress_every,
-                 top_dev, timeout, targets):
-    # type: (str, int, dict, object, object, int, int, float, list) -> list
+                 top_dev, timeout, targets, https_port=HTTPS_PORT):
+    # type: (str, int, dict, object, object, int, int, float, list, int) -> list
     """Walk every docroot and probe each risky name (10-domain budget)."""
     findings = []
     for pos, target in enumerate(targets[:MAX_DOMAINS]):
@@ -1044,7 +1219,7 @@ def exposed_scan(home, uid, summary, progress_cb, deadline, progress_every,
         walker = ExposedWalker(home, uid, summary, progress_cb, deadline,
                               progress_every, top_dev, timeout,
                               target["ip"], target["port"],
-                              target["domain"])
+                              target["domain"], https_port)
         fd = open_dir(real, (st.st_dev, st.st_ino), hrel, summary)
         if fd is None:
             continue
@@ -1374,6 +1549,9 @@ def build_parser():
     parent.add_argument("--timeout", type=float, default=REQUEST_TIMEOUT,
                         help="per-request seconds (default %s)"
                              % REQUEST_TIMEOUT)
+    parent.add_argument("--https-port", type=int, default=HTTPS_PORT,
+                        help="TLS port for the same-host HTTPS hop "
+                             "(default %d)" % HTTPS_PORT)
     parent.add_argument("--budget", type=float, default=BUDGET_SECONDS,
                         help="total seconds for a scan (default %s)"
                              % BUDGET_SECONDS)
@@ -1431,8 +1609,11 @@ def main(argv=None):
         home = pe.resolve_home(args.home)
         timeout = float(args.timeout)
         budget = float(args.budget)
+        https_port = int(args.https_port)
         if timeout <= 0 or timeout > 60 or budget <= 0 or budget > 3600:
             raise pe.UsageError("bad --timeout/--budget range")
+        if https_port < 1 or https_port > 65535:
+            raise pe.UsageError("bad --https-port (want 1-65535)")
     except (pe.UsageError, ValueError) as exc:
         pe.eprint("error: %s" % exc)
         return pe.EXIT_USAGE
@@ -1496,12 +1677,12 @@ def main(argv=None):
             targets = parse_targets(args.target, True)
             summary["domains"] = doctor_scan(
                 home, uid, summary, progress_cb, deadline, progress_every,
-                dev, timeout, targets)
+                dev, timeout, targets, https_port)
         elif args.command == "exposed-scan":
             targets = parse_targets(args.target, False)
             summary["findings"] = exposed_scan(
                 home, uid, summary, progress_cb, deadline, progress_every,
-                dev, timeout, targets)
+                dev, timeout, targets, https_port)
         elif args.command == "exposed-move":
             if not args.job or not args.finding:
                 raise pe.UsageError("exposed-move needs --job and --finding")
@@ -1533,7 +1714,7 @@ def main(argv=None):
                             args.host):
                 raise pe.UsageError("bad probe host")
             summary["probe"] = http_probe(args.ip, args.port, args.host,
-                                          args.path, timeout)
+                                          args.path, timeout, https_port)
         else:  # pragma: no cover - argparse required=True guards this
             raise pe.UsageError("unknown command: %r" % (args.command,))
     except pe.UsageError as exc:
