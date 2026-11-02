@@ -3,18 +3,6 @@
 All notable changes to this project are documented here. Versions follow
 [SemVer](https://semver.org/).
 
-## [Unreleased]
-
-### Added
-
-- Site Doctor: check whether a WordPress site serves `xmlrpc.php` and offer a
-  marked `.htaccess` deny block when it does, with preview, backup, undo and a
-  re-probe. The fix is not offered when Jetpack is installed (it needs
-  XML-RPC). Undo removes only its own section, so WordPress's permalink rules
-  and later edits survive; a re-probe that still sees the file says so instead
-  of reporting success. Off by default with Site Doctor
-  (`enable_site_doctor=0`).
-
 ## [0.2.0] - 2026-11-02
 
 ### Added
@@ -25,6 +13,13 @@ All notable changes to this project are documented here. Versions follow
   lines under PHP-FPM) with preview, backup and undo. Off by default:
   `enable_site_doctor=0` policy key, WHM checkbox, and its own Feature
   Manager feature.
+- Site Doctor: check whether a WordPress site serves `xmlrpc.php` and offer a
+  marked `.htaccess` deny block when it does, with preview, backup, undo and a
+  re-probe. The fix is not offered when Jetpack is installed (it needs
+  XML-RPC). Undo removes only its own section, so WordPress's permalink rules
+  and later edits survive; a re-probe that still sees the file says so instead
+  of reporting success. Off by default with Site Doctor
+  (`enable_site_doctor=0`).
 - Exposed Files Scanner: engine walk of every document root for files
   that must never be public, probed over HTTP (status + size only,
   bodies never read past a cap); findings served only over a same-host
@@ -36,6 +31,7 @@ All notable changes to this project are documented here. Versions follow
   cannot be quoted safely are never written to `.htaccess` (Move only).
   Redirects that cannot be followed, failed HTTPS checks and server
   errors read "not checked" with the reason, never "not exposed".
+  Redirects to the `www.` or bare form of a listed domain are followed.
   Off by default: `enable_exposed_files=0` policy key, WHM checkbox,
   and its own Feature Manager feature.
 - Cron Doctor: read-only flags over the user's own crontab (every-minute
