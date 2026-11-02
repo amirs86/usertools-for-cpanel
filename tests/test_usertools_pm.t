@@ -1662,12 +1662,19 @@ sub site_wait_done {
     is( $alog->[0]{action}, 'fix xmlrpc', 'action recorded' );
     is( $alog->[0]{undo}{fn}, 'doctor_xmlrpc_undo', 'fix carries its undo' );
     is( $alog->[0]{undo}{args}{domain}, 'primary.test', 'undo names the domain' );
-    like( $alog->[0]{undo}{args}{backup} // '',
-        qr/^\.htaccess\.usertools-bak-/, 'undo names the backup' );
+    ok( !exists $alog->[0]{undo}{args}{backup},
+        'undo does not point at a backup file' );
     my $after = do { open my $rfh, '<', "$home/public_html/.htaccess" or die $!; local $/; <$rfh> };
     like( $after, qr/# BEGIN UserTools Site Doctor XML-RPC/, 'marked block added' );
+    my $begins = () = $after =~ /^# BEGIN UserTools Site Doctor XML-RPC$/mg;
+    my $ends   = () = $after =~ /^# END UserTools Site Doctor XML-RPC$/mg;
+    is( $begins, 1, 'one opening marker' );
+    is( $ends,   1, 'one closing marker' );
     like( $after, qr{\Q<If "%{REQUEST_FILENAME} == '$home/public_html/xmlrpc.php'">\E},
         'rule matches the mapped filename' );
+    open my $afh, '>>', "$home/public_html/.htaccess" or die $!;
+    print $afh "WordPress wrote this line after the fix\n";
+    close $afh;
     $res = FakeResult->new();
     $ok  = Cpanel::API::UserTools::doctor_xmlrpc_fix(
         FakeArgs->new( job_id => 'doctor-2', domain => 'primary.test' ), $res );
@@ -1678,12 +1685,31 @@ sub site_wait_done {
     ok( $ok, 'undo accepted' );
     is( $res->{data}{restored}, 1, 'undo restored the file' );
     my $back = do { open my $rfh, '<', "$home/public_html/.htaccess" or die $!; local $/; <$rfh> };
-    is( $back, "RewriteEngine On\n", 'original bytes back' );
+    unlike( $back, qr/UserTools Site Doctor XML-RPC/, 'marked section gone' );
+    like( $back, qr/^WordPress wrote this line after the fix$/m,
+        'line written outside the section survived' );
+    is( $back, "RewriteEngine On\n\nWordPress wrote this line after the fix\n",
+        'every line outside the section kept its bytes' );
+    my @baks = glob "$home/public_html/.htaccess.usertools-bak-*";
+    ok( @baks, 'pre-fix backup kept as a record' );
     $res = FakeResult->new();
     $ok  = Cpanel::API::UserTools::doctor_xmlrpc_undo(
         FakeArgs->new( job_id => 'doctor-2', domain => 'primary.test' ), $res );
     ok( !$ok, 'used undo refused' );
     is( $res->{errors}[0][0], 'already undone', 'used reads as undone' );
+    $Cpanel::API::UserTools::TEST_EXPOSED_PROBE = { status => 200, exposed => 1 };
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_xmlrpc_fix(
+        FakeArgs->new( job_id => 'doctor-2', domain => 'primary.test' ), $res );
+    ok( $ok, 'fix still applies when the rule cannot stop serving' );
+    is( $res->{data}{blocked}, 0, 'still-served re-probe is not reported as blocked' );
+    is( $res->{data}{still_served}, 1, 'still-served flag set' );
+    like( $res->{data}{note} // '', qr/still served/,
+        'result says the file is still served' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_xmlrpc_undo(
+        FakeArgs->new( job_id => 'doctor-2', domain => 'primary.test' ), $res );
+    ok( $ok, 'undo after still-served apply accepted' );
     $res = FakeResult->new();
     $ok  = Cpanel::API::UserTools::doctor_xmlrpc_fix(
         FakeArgs->new( job_id => 'doctor-2', domain => 'nosuch.test' ), $res );
@@ -1692,6 +1718,51 @@ sub site_wait_done {
     $ok  = Cpanel::API::UserTools::doctor_xmlrpc_preview(
         FakeArgs->new( job_id => 'doctor-nope', domain => 'primary.test' ), $res );
     ok( !$ok, 'preview without a scan refused' );
+}
+
+{
+    # A symlinked docroot: the rule keeps the vhost-configured prefix,
+    # because that is the path Apache reports in REQUEST_FILENAME.
+    my $home = site_make_home();
+    my $pconf = site_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    symlink( "$home/public_html", "$home/link_html" ) or die $!;
+    my $udir = "$home/userdata";
+    make_path("$udir/testuser");
+    local $Cpanel::API::UserTools::TEST_DOMAIN_DATA_DIR = $udir;
+    open my $duf, '>', "$udir/testuser/primary.test" or die $!;
+    print $duf "---\ndocumentroot: $home/link_html\nip: 127.0.0.1\nport: 9\n";
+    close $duf;
+    open my $xf, '>', "$home/public_html/xmlrpc.php" or die $!;
+    print $xf "<?php // xmlrpc\n";
+    close $xf;
+    open my $wf, '>', "$home/public_html/wp-config.php" or die $!;
+    print $wf "<?php // config\n";
+    close $wf;
+    open my $hf, '>', "$home/public_html/.htaccess" or die $!;
+    print $hf "RewriteEngine On\n";
+    close $hf;
+    my $job = {
+        counts  => {},
+        domains => [ { domain => 'primary.test',
+                       xmlrpc => { wp => 1, jetpack => 0,
+                                   probe => { status => 200, exposed => 1 },
+                                   state => 'exposed', reason => undef } } ],
+    };
+    make_path("$home/.cpanel/usertools/jobs");
+    open my $jf, '>', "$home/.cpanel/usertools/jobs/doctor-link.result.json" or die $!;
+    print $jf JSON::PP->new()->encode($job);
+    close $jf;
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::doctor_xmlrpc_preview(
+        FakeArgs->new( job_id => 'doctor-link', domain => 'primary.test' ), $res );
+    ok( $ok, 'symlinked docroot preview accepted' );
+    like( $res->{data}{diff},
+        qr{\Q<If "%{REQUEST_FILENAME} == '$home/link_html/xmlrpc.php'">\E},
+        'rule uses the configured docroot path' );
+    unlike( $res->{data}{diff},
+        qr{\Q<If "%{REQUEST_FILENAME} == '$home/public_html/xmlrpc.php'">\E},
+        'rule does not use the resolved path' );
 }
 
 {

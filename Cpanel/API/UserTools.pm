@@ -2740,6 +2740,31 @@ sub _ht_named_section {
     return $out;
 }
 
+sub _ht_drop_named_section {
+    my ( $content, $begin, $end ) = @_;
+    # Remove exactly one marked section, markers included, and keep every
+    # other byte as written. Returns (content, undef), or (undef, reason)
+    # when the section is absent ('missing') or its markers do not pair
+    # ('unpaired'); a half-written section is never guessed at.
+    return ( undef, 'missing' ) unless defined $content;
+    my @lines = split /\n/, $content, -1;
+    my ( $bi, $ei );
+    for my $i ( 0 .. $#lines ) {
+        if ( !defined $bi ) {
+            $bi = $i if $lines[$i] eq $begin;
+            next;
+        }
+        if ( $lines[$i] eq $end ) {
+            $ei = $i;
+            last;
+        }
+    }
+    return ( undef, 'missing' ) unless defined $bi;
+    return ( undef, 'unpaired' ) unless defined $ei && $ei > $bi;
+    splice @lines, $bi, $ei - $bi + 1;
+    return ( join( "\n", @lines ), undef );
+}
+
 sub _ht_section_rules {
     my ( $content, $begin, $end ) = @_;
     # Raw lines currently inside a named marked section (no markers).
@@ -3001,24 +3026,33 @@ sub _doctor_job_rec {
     return ( $found, undef );
 }
 
-sub _doctor_docroot {
+sub _doctor_docroot_target {
     my ( $home, $user, $job_id, $domain ) = @_;
     # The docroot a Site Doctor htaccess call may touch: the domain must
     # have been scanned (job membership) and still belong to the account
-    # (live server-side lookup), resolved and home-confined.
+    # (live server-side lookup), resolved and home-confined. Returns the
+    # resolved path and the live domain record, whose documentroot keeps
+    # the path as configured (Apache matches REQUEST_FILENAME against it).
     my $domains = _doctor_job_domains( $home, $job_id );
-    return ( undef, 'Unknown job.' ) unless defined $domains;
+    return ( undef, undef, 'Unknown job.' ) unless defined $domains;
     my ($found) = grep { ref $_ eq 'HASH' && defined $_->{domain} && $_->{domain} eq $domain } @{$domains};
-    return ( undef, 'Unknown website for this scan.' ) unless defined $found;
+    return ( undef, undef, 'Unknown website for this scan.' ) unless defined $found;
     my ( $rec, $err ) = _site_domain_rec( $user, $domain );
-    return ( undef, $err ) unless defined $rec;
+    return ( undef, undef, $err ) unless defined $rec;
     my $real = Cwd::realpath( $rec->{documentroot} );
     if ( !defined $real || !-d $real ) {
-        return ( undef, 'the document root is missing' );
+        return ( undef, undef, 'the document root is missing' );
     }
     if ( $real ne $home && index( $real, "$home/" ) != 0 ) {
-        return ( undef, 'the document root is outside your home folder' );
+        return ( undef, undef, 'the document root is outside your home folder' );
     }
+    return ( $real, $rec, undef );
+}
+
+sub _doctor_docroot {
+    my ( $home, $user, $job_id, $domain ) = @_;
+    my ( $real, $rec, $err ) = _doctor_docroot_target( $home, $user, $job_id, $domain );
+    return ( undef, $err ) unless defined $real;
     return ( $real, undef );
 }
 
@@ -3186,11 +3220,13 @@ sub doctor_htaccess_undo {
 }
 
 sub _doctor_xmlrpc_plan {
-    my ( $home, $domain, $real, $found ) = @_;
+    my ( $home, $domain, $real, $configured, $found ) = @_;
     # Preview plan for denying xmlrpc.php in one docroot .htaccess.
     # $found is the scanned domain record (server-side only); the rule
     # matches the mapped filename, the same way as the Exposed Files
-    # rules. Returns (plan) or (undef, reason). The file is read fresh.
+    # rules. $configured is the vhost document root string, because that
+    # is what REQUEST_FILENAME carries when it differs from the resolved
+    # path. Returns (plan) or (undef, reason). The file is read fresh.
     return ( undef, 'unknown website' ) unless defined $domain;
     my $xr = ref $found eq 'HASH' && ref $found->{xmlrpc} eq 'HASH'
       ? $found->{xmlrpc}
@@ -3208,9 +3244,22 @@ sub _doctor_xmlrpc_plan {
         return ( undef,
             $st ? "xmlrpc.php is not served (HTTP $st)" : 'xmlrpc.php is not served right now' );
     }
-    my $abspath = "$real/xmlrpc.php";
-    my $rel = _ht_home_rel( $home, $abspath );
+    my $rel = _ht_home_rel( $home, "$real/xmlrpc.php" );
     if ( !defined $rel || $rel eq '' ) {
+        return ( undef, 'the xmlrpc.php path is outside your home folder' );
+    }
+    # The rule must match the path Apache reports, which is the docroot as
+    # configured. Build its home-relative path first so a symlinked docroot
+    # keeps the configured prefix; fall back to the resolved path when the
+    # configured one is not inside the home folder.
+    my $cfg = defined $configured ? $configured : '';
+    $cfg =~ s{/+\z}{};
+    my $rule_rel = $cfg ne ''
+      ? _ht_home_rel( $home, "$cfg/xmlrpc.php" )
+      : undef;
+    $rule_rel = $rel if !defined $rule_rel || $rule_rel eq '';
+    my $abspath = _expose_rule_abspath( $home, $real, $cfg, $rule_rel );
+    if ( !defined $abspath ) {
         return ( undef, 'the xmlrpc.php path is outside your home folder' );
     }
     for my $s ( $rel, '/xmlrpc.php', $abspath ) {
@@ -3229,11 +3278,7 @@ sub _doctor_xmlrpc_plan {
     if ( grep { $_ eq $HT_XML_BEGIN } @lines ) {
         return ( undef, 'a Site Doctor XML-RPC block is already applied' );
     }
-    my $esc = $abspath;
-    $esc =~ s/([\\^\$.|?*+()\[\]{}])/\\$1/g;
-    $esc =~ s/#/[#]/g;
     my @section = (
-        $HT_XML_BEGIN,
         '# Site Doctor: deny xmlrpc.php (login-flood and pingback abuse).',
         '# Removing this block restores access.',
         '',
@@ -3243,7 +3288,6 @@ sub _doctor_xmlrpc_plan {
         "<If \"%{REQUEST_FILENAME} == '$abspath'\">",
         '    Require all denied',
         '</If>',
-        $HT_XML_END,
     );
     my $new = _ht_named_section( $current, $HT_XML_BEGIN, $HT_XML_END,
         \@section );
@@ -3273,7 +3317,7 @@ sub doctor_xmlrpc_preview {
 
     my ($job_id) = $args->get('job_id');
     my ($domain) = $args->get('domain');
-    my ( $real, $docroot_err ) = _doctor_docroot( $home, $user, $job_id, $domain );
+    my ( $real, $target, $docroot_err ) = _doctor_docroot_target( $home, $user, $job_id, $domain );
     if ( !defined $real ) {
         if ( $docroot_err eq 'Unknown job.' || $docroot_err eq 'Unknown website for this scan.' ) {
             $result->error($docroot_err);
@@ -3288,7 +3332,8 @@ sub doctor_xmlrpc_preview {
         $result->error( 'Nothing to fix: [_1].', $found_err );
         return;
     }
-    my ( $plan, $err ) = _doctor_xmlrpc_plan( $home, $domain, $real, $found );
+    my ( $plan, $err ) = _doctor_xmlrpc_plan( $home, $domain, $real,
+        $target->{documentroot}, $found );
     if ( !defined $plan ) {
         $result->error( 'Nothing to fix: [_1].', $err );
         return;
@@ -3318,7 +3363,7 @@ sub doctor_xmlrpc_fix {
 
     my ($job_id) = $args->get('job_id');
     my ($domain) = $args->get('domain');
-    my ( $real, $docroot_err ) = _doctor_docroot( $home, $user, $job_id, $domain );
+    my ( $real, $target, $docroot_err ) = _doctor_docroot_target( $home, $user, $job_id, $domain );
     if ( !defined $real ) {
         if ( $docroot_err eq 'Unknown job.' || $docroot_err eq 'Unknown website for this scan.' ) {
             $result->error($docroot_err);
@@ -3333,7 +3378,8 @@ sub doctor_xmlrpc_fix {
         $result->error( 'Nothing to fix: [_1].', $found_err );
         return;
     }
-    my ( $plan, $err ) = _doctor_xmlrpc_plan( $home, $domain, $real, $found );
+    my ( $plan, $err ) = _doctor_xmlrpc_plan( $home, $domain, $real,
+        $target->{documentroot}, $found );
     if ( !defined $plan ) {
         $result->error( 'Nothing to fix: [_1].', $err );
         return;
@@ -3358,7 +3404,6 @@ sub doctor_xmlrpc_fix {
           args => {
             job_id => $job_id,
             domain => $domain,
-            backup => ( split m{/}, $bak )[-1],
           } } );
     my $reprobe = { status => 0, exposed => 0 };
     my ( $rec, $rec_err ) = _site_domain_rec( $user, $domain );
@@ -3366,22 +3411,26 @@ sub doctor_xmlrpc_fix {
         $reprobe = _exposed_reprobe( $home, $rec->{ip}, $rec->{port},
             $domain, '/xmlrpc.php', $user );
     }
-    $result->data(
-        {
-            domain   => $plan->{domain},
-            file     => '.htaccess',
-            backup   => $bak,
-            diff     => $plan->{diff},
-            reprobed => $reprobe,
-        }
+    my $still_served = $reprobe->{exposed} ? 1 : 0;
+    my %data = (
+        domain   => $plan->{domain},
+        file     => '.htaccess',
+        backup   => $bak,
+        diff     => $plan->{diff},
+        reprobed => $reprobe,
+        blocked  => $still_served ? 0 : 1,
+        still_served => $still_served,
     );
+    $data{note} = 'The rule was written but xmlrpc.php is still served.'
+      if $still_served;
+    $result->data( \%data );
     return 1;
 }
 
 #-------------------------------------------------------------------------------------------------
 # Name:
-#   doctor_xmlrpc_undo - Restore the newest backup of that .htaccess,
-#   or the named one (which must still be the newest).
+#   doctor_xmlrpc_undo - Remove only the marked XML-RPC section, leaving
+#   every other line as it is now.
 #-------------------------------------------------------------------------------------------------
 sub doctor_xmlrpc_undo {
     my ( $args, $result ) = @_;
@@ -3393,48 +3442,36 @@ sub doctor_xmlrpc_undo {
 
     my ($job_id) = $args->get('job_id');
     my ($domain) = $args->get('domain');
-    my ($backup_p) = $args->get('backup');
     my ( $real, $docroot_err ) = _doctor_docroot( $home, $user, $job_id, $domain );
     if ( !defined $real ) {
         $result->error($docroot_err);
         return;
     }
     my $path = "$real/.htaccess";
-    my @cands = sort grep { -f $_ } glob "$path.usertools-bak-*";
-    if ( !@cands ) {
-        $result->error('already undone');
+    my $current = eval { _read_text_file($path) };
+    if ($@) {
+        $result->error('Could not read the .htaccess file; nothing was changed.');
         return;
     }
-    my $pick;
-    if ( defined $backup_p ) {
-        if ( $backup_p !~ /^\.htaccess\.usertools-bak-[0-9]+(-\d+)?$/ ) {
+    my ( $new, $state ) = _ht_drop_named_section( $current,
+        $HT_XML_BEGIN, $HT_XML_END );
+    if ( !defined $new ) {
+        if ( $state eq 'missing' ) {
             $result->error('already undone');
-            return;
         }
-        my $want = "$real/$backup_p";
-        if ( !grep { $_ eq $want } @cands ) {
-            $result->error('already undone');
-            return;
+        else {
+            $result->error('The XML-RPC block is incomplete; nothing was changed.');
         }
-        if ( $want ne $cands[-1] ) {
-            $result->error('a newer change exists, undo that first');
-            return;
-        }
-        $pick = $want;
+        return;
     }
-    else {
-        @cands = sort { ( ( stat($b) )[9] // 0 ) <=> ( ( stat($a) )[9] // 0 ) } @cands;
-        $pick = $cands[0];
+    if ( !_write_text_file( $path, $new, 0644 ) ) {
+        $result->error('Could not write the .htaccess file; nothing was changed.');
+        return;
     }
-    if ( rename( $pick, $path ) ) {
-        chmod 0644, $path;
-        _activity_log( $home, 'site_doctor', 'undo xmlrpc fix',
-            { domain => $domain }, undef );
-        $result->data( { domain => $domain, restored => 1 } );
-        return 1;
-    }
-    $result->error('Could not restore the backup.');
-    return;
+    _activity_log( $home, 'site_doctor', 'undo xmlrpc fix',
+        { domain => $domain }, undef );
+    $result->data( { domain => $domain, restored => 1 } );
+    return 1;
 }
 
 sub _exposed_findings {

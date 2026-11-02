@@ -61,6 +61,7 @@ var UT_STR = {
     fixXmlrpcBody: "[% locale.maketext('This adds a marked deny block for xmlrpc.php in the .htaccess file. The original file is backed up first, and the change can be undone.') %]",
     fixXmlrpcApply: "[% locale.maketext('Block now') %]",
     fixedXmlrpc: "[% locale.maketext('Blocked. The change can be undone.') %]",
+    xmlrpcStillServed: "[% locale.maketext('The rule was written but xmlrpc.php is still served. Check the site configuration, then undo or rescan.') %]",
     fixed: "[% locale.maketext('Fixed. The change can be undone.') %]",
     fixFailed: "[% locale.maketext('Fix failed: ') %]",
     undoDone: "[% locale.maketext('Fix undone: the original file is back.') %]",
@@ -276,8 +277,12 @@ window.addEventListener("DOMContentLoaded", function () {
         if (!pendingFix || !currentJob) { return; }
         var domain = pendingFix.domain;
         pendingFix = null;
-        UserTools.callApi("doctor_xmlrpc_fix", { job_id: currentJob, domain: domain }, "POST").then(function () {
-            setBanner("ok", UT_STR.fixedXmlrpc);
+        UserTools.callApi("doctor_xmlrpc_fix", { job_id: currentJob, domain: domain }, "POST").then(function (data) {
+            if (data && data.still_served) {
+                setBanner("warn", UT_STR.xmlrpcStillServed);
+            } else {
+                setBanner("ok", UT_STR.fixedXmlrpc);
+            }
             pendingUndo = { fn: "doctor_xmlrpc_undo", domain: domain };
             undoBtn.hidden = false;
         }).catch(function (err) {
