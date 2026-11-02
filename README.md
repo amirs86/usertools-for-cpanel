@@ -81,7 +81,7 @@ Full removal including settings and log:
 
 ## After installing
 
-1. WHM → Packages → Feature Manager: tick the eight `usertools_*`
+1. WHM → Packages → Feature Manager: tick the ten `usertools_*`
    features for each package that should get the tools. Everything is
    **off by default** until you do this. (`./install.sh
    --enable-features=LIST` prints the exact steps for a list.)
@@ -102,6 +102,8 @@ Full removal including settings and log:
 - Space Cleaner: preview, then reclaim disk space and inodes (big logs, crash dumps, framework and WordPress caches, developer caches, old plugin files), with trash, restore, and empty.
 - Site Doctor: check every website at a glance (homepage status, folders, `.htaccess` mistakes, certificates, recent errors), with one fix for php_value lines under PHP-FPM and undo.
 - Exposed Files: find files that must never be public and probe whether the web server serves them (following a same-host HTTPS hop, capping every read), then move them to quarantine (restore) or block them with a marked `.htaccess` rule that matches the mapped file (undo). Served lengths matching the file on disk read confirmed, otherwise likely; unquotable names are Move-only.
+- Cron Doctor: read-only flags over your own crontab (every-minute schedules, unredirected output, bare `php`, duplicates, missing scripts, own-URL fetches), with one fix (silence one line's output, full crontab backup) and undo.
+- My Activity: every change made by any tool, newest first, with Undo where one exists (final actions like trash emptying say so).
 
 ## Tested
 
@@ -275,6 +277,14 @@ installs.
 ### Exposed Files
 
 ![Exposed Files page: findings table with quarantine and block actions](docs/screenshots/09-exposed-files.png)
+
+### Cron Doctor
+
+![Cron Doctor page: per-line flags with a silence-output fix](docs/screenshots/10-cron-doctor.png)
+
+### My Activity
+
+![My Activity page: newest changes first with Undo buttons](docs/screenshots/11-my-activity.png)
 
 ### Space Cleaner
 

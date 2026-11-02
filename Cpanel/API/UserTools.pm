@@ -35,6 +35,8 @@ our $FEATURE_APP_HELPER = 'usertools_app_helper';
 our $FEATURE_SPACE_CLEANER = 'usertools_space_cleaner';
 our $FEATURE_SITE_DOCTOR = 'usertools_site_doctor';
 our $FEATURE_EXPOSED_FILES = 'usertools_exposed_files';
+our $FEATURE_CRON_DOCTOR = 'usertools_cron_doctor';
+our $FEATURE_ACTIVITY = 'usertools_activity';
 
 our %API = (
     'home_permissions_check' => { 'needs_feature' => $FEATURE_FIX_HOME },
@@ -70,6 +72,11 @@ our %API = (
     'exposed_quarantine_list' => { 'needs_feature' => $FEATURE_EXPOSED_FILES },
     'exposed_block'   => { 'needs_feature' => $FEATURE_EXPOSED_FILES },
     'exposed_unblock' => { 'needs_feature' => $FEATURE_EXPOSED_FILES },
+    'cron_scan'      => { 'needs_feature' => $FEATURE_CRON_DOCTOR },
+    'cron_fix_preview' => { 'needs_feature' => $FEATURE_CRON_DOCTOR },
+    'cron_fix_output'  => { 'needs_feature' => $FEATURE_CRON_DOCTOR },
+    'cron_undo'        => { 'needs_feature' => $FEATURE_CRON_DOCTOR },
+    'activity_list'  => { 'needs_feature' => $FEATURE_ACTIVITY },
     'shell_status' => { 'needs_feature' => $FEATURE_SHELL },
     'shell_set'    => { 'needs_feature' => $FEATURE_SHELL },
     'app_helper_list'      => { 'needs_feature' => $FEATURE_APP_HELPER },
@@ -634,6 +641,9 @@ sub home_permissions_fix {
       map { { rel => $_->{rel}, from => oct( '0' . $_->{from} ), to => oct( '0' . $_->{to} ) } }
       grep { $_->{action} eq 'fixed' } @paths;
     my $journal = _write_journal( $home, 'fixhome', \@changes );
+    _activity_log( $home, 'fix_home', 'fix modes',
+        { fixed => scalar(@changes) },
+        @changes ? { fn => 'home_permissions_undo', args => {} } : undef );
     $result->data(
         {
             user         => $user,
@@ -681,6 +691,8 @@ sub home_permissions_undo {
         $result->error('The latest undo journal is unreadable.');
         return;
     }
+    _activity_log( $home, 'fix_home', 'undo fix modes',
+        { restored => $out->{restored} // 0 }, undef );
     $out->{user} = $user;
     $result->data($out);
     return 1;
@@ -1093,9 +1105,11 @@ sub _job_status_impl {
 }
 
 sub _job_cancel_impl {
-    my ( $result, $home, $uid, $job_id ) = @_;
+    my ( $result, $home, $uid, $job_id, $tool_label ) = @_;
     # Shared cancel for tools C and D (lock + pid + uid verification).
-    # The caller has already gated.
+    # The caller has already gated. $tool_label (e.g. 'bulk_perms')
+    # names the product tool for the activity log; callers for
+    # read-only scans pass nothing and log nothing.
     my $job = _job_paths( $home, $job_id );
     if ( !defined $job || !-f $job->{meta} ) {
         $result->error('Unknown job.');
@@ -1140,6 +1154,10 @@ sub _job_cancel_impl {
         print $fh time(), "\n";
         close $fh;
         chmod 0600, $job->{cancelled};
+    }
+    if ( defined $tool_label && $tool_label ne '' ) {
+        _activity_log( $home, $tool_label, 'cancel job',
+            { job_id => $job_id }, undef );
     }
     $result->data( { job_id => $job_id, cancelled => 1 } );
     return 1;
@@ -1310,7 +1328,18 @@ sub bulk_permissions_status {
     return unless defined $user;
 
     my ($job_id) = $args->get('job_id');
-    return _job_status_impl( $result, $home, $job_id, 'bulk-' );
+    my $ok = _job_status_impl( $result, $home, $job_id, 'bulk-' );
+    _activity_log_job_done(
+        $home, 'bulk_perms', $job_id,
+        sub {
+            my ( $summary, $meta ) = @_;
+            return undef unless ( $meta->{tool} // '' ) eq 'bulk';
+            return ( $summary->{counts}{changed} // 0 ) > 0
+              ? { fn => 'bulk_permissions_undo', args => {} }
+              : undef;
+        }
+    );
+    return $ok;
 }
 
 #-------------------------------------------------------------------------------------------------
@@ -1327,7 +1356,7 @@ sub bulk_permissions_cancel {
     return unless defined $user;
 
     my ($job_id) = $args->get('job_id');
-    return _job_cancel_impl( $result, $home, $uid, $job_id );
+    return _job_cancel_impl( $result, $home, $uid, $job_id, 'bulk_perms' );
 }
 
 #-------------------------------------------------------------------------------------------------
@@ -1507,6 +1536,9 @@ sub shell_set {
         return;
     }
 
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
     my ($mode) = $args->get('mode');
     if ( !defined $mode || ( $mode ne 'disabled' && $mode ne 'jailed' && $mode ne 'normal' ) ) {
         $result->error( 'Invalid mode: [_1].', defined $mode ? $mode : '' );
@@ -1524,6 +1556,7 @@ sub shell_set {
         return;
     }
     $result->data($admin);
+    _activity_log( $home, 'shell', 'set mode', { mode => $mode }, undef );
     return 1;
 }
 
@@ -1805,7 +1838,19 @@ sub space_clean_status {
     return unless defined $user;
 
     my ($job_id) = $args->get('job_id');
-    return _job_status_impl( $result, $home, $job_id, undef );
+    my $ok = _job_status_impl( $result, $home, $job_id, undef );
+    _activity_log_job_done(
+        $home, 'space_cleaner', $job_id,
+        sub {
+            my ( $summary, $meta ) = @_;
+            return undef unless ( $meta->{tool} // '' ) eq 'space-clean';
+            return defined $summary->{trash_batch}
+              ? { fn => 'space_trash_restore',
+                  args => { batch => $summary->{trash_batch} } }
+              : undef;
+        }
+    );
+    return $ok;
 }
 
 #-------------------------------------------------------------------------------------------------
@@ -1821,7 +1866,7 @@ sub space_clean_cancel {
     return unless defined $user;
 
     my ($job_id) = $args->get('job_id');
-    return _job_cancel_impl( $result, $home, $uid, $job_id );
+    return _job_cancel_impl( $result, $home, $uid, $job_id, 'space_cleaner' );
 }
 
 sub _space_valid_batch {
@@ -1968,6 +2013,9 @@ sub space_trash_restore {
         return;
     }
     my $counts = $summary->{counts} || {};
+    _activity_log( $home, 'space_cleaner', 'restore trash batch',
+        { batch => $batch, restored => $counts->{restored_files} + 0 },
+        undef );
     $result->data(
         {
             batch     => $batch,
@@ -2013,6 +2061,8 @@ sub space_trash_empty {
         return;
     }
     my $counts = $summary->{counts} || {};
+    _activity_log( $home, 'space_cleaner', 'empty trash',
+        { batch => $which, emptied => $counts->{changed} + 0 }, undef );
     $result->data(
         {
             emptied => $counts->{changed} + 0,
@@ -2904,6 +2954,10 @@ sub doctor_htaccess_fix {
         $result->error('Could not write the .htaccess file; the backup was restored.');
         return;
     }
+    _activity_log( $home, 'site_doctor', 'fix .htaccess',
+        { domain => $domain, lines => scalar( @{ $plan->{lines} } ) },
+        { fn => 'doctor_htaccess_undo',
+          args => { job_id => $job_id, domain => $domain } } );
     $result->data(
         {
             domain => $plan->{domain},
@@ -2944,6 +2998,8 @@ sub doctor_htaccess_undo {
     @cands = sort { ( ( stat($b) )[9] // 0 ) <=> ( ( stat($a) )[9] // 0 ) } @cands;
     if ( rename( $cands[0], $path ) ) {
         chmod 0644, $path;
+        _activity_log( $home, 'site_doctor', 'undo .htaccess fix',
+            { domain => $domain }, undef );
         $result->data( { domain => $domain, restored => 1 } );
         return 1;
     }
@@ -3098,6 +3154,12 @@ sub exposed_move {
         my $upath = $finding->{urlpath} // ( '/' . ( $finding->{relpath} // '' ) );
         $reprobe = _exposed_reprobe( $home, $rec->{ip}, $rec->{port}, $finding->{domain}, $upath );
     }
+    _activity_log( $home, 'exposed_files', 'quarantine finding',
+        { finding => $finding_id, batch => $summary->{quarantine_batch} },
+        defined $summary->{quarantine_batch}
+        ? { fn => 'exposed_restore',
+            args => { batch => $summary->{quarantine_batch} } }
+        : undef );
     $result->data(
         {
             finding  => $finding_id,
@@ -3132,6 +3194,11 @@ sub exposed_restore {
         $result->error( 'Restore failed: [_1].', $err );
         return;
     }
+    _activity_log( $home, 'exposed_files', 'restore quarantine batch',
+        { batch => $batch,
+          restored => $summary->{counts}{restored} + 0,
+          conflicts => $summary->{counts}{restore_conflicts} + 0 },
+        undef );
     $result->data(
         {
             batch     => $batch,
@@ -3243,6 +3310,10 @@ sub exposed_block {
         my $upath = $finding->{urlpath} // ( '/' . ( $finding->{relpath} // '' ) );
         $reprobe = _exposed_reprobe( $home, $rec->{ip}, $rec->{port}, $finding->{domain}, $upath );
     }
+    _activity_log( $home, 'exposed_files', 'block finding',
+        { finding => $finding_id },
+        { fn => 'exposed_unblock',
+          args => { job_id => $job_id, finding => $finding_id } } );
     $result->data(
         {
             finding  => $finding_id,
@@ -3321,6 +3392,10 @@ sub exposed_unblock {
         my $upath = $finding->{urlpath} // ( '/' . ( $finding->{relpath} // '' ) );
         $reprobe = _exposed_reprobe( $home, $rec->{ip}, $rec->{port}, $finding->{domain}, $upath );
     }
+    _activity_log( $home, 'exposed_files', 'unblock finding',
+        { finding => $finding_id },
+        { fn => 'exposed_block',
+          args => { job_id => $job_id, finding => $finding_id } } );
     $result->data(
         {
             finding  => $finding_id,
@@ -3328,6 +3403,589 @@ sub exposed_unblock {
             reprobed => $reprobe,
         }
     );
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# My Activity: one JSON line per change, newest undo one call away.
+# ---------------------------------------------------------------------------
+
+our $ACTIVITY_MAX_LINES = 1000;
+
+sub _activity_file {
+    my ($home) = @_;
+    return "$home/.cpanel/usertools/activity.jsonl";
+}
+
+sub _activity_now {
+    my @t = gmtime();
+    return sprintf( "%04d-%02d-%02dT%02d:%02d:%02dZ",
+        $t[5] + 1900, $t[4] + 1, $t[3], $t[2], $t[1], $t[0] );
+}
+
+sub _activity_log {
+    my ( $home, $tool, $action, $summary_hr, $undo_hr ) = @_;
+    # Best-effort by design: logging must never break the action that
+    # just succeeded, so every failure here is swallowed. One JSON
+    # object per line: time, tool, action, summary counts and the undo
+    # reference ({fn, args}) when one exists. Callers pass counts and
+    # ids only — never file contents, commands, or secrets. The file
+    # is capped at $ACTIVITY_MAX_LINES lines (oldest dropped).
+    return unless defined $home && $home ne '' && $home ne '/';
+    return unless defined $tool && defined $action;
+    eval {
+        my $dir = "$home/.cpanel/usertools";
+        make_path( $dir, { mode => 0700 } );
+        my @lines;
+        my $file = _activity_file($home);
+        if ( open my $fh, '<', $file ) {
+            @lines = <$fh>;
+            close $fh;
+            chomp @lines;
+            @lines = grep { $_ ne '' } @lines;
+        }
+        push @lines,
+          JSON::PP->new()->encode(
+            {
+                time    => _activity_now(),
+                tool    => "$tool",
+                action  => "$action",
+                summary => ref $summary_hr eq 'HASH' ? $summary_hr : {},
+                undo    => ref $undo_hr eq 'HASH' ? $undo_hr : undef,
+            }
+          );
+        splice( @lines, 0, @lines - $ACTIVITY_MAX_LINES )
+          if @lines > $ACTIVITY_MAX_LINES;
+        open my $out, '>', $file or die "cannot write: $!";
+        print $out "$_\n" for @lines;
+        close $out;
+        chmod 0600, $file;
+    };
+    return;
+}
+
+sub _activity_list {
+    my ( $home, $limit ) = @_;
+    # Newest first, up to $limit entries; unreadable lines are skipped.
+    $limit = 100 unless defined $limit && $limit =~ /^\d+$/ && $limit > 0;
+    $limit = 100 if $limit > 100;
+    my @out;
+    my $file = _activity_file($home);
+    if ( open my $fh, '<', $file ) {
+        my @lines = <$fh>;
+        close $fh;
+        for my $ln ( reverse @lines ) {
+            last if @out >= $limit;
+            chomp $ln;
+            next if $ln eq '';
+            my $rec = eval { JSON::PP->new()->decode($ln) };
+            next if $@ || ref $rec ne 'HASH';
+            push @out, $rec;
+        }
+    }
+    return \@out;
+}
+
+sub _activity_log_job_done {
+    my ( $home, $tool, $job_id, $undo_cb, $action ) = @_;
+    # Exactly-once completion entry for detached jobs: the status page
+    # is polled, so a sidecar flag file marks jobs already recorded.
+    # Only jobs with a result summary count as done; cancelled jobs
+    # have their own line from the cancel action, and dry runs change
+    # nothing. $undo_cb->($summary, $meta) builds the undo reference.
+    my $job = _job_paths( $home, $job_id );
+    return unless defined $job;
+    my $flag = "$job->{dir}/$job_id.activity_logged";
+    return if -f $flag;
+    my $meta = _read_json_file( $job->{meta} );
+    return unless ref $meta eq 'HASH';
+    return if $meta->{dry_run};
+    my $file = _read_json_file( $job->{result} );
+    my $summary = ( $file && ref $file->{counts} eq 'HASH' ) ? $file : undef;
+    if ( !defined $summary ) {
+        # Deploy-family jobs record ok/result instead of counts.
+        $summary = $file if ref $file eq 'HASH' && defined $file->{ok};
+    }
+    return unless defined $summary;
+    return if -f $job->{cancelled};
+    my $counts = ref $summary->{counts} eq 'HASH' ? $summary->{counts} : {};
+    my %entry = (
+        job_id => $job_id,
+        kind   => $meta->{tool} // '',
+    );
+    $entry{changed}     = $counts->{changed} // 0;
+    $entry{timed_out}   = $summary->{timed_out} ? 1 : 0;
+    $entry{interrupted} = $summary->{interrupted} ? 1 : 0;
+    $entry{ok}          = $file->{ok} ? 1 : 0 if defined $file->{ok};
+    $entry{trash_batch} = $summary->{trash_batch}
+      if defined $summary->{trash_batch};
+    my $undo = ref $undo_cb eq 'CODE' ? $undo_cb->( $summary, $meta ) : undef;
+    _activity_log( $home, $tool, defined $action ? $action : 'job done',
+        \%entry, $undo );
+    if ( open my $fh, '>', $flag ) {
+        print $fh time(), "\n";
+        close $fh;
+        chmod 0600, $flag;
+    }
+    return;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   activity_list - Latest account changes with undo references.
+#-------------------------------------------------------------------------------------------------
+sub activity_list {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_ACTIVITY );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    $result->data( { entries => _activity_list( $home, 100 ) } );
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Cron Doctor: read-only flags over the user's own crontab, one fix
+# (silence a line's output) with full-crontab backup and undo.
+# ---------------------------------------------------------------------------
+
+our $CRON_MAX_BYTES = 65536;
+
+sub _cron_policy_enabled {
+    my ($result) = @_;
+    # Off by default: the WHM policy must explicitly say 1.
+    my $policy = _read_user_policy();
+    if ( ref $policy eq 'HASH' && ( $policy->{enable_cron_doctor} // '' ) eq '1' ) {
+        return 1;
+    }
+    $result->error('This feature is not enabled for your account.');
+    return 0;
+}
+
+sub _cron_parse {
+    my ( $content, $home, $domains_ar ) = @_;
+    # Parse a crontab into per-line records plus findings. Pure function
+    # of the text (isolated for tests); file checks run as the caller.
+    # Every physical line gets a stable id (L1..Ln); only schedule
+    # entries are fixable (silence output). $domains_ar holds the
+    # account's own domain names for the wget/curl advice.
+    my @lines = defined $content && $content ne ''
+      ? split( /(?<=\n)/, $content ) : ();
+    my @recs;
+    my %seen;
+    my $n = 0;
+    for my $raw (@lines) {
+        $n++;
+        ( my $text = $raw ) =~ s/\r?\n\z//;
+        my %rec = ( id => "L$n", raw => $text );
+        if ( $text =~ /^\s*$/ ) {
+            $rec{kind} = 'blank';
+        }
+        elsif ( $text =~ /^\s*#/ ) {
+            $rec{kind} = 'comment';
+        }
+        elsif ( $text =~ /^\s*[A-Za-z_][A-Za-z0-9_]*\s*=/ ) {
+            $rec{kind} = 'env';
+        }
+        else {
+            my ( $sched, $cmd );
+            if ( $text =~ /^\s*(\@\w+)\s+(.*\S)\s*$/ ) {
+                ( $sched, $cmd ) = ( $1, $2 );
+            }
+            elsif ( $text =~ /^\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.*\S)\s*$/ ) {
+                ( $sched, $cmd ) = ( "$1 $2 $3 $4 $5", $6 );
+            }
+            if ( !defined $sched ) {
+                $rec{kind} = 'other';
+            }
+            else {
+                $rec{kind}     = 'entry';
+                $rec{schedule} = $sched;
+                $rec{command}  = $cmd;
+            }
+        }
+        if ( ( $rec{kind} // '' ) eq 'entry' ) {
+            $seen{ _cron_norm( $rec{schedule} . ' ' . $rec{command} ) }++;
+        }
+        push @recs, \%rec;
+    }
+    my @findings;
+    for my $rec (@recs) {
+        next unless ( $rec->{kind} // '' ) eq 'entry';
+        my $flags = _cron_flags( $rec, $home, $domains_ar );
+        for my $f ( @{$flags} ) {
+            push @findings,
+              { line => $rec->{id}, kind => $f->{kind}, text => $f->{text} };
+        }
+        $rec->{flags} = $flags;
+        $rec->{fixable} =
+          ( ( $rec->{kind} // '' ) eq 'entry'
+              && grep { $_->{kind} eq 'no_redirect' } @{$flags} ) ? 1 : 0;
+        if ( $seen{ _cron_norm( $rec->{schedule} . ' ' . $rec->{command} ) } > 1 ) {
+            my $dupe = {
+                kind => 'duplicate',
+                text => 'This line runs the same schedule and command as '
+                  . 'another line; one of them is probably left over.',
+            };
+            push @findings,
+              { line => $rec->{id}, kind => 'duplicate', text => $dupe->{text} };
+            push @{ $rec->{flags} }, $dupe;
+        }
+    }
+    return { lines => \@recs, findings => \@findings };
+}
+
+sub _cron_norm {
+    my ($s) = @_;
+    $s = '' unless defined $s;
+    $s =~ s/\s+/ /g;
+    $s =~ s/^ //;
+    $s =~ s/ $//;
+    return $s;
+}
+
+sub _cron_flags {
+    my ( $rec, $home, $domains_ar ) = @_;
+    # One advice record per problem on a schedule entry. No state, no
+    # writes; file checks use -e as the caller (symlinks followed for
+    # the existence question only, nothing is opened).
+    my @out;
+    my $sched = $rec->{schedule} // '';
+    my $cmd   = $rec->{command} // '';
+    my ($minute) = split / /, $sched, 2;
+    if ( defined $minute && ( $minute eq '*' || $minute eq '*/1' ) ) {
+        push @out,
+          {
+            kind => 'every_minute',
+            text => 'Runs every minute. Make sure the job finishes in '
+              . 'seconds; overlapping runs pile up and hit account limits.',
+          };
+    }
+    if ( $cmd !~ />/ && $cmd !~ /-O\s+\/dev\/null/ ) {
+        push @out,
+          {
+            kind => 'no_redirect',
+            text => 'Output is not redirected, so every run emails the '
+              . 'account. Silence it (the fix below) or point it at a log.',
+          };
+    }
+    my @toks = _cron_cmd_tokens($cmd);
+    my $first = @toks ? $toks[0] : '';
+    ( my $bare = $first ) =~ s/^['"]//;
+    $bare =~ s/['"]$//;
+    if ( $bare ne '' && $bare !~ m{/} && $bare =~ /^php[\d.]*$/ ) {
+        push @out,
+          {
+            kind => 'bare_php',
+            text => 'Calls php without a path; cron does not inherit '
+              . 'your shell PATH. Use the full binary path instead.',
+          };
+    }
+    my @missing = _cron_missing_scripts( $cmd, $home );
+    if (@missing) {
+        push @out,
+          {
+            kind => 'missing_script',
+            text => 'These script files do not exist: '
+              . join( ', ', @missing )
+              . '. The job fails every run until the path is fixed.',
+          };
+    }
+    if ( _cron_fetches_own_url( $cmd, $domains_ar ) ) {
+        push @out,
+          {
+            kind => 'own_url_fetch',
+            text => 'Fetches one of your own URLs over HTTP. Cron does '
+              . 'not need a web request: run the script with the PHP '
+              . 'binary instead.',
+          };
+    }
+    return \@out;
+}
+
+sub _cron_cmd_tokens {
+    my ($cmd) = @_;
+    # Whitespace tokens with surrounding quotes stripped; redirection
+    # targets stay attached to their operator token when joined by
+    # whitespace (handled by the caller looking at neighbours).
+    my @toks;
+    for my $t ( split /[ \t]+/, ( $cmd // '' ) ) {
+        next if $t eq '';
+        $t =~ s/^['"]//;
+        $t =~ s/['"]$//;
+        $t =~ s/;$//;
+        push @toks, $t if $t ne '';
+    }
+    return @toks;
+}
+
+sub _cron_missing_scripts {
+    my ( $cmd, $home ) = @_;
+    # Absolute script paths (or home-relative ones) that do not exist.
+    # Redirect targets and /dev/null are not scripts.
+    my @toks = _cron_cmd_tokens($cmd);
+    my @missing;
+    for my $i ( 0 .. $#toks ) {
+        my $t = $toks[$i];
+        next if $t =~ m{://};    # URLs are not files (own-url fetch covers those)
+        my $prev = $i > 0 ? $toks[ $i - 1 ] : '';
+        next if $prev =~ /^(>>?|<<?|2>>?|&|\|)$/;
+        next if $t eq '/dev/null';
+        my $abs = undef;
+        if ( index( $t, '/' ) == 0 ) {
+            $abs = $t;
+        }
+        elsif ( defined $home && $home ne '' && $t =~ m{/}
+            && $t =~ /\.(php|phar|sh|bash|pl|py|rb|js|cgi)$/ )
+        {
+            $abs = "$home/$t";
+        }
+        else {
+            next;
+        }
+        if ( $i == 0 || $abs =~ /\.(php|phar|sh|bash|pl|py|rb|js|cgi)$/ ) {
+            if ( !-e $abs ) {
+                push @missing, $t;
+            }
+        }
+    }
+    my %uniq;
+    return grep { !$uniq{$_}++ } @missing;
+}
+
+sub _cron_fetches_own_url {
+    my ( $cmd, $domains_ar ) = @_;
+    return 0 unless defined $cmd && $cmd ne '';
+    return 0 unless $cmd =~ /(?:^|[\s;|&\/])(?:curl|wget)(?=\s|$)/;
+    for my $d ( @{$domains_ar} ) {
+        next unless defined $d && $d ne '';
+        if ( index( lc($cmd), lc($d) ) >= 0 ) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+sub _cron_backup_dir {
+    my ($home) = @_;
+    return "$home/.cpanel/usertools/cron";
+}
+
+sub _cron_backup_write {
+    my ( $home, $content ) = @_;
+    # Full crontab backup before a fix (0600, newest 3 kept).
+    # Returns the basename or undef.
+    my $dir = _cron_backup_dir($home);
+    eval { make_path( $dir, { mode => 0700 } ) };
+    return undef if $@;
+    my $name = 'crontab-' . _journal_timestamp() . '.bak';
+    my $path = "$dir/$name";
+    open my $fh, '>', $path or return undef;
+    print $fh $content;
+    close $fh;
+    chmod 0600, $path;
+    if ( opendir( my $dh, $dir ) ) {
+        my @all = sort grep { /^crontab-.*\.bak$/ } readdir $dh;
+        closedir $dh;
+        while ( @all > 3 ) {
+            my $old = shift @all;
+            next if $old eq $name;
+            unlink "$dir/$old";
+        }
+    }
+    return $name;
+}
+
+sub _cron_backup_latest {
+    my ($home) = @_;
+    my $dir = _cron_backup_dir($home);
+    return undef unless opendir( my $dh, $dir );
+    my @all = sort grep { /^crontab-.*\.bak$/ } readdir $dh;
+    closedir $dh;
+    return @all ? "$dir/$all[-1]" : undef;
+}
+
+sub _cron_find_line {
+    my ( $lines_ar, $line_id ) = @_;
+    # The id names a physical line (L1..Ln); the caller also supplies
+    # the text it displayed, and the fix refuses when the live line
+    # differs (the crontab changed under the scan, e.g. wrapper-added
+    # environment lines shifting everything down).
+    return undef unless defined $line_id && $line_id =~ /^L(\d+)$/;
+    my $idx = $1 - 1;
+    return undef if $idx < 0 || $idx > $#{$lines_ar};
+    my $rec = $lines_ar->[$idx];
+    return undef unless ref $rec eq 'HASH' && $rec->{id} eq $line_id;
+    return $rec;
+}
+
+sub _cron_silenced {
+    my ($command) = @_;
+    return $command . ' >/dev/null 2>&1';
+}
+
+sub _cron_gate {
+    my ( $result, $user_r ) = @_;
+    return 0 unless _gate_tool( $result, $FEATURE_CRON_DOCTOR );
+    return 0 unless _cron_policy_enabled($result);
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return 0 unless defined $user;
+    $$user_r = { user => $user, uid => $uid, home => $home };
+    return 1;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   cron_scan - Flag risky cron lines (read-only).
+#-------------------------------------------------------------------------------------------------
+sub cron_scan {
+    my ( $args, $result ) = @_;
+
+    my $ctx;
+    return unless _cron_gate( $result, \$ctx );
+    my ( $content, $err ) = _cron_read();
+    if ( !defined $content ) {
+        $result->error( 'Cannot read crontab: [_1].', $err );
+        return;
+    }
+    my @domains = map { $_->{domain} } _user_domains( $ctx->{user} );
+    my $parsed = _cron_parse( $content, $ctx->{home}, \@domains );
+    $result->data(
+        {
+            present  => $content ne '' ? 1 : 0,
+            lines    => $parsed->{lines},
+            findings => $parsed->{findings},
+        }
+    );
+    return 1;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   cron_fix_preview - Show the silenced line before writing it.
+#-------------------------------------------------------------------------------------------------
+sub cron_fix_preview {
+    my ( $args, $result ) = @_;
+
+    my $ctx;
+    return unless _cron_gate( $result, \$ctx );
+    my ($line_id) = $args->get('line');
+    my ($text)   = $args->get('text');
+    my ( $plan, $err ) = _cron_fix_plan( $ctx, $line_id, $text );
+    if ( !defined $plan ) {
+        $result->error( 'Nothing to fix: [_1].', $err );
+        return;
+    }
+    $result->data($plan);
+    return 1;
+}
+
+sub _cron_fix_plan {
+    my ( $ctx, $line_id, $text ) = @_;
+    # The line must still read exactly as scanned; only unredirected
+    # schedule entries qualify.
+    my ( $content, $err ) = _cron_read();
+    if ( !defined $content ) {
+        return ( undef, "cannot read crontab: $err" );
+    }
+    my @domains = map { $_->{domain} } _user_domains( $ctx->{user} );
+    my $parsed = _cron_parse( $content, $ctx->{home}, \@domains );
+    my $rec = _cron_find_line( $parsed->{lines}, $line_id );
+    if ( !defined $rec ) {
+        return ( undef, 'unknown line' );
+    }
+    if ( ( $rec->{kind} // '' ) ne 'entry' ) {
+        return ( undef, 'only schedule entries can be silenced' );
+    }
+    if ( defined $text && $text ne '' && $text ne $rec->{raw} ) {
+        return ( undef, 'the crontab changed since the scan' );
+    }
+    if ( $rec->{command} =~ />/ ) {
+        return ( undef, 'output is already redirected' );
+    }
+    if ( length($content) + length(' >/dev/null 2>&1') > $CRON_MAX_BYTES ) {
+        return ( undef, 'crontab is too large' );
+    }
+    my $old = $rec->{raw};
+    my $new = $rec->{schedule} . ' ' . _cron_silenced( $rec->{command} );
+    return ( { line => $rec->{id}, old => $old, new => $new }, undef );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   cron_fix_output - Silence one line's output (backup kept, undo ready).
+#-------------------------------------------------------------------------------------------------
+sub cron_fix_output {
+    my ( $args, $result ) = @_;
+
+    my $ctx;
+    return unless _cron_gate( $result, \$ctx );
+    my ($line_id) = $args->get('line');
+    my ($text)   = $args->get('text');
+    my ( $plan, $err ) = _cron_fix_plan( $ctx, $line_id, $text );
+    if ( !defined $plan ) {
+        $result->error( 'Nothing to fix: [_1].', $err );
+        return;
+    }
+    my ( $content, $read_err ) = _cron_read();
+    if ( !defined $content ) {
+        $result->error( 'Cannot read crontab: [_1].', $read_err );
+        return;
+    }
+    my $backup = _cron_backup_write( $ctx->{home}, $content );
+    if ( !defined $backup ) {
+        $result->error('Could not back up the crontab; nothing was changed.');
+        return;
+    }
+    my @lines = split /(?<=\n)/, $content;
+    $lines[ $1 - 1 ] = $plan->{new} . "\n"
+      if $line_id =~ /^L(\d+)$/ && $1 - 1 <= $#lines;
+    my $new_content = join '', @lines;
+    if ( my $werr = _cron_write($new_content) ) {
+        $result->error( 'Could not write crontab: [_1].', $werr );
+        return;
+    }
+    _activity_log(
+        $ctx->{home}, 'cron_doctor', 'silence cron line',
+        { line => $line_id },
+        { fn => 'cron_undo', args => {} }
+    );
+    $result->data(
+        { line => $line_id, old => $plan->{old}, new => $plan->{new}, backup => $backup } );
+    return 1;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   cron_undo - Restore the newest backed-up crontab.
+#-------------------------------------------------------------------------------------------------
+sub cron_undo {
+    my ( $args, $result ) = @_;
+
+    my $ctx;
+    return unless _cron_gate( $result, \$ctx );
+    my $latest = _cron_backup_latest( $ctx->{home} );
+    if ( !defined $latest ) {
+        $result->error('No backup found: nothing to undo.');
+        return;
+    }
+    my $fh;
+    if ( !open $fh, '<', $latest ) {
+        $result->error('Could not read the backup.');
+        return;
+    }
+    local $/;
+    my $content = <$fh>;
+    close $fh;
+    if ( my $werr = _cron_write( $content // '' ) ) {
+        $result->error( 'Could not write crontab: [_1].', $werr );
+        return;
+    }
+    unlink $latest;
+    _activity_log( $ctx->{home}, 'cron_doctor', 'undo cron fix',
+        { backup => ( split m{/}, $latest )[-1] }, undef );
+    $result->data( { restored => 1 } );
     return 1;
 }
 
@@ -4376,6 +5034,8 @@ sub app_helper_add {
         $result->error('Unable to save the folder list.');
         return;
     }
+    _activity_log( $home, 'app_helper', 'add app',
+        { path => $rel }, { fn => 'app_helper_remove', args => { path => $rel } } );
     $result->data( { user => $user, path => $rel, added => scalar @{$added} } );
     return 1;
 }
@@ -4394,6 +5054,8 @@ sub app_helper_remove {
         $result->error('Unable to save the folder list.');
         return;
     }
+    _activity_log( $home, 'app_helper', 'remove app',
+        { path => $rel }, { fn => 'app_helper_add', args => { path => $rel } } );
     $result->data( { user => $user, removed => $path, added => scalar @kept } );
     return 1;
 }
@@ -4522,6 +5184,9 @@ sub app_helper_artisan {
             timed_out => $res->{timed_out} ? 1 : 0,
         }
     );
+    _activity_log( $home, 'app_helper', 'run artisan',
+        { app => $app_param, command => $command, exit => $res->{exit} + 0 },
+        undef );
     return 1;
 }
 
@@ -5038,6 +5703,10 @@ sub app_helper_set_docroot {
             new_docroot => $plan->{new_docroot},
         }
     );
+    _activity_log( $home, 'app_helper', 'set docroot',
+        { app => $app_param, domain => $plan->{domain} },
+        { fn => 'app_helper_undo_docroot',
+          args => { domain => $plan->{domain} } } );
     return 1;
 }
 
@@ -5088,6 +5757,8 @@ sub app_helper_undo_docroot {
     delete $changes->{$key};
     _write_docroot_journal( $home, $changes );
     $result->data( { user => $user, domain => $key, restored => $old } );
+    _activity_log( $home, 'app_helper', 'undo docroot',
+        { domain => $key }, undef );
     return 1;
 }
 
@@ -5886,6 +6557,9 @@ sub app_helper_htaccess_apply {
             $guard->{warning} ne '' && !$restored ? ( guard_warning => $guard->{warning} ) : (),
         }
     );
+    _activity_log( $home, 'app_helper', 'apply htaccess',
+        { app => $app_param },
+        { fn => 'app_helper_htaccess_undo', args => { app => $app_param } } );
     return 1;
 }
 
@@ -5917,6 +6591,8 @@ sub app_helper_htaccess_undo {
     }
     $result->data(
         { user => $user, app => $app_param, root => $root_restored, public => $pub_restored } );
+    _activity_log( $home, 'app_helper', 'undo htaccess',
+        { app => $app_param }, undef );
     return 1;
 }
 
@@ -6187,6 +6863,10 @@ sub app_helper_primary_set {
         return;
     }
     $result->data($admin);
+    _activity_log( $home, 'app_helper', 'set primary domain',
+        { app => $app_param, enable => $on },
+        { fn => 'app_helper_primary_set',
+          args => { app => $app_param, enable => $on ? 0 : 1 } } );
     return 1;
 }
 
@@ -7087,6 +7767,8 @@ sub app_helper_deploy_status {
         if ( !$final->{ok} ) {
             $hint = _deploy_lve_hint( $final, $log_tail );
         }
+        _activity_log_job_done( $home, 'app_helper', $job_id, undef,
+            ( $meta->{recipe} // 'deploy' ) . ' done' );
         $result->data(
             {
                 job_id => $job_id, state => $final->{ok} ? 'done' : 'failed',
@@ -7174,6 +7856,8 @@ sub app_helper_deploy_cancel {
         close $fh;
         chmod 0600, $job->{cancelled};
     }
+    _activity_log( $home, 'app_helper', 'cancel job',
+        { job_id => $job_id, recipe => $meta->{recipe} // '' }, undef );
     $result->data( { job_id => $job_id, cancelled => 1 } );
     return 1;
 }
@@ -7296,6 +7980,8 @@ sub app_helper_maintenance {
             $result->error( 'Maintenance change failed: [_1].', $run->{error} );
             return;
         }
+        _activity_log( $home, 'app_helper', 'maintenance up',
+            { app => $app_param }, undef );
         $result->data( { user => $user, app => $app_param, action => 'up', %{$run} } );
         return 1;
     }
@@ -7311,6 +7997,8 @@ sub app_helper_maintenance {
     }
     my @mapped = _mapped_domains( $user, $approot );
     my $domain = @mapped ? $mapped[0]{domain} : undef;
+    _activity_log( $home, 'app_helper', 'maintenance down',
+        { app => $app_param }, undef );
     $result->data(
         {
             user => $user, app => $app_param, action => 'down', %{$run},
@@ -7495,6 +8183,8 @@ sub app_helper_log_clear {
         return;
     }
     close $fh;
+    _activity_log( $home, 'app_helper', 'clear log',
+        { app => $app_param, name => $name }, undef );
     $result->data( { user => $user, app => $app_param, name => $name, cleared => 1 } );
     return 1;
 }
@@ -7882,6 +8572,9 @@ sub app_helper_cron_add {
     my $journal = _read_cron_journal($home);
     $journal->{$rel} = { marker => $marker, command => $command, added => time() };
     _write_cron_journal( $home, $journal );
+    _activity_log( $home, 'app_helper', 'scheduler add',
+        { app => $app_param },
+        { fn => 'app_helper_cron_remove', args => { app => $app_param } } );
     $result->data( { user => $user, app => $app_param, present => 1, added => 1, command => $command } );
     return 1;
 }
@@ -7939,6 +8632,9 @@ sub app_helper_cron_remove {
     }
     delete $journal->{$rel};
     _write_cron_journal( $home, $journal );
+    _activity_log( $home, 'app_helper', 'scheduler remove',
+        { app => $app_param },
+        { fn => 'app_helper_cron_add', args => { app => $app_param } } );
     $result->data( { user => $user, app => $app_param, present => 0, removed => 1 } );
     return 1;
 }
@@ -8342,6 +9038,9 @@ sub app_helper_production_apply {
     my $clear = _artisan_fixed( $user, $home, $approot, ['config:clear'] );
     my $cache = _artisan_fixed( $user, $home, $approot, ['config:cache'] );
     my $flags = _readiness_flags( $user, $home, $uid, $approot );
+    _activity_log( $home, 'app_helper', 'apply production env',
+        { app => $app_param },
+        { fn => 'app_helper_production_undo', args => { app => $app_param } } );
     $result->data(
         {
             user => $user, app => $app_param, backup => $bak,
@@ -8397,6 +9096,8 @@ sub app_helper_production_undo {
             config_clear => { ok => $clear->{ok} ? 1 : 0 },
         }
     );
+    _activity_log( $home, 'app_helper', 'undo production env',
+        { app => $app_param }, undef );
     return 1;
 }
 
@@ -8434,6 +9135,8 @@ sub app_helper_key_generate {
     my $after = _read_dotenv_pairs("$approot/.env");
     my $set = ( defined $after && defined $after->{APP_KEY} && $after->{APP_KEY} ne '' ) ? 1 : 0;
     $result->data( { user => $user, app => $app_param, key_set => $set } );
+    _activity_log( $home, 'app_helper', 'generate app key',
+        { app => $app_param, key_set => $set }, undef );
     return 1;
 }
 

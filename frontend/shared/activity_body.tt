@@ -1,0 +1,108 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    Shared My Activity page body. Included once by each theme adapter.
+    Flow: list the latest 100 recorded changes (newest first) with an
+    Undo button wherever the action stored one. Undo runs the undo of
+    that same tool with its stored arguments; the undo itself is
+    recorded too, so the list always ends with the newest state. %]
+<div class="ut-wrap">
+  <p class="ut-lead">[% locale.maketext('Every change made by any tool, newest first, with Undo where one exists. Undo runs the undo of that same tool, and the undo is recorded here as well.') %]</p>
+  <details class="ut-learn">
+    <summary>[% locale.maketext('Learn more') %]</summary>
+    <p>[% locale.maketext('Fixes, cleanups, quarantines, blocks, scheduler and shell changes are all listed here. Entries that cannot be undone (emptied trash, cleared logs) say so: those actions are final.') %]</p>
+  </details>
+  <div class="ut-banner warn" id="ut-banner" role="status" aria-live="polite">[% locale.maketext('Loading your recent changes.') %]</div>
+  <div class="ut-lists" id="ut-lists" aria-live="polite"></div>
+[% PROCESS 'shared/footer.tt' -%]
+</div>
+<script>
+var UT_STR = {
+    noneFound: "[% locale.maketext('No changes recorded yet.') %]",
+    failed: "[% locale.maketext('Could not load the list. Please try again.') %]",
+    undo: "[% locale.maketext('Undo') %]",
+    noUndo: "[% locale.maketext('Final (cannot be undone)') %]",
+    undone: "[% locale.maketext('Undone.') %]",
+    undoFailed: "[% locale.maketext('Undo failed: ') %]",
+    refreshed: "[% locale.maketext('List refreshed.') %]"
+};
+</script>
+<script>
+"use strict";
+window.addEventListener("DOMContentLoaded", function () {
+    if (!window.UserTools) {
+        document.getElementById("ut-banner").textContent = "UserTools failed to load.";
+        return;
+    }
+    var TOOLS = {
+        fix_home: "Fix Home", bulk_perms: "Bulk Permissions", shell: "Shell",
+        space_cleaner: "Space Cleaner", site_doctor: "Site Doctor",
+        exposed_files: "Exposed Files", app_helper: "App Helper",
+        cron_doctor: "Cron Doctor"
+    };
+    var bannerEl = document.getElementById("ut-banner");
+    var listsEl = document.getElementById("ut-lists");
+
+    function setBanner(kind, text) {
+        bannerEl.className = "ut-banner " + kind;
+        bannerEl.textContent = text;
+    }
+    function escTool(t) {
+        return UserTools.escHtml(TOOLS[t] || t || "?");
+    }
+    function escSummary(s) {
+        s = s || {};
+        var bits = [];
+        Object.keys(s).forEach(function (k) {
+            if (k === "job_id" || k === "trash_batch" || k === "batch") { return; }
+            bits.push(k + ": " + s[k]);
+        });
+        return UserTools.escHtml(bits.join(", "));
+    }
+    function refresh() {
+        UserTools.callApi("activity_list", {}, "GET").then(function (data) {
+            renderResult(data || {});
+        }).catch(function (err) {
+            setBanner("err", UT_STR.failed + " " + err.message);
+        });
+    }
+    function renderResult(data) {
+        var entries = data.entries || [];
+        if (!entries.length) {
+            setBanner("ok", UT_STR.noneFound);
+            listsEl.innerHTML = "";
+            return;
+        }
+        setBanner("ok", UT_STR.refreshed);
+        var html = '<table class="ut-table"><thead><tr><th>When</th><th>Tool</th><th>What</th><th></th></tr></thead><tbody>';
+        entries.forEach(function (e, i) {
+            html += "<tr><td>" + UserTools.escHtml(e.time || "?") + "</td><td>" +
+                escTool(e.tool) + "<br><span class=\"ut-path\">" +
+                UserTools.escHtml(e.action || "") + "</span><br><span class=\"ut-path\">" +
+                escSummary(e.summary) + "</span></td><td>";
+            if (e.undo && e.undo.fn) {
+                html += '<button class="ut-btn small secondary" type="button" data-undo="' + i + '">' +
+                    UserTools.escHtml(UT_STR.undo) + "</button>";
+            } else {
+                html += UserTools.escHtml(UT_STR.noUndo);
+            }
+            html += "</td></tr>";
+        });
+        listsEl.innerHTML = html + "</tbody></table>";
+        Array.prototype.forEach.call(listsEl.querySelectorAll("[data-undo]"), function (btn) {
+            btn.addEventListener("click", function () {
+                var e = entries[Number(btn.getAttribute("data-undo"))];
+                if (!e || !e.undo || !e.undo.fn) { return; }
+                btn.disabled = true;
+                UserTools.callApi(e.undo.fn, e.undo.args || {}, "POST").then(function () {
+                    setBanner("ok", UT_STR.undone);
+                    refresh();
+                }).catch(function (err) {
+                    btn.disabled = false;
+                    setBanner("err", UT_STR.undoFailed + err.message);
+                });
+            });
+        });
+    }
+    refresh();
+});
+</script>

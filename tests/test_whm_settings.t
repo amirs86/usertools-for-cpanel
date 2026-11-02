@@ -48,6 +48,7 @@ sub write_pair {
             cleaner_trash_days => '7',
             enable_site_doctor => '0',
             enable_exposed_files => '0',
+            enable_cron_doctor => '0',
             allow_user_app_docroot => '0', app_packages => 'webapp, p1',
             max_job_seconds => '3600', enable_update_check => '0',
             update_repo => '', normal_shell_users => 'alice,bob',
@@ -76,6 +77,7 @@ sub write_pair {
         cleaner_trash_days => '7',
         enable_site_doctor => '0',
         enable_exposed_files => '0',
+            enable_cron_doctor => '0',
         allow_user_app_docroot => '0', app_packages => '',
         max_job_seconds => '3600', enable_update_check => '0',
         update_repo => '', normal_shell_users => '',
@@ -139,6 +141,7 @@ sub write_pair {
             cleaner_trash_days => '7',
             enable_site_doctor => '0',
             enable_exposed_files => '0',
+            enable_cron_doctor => '0',
             allow_user_app_docroot => '0', app_packages => 'reseller_gold',
             max_job_seconds => '3600', enable_update_check => '0',
             update_repo => '', normal_shell_users => '',
@@ -179,6 +182,7 @@ sub write_pair {
             cleaner_trash_days => '7',
             enable_site_doctor => '0',
             enable_exposed_files => '0',
+            enable_cron_doctor => '0',
             allow_user_app_docroot => '1', app_packages => 'webapp',
             max_job_seconds => '7200', enable_update_check => '1',
             update_repo => 'someone/usertools-for-cpanel', normal_shell_users => 'alice',
@@ -396,6 +400,7 @@ sub write_pair {
                 cleaner_trash_days => '7',
                 enable_site_doctor => '0',
                 enable_exposed_files => '0',
+            enable_cron_doctor => '0',
                 allow_user_app_docroot => '0', app_packages => '',
                 max_job_seconds => '3600', enable_update_check => '0',
                 update_repo => '', normal_shell_users => '', ssh_port => '2222',
@@ -429,8 +434,11 @@ sub write_pair {
     like( $out, qr/name="cleaner_trash_days"[^>]*value="7"/, 'trash days field rendered' );
     like( $out, qr/name="enable_site_doctor"/, 'doctor switch field rendered' );
     like( $out, qr/name="enable_exposed_files"/, 'exposed switch field rendered' );
+    like( $out, qr/name="enable_cron_doctor"/, 'cron switch field rendered' );
     like( $out, qr/usertools_site_doctor/, 'doctor feature listed' );
     like( $out, qr/usertools_exposed_files/, 'exposed feature listed' );
+    like( $out, qr/usertools_cron_doctor/, 'cron feature listed' );
+    like( $out, qr/usertools_activity/, 'activity feature listed' );
     like( $out, qr/usertools_space_cleaner/, 'space feature listed' );
     like( $out, qr/<form method="post" action="">/, 'forms post relatively (token stays in path)' );
     unlike( $out, qr/<form[^>]*action="https?:/, 'no absolute form targets' );
@@ -601,6 +609,7 @@ sub write_pair {
         cleaner_trash_days => '7',
         enable_site_doctor => '0',
         enable_exposed_files => '0',
+            enable_cron_doctor => '0',
         allow_user_app_docroot => '0', app_packages => '',
         max_job_seconds => '3600', enable_update_check => '0',
         update_repo => '', normal_shell_users => '',
@@ -785,8 +794,8 @@ sub write_pair {
         local *Cpanel::Template::process_template = sub { push @FakeU::CALLS, [@_]; return 1; };
         @FakeU::CALLS = ();
         local $ENV{REQUEST_METHOD} = 'POST';
-        local $ENV{CONTENT_LENGTH} = length('action=save&enable_shell=1&allowed_shell_modes=disabled%2Cjailed&enable_fix_home=1&enable_bulk_perms=1&enable_ownership_report=1&enable_app_helper=1&enable_space_cleaner=0&cleaner_log_min_mb=50&cleaner_trash_days=7&enable_site_doctor=0&enable_exposed_files=0&allow_user_app_docroot=0&app_packages=&max_job_seconds=3600&enable_update_check=0&update_repo=&auto_update=1&auto_update_scope=patch&composer_path=&composer_lift_disable_functions=0');
-        open my $in, '<', \'action=save&enable_shell=1&allowed_shell_modes=disabled%2Cjailed&enable_fix_home=1&enable_bulk_perms=1&enable_ownership_report=1&enable_app_helper=1&enable_space_cleaner=0&cleaner_log_min_mb=50&cleaner_trash_days=7&enable_site_doctor=0&enable_exposed_files=0&allow_user_app_docroot=0&app_packages=&max_job_seconds=3600&enable_update_check=0&update_repo=&auto_update=1&auto_update_scope=patch&composer_path=&composer_lift_disable_functions=0' or die $!;
+        local $ENV{CONTENT_LENGTH} = length('action=save&enable_shell=1&allowed_shell_modes=disabled%2Cjailed&enable_fix_home=1&enable_bulk_perms=1&enable_ownership_report=1&enable_app_helper=1&enable_space_cleaner=0&cleaner_log_min_mb=50&cleaner_trash_days=7&enable_site_doctor=0&enable_exposed_files=0&enable_cron_doctor=0&allow_user_app_docroot=0&app_packages=&max_job_seconds=3600&enable_update_check=0&update_repo=&auto_update=1&auto_update_scope=patch&composer_path=&composer_lift_disable_functions=0');
+        open my $in, '<', \'action=save&enable_shell=1&allowed_shell_modes=disabled%2Cjailed&enable_fix_home=1&enable_bulk_perms=1&enable_ownership_report=1&enable_app_helper=1&enable_space_cleaner=0&cleaner_log_min_mb=50&cleaner_trash_days=7&enable_site_doctor=0&enable_exposed_files=0&enable_cron_doctor=0&allow_user_app_docroot=0&app_packages=&max_job_seconds=3600&enable_update_check=0&update_repo=&auto_update=1&auto_update_scope=patch&composer_path=&composer_lift_disable_functions=0' or die $!;
         local *STDIN = $in;
         my $out = '';
         open my $cap, '>', \$out or die $!;

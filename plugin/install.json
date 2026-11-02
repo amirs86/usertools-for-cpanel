@@ -102,5 +102,31 @@
         "featuremanager": 1,
         "feature": "usertools_exposed_files",
         "description": "Find files that must never be public (backups, dumps, config copies) and move or block them."
+    },
+    {
+        "icon": "cron_doctor.svg",
+        "group_id": "security",
+        "order": 8,
+        "name": "Cron Doctor",
+        "type": "link",
+        "id": "usertools_cron_doctor_page",
+        "key": "usertools_cron_doctor",
+        "uri": "user_tools/cron_doctor.html.tt",
+        "featuremanager": 1,
+        "feature": "usertools_cron_doctor",
+        "description": "Check your cron jobs for risky schedules and silence noisy output, with backup and undo."
+    },
+    {
+        "icon": "activity.svg",
+        "group_id": "security",
+        "order": 9,
+        "name": "My Activity",
+        "type": "link",
+        "id": "usertools_activity_page",
+        "key": "usertools_activity",
+        "uri": "user_tools/activity.html.tt",
+        "featuremanager": 1,
+        "feature": "usertools_activity",
+        "description": "Every change made by any tool, newest first, with Undo where one exists."
     }
 ]

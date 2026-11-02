@@ -41,10 +41,10 @@ my $stub_dir = "$FindBin::Bin/tt_stubs";
 my $stage    = "$root/build/stage/user_tools";
 
 make_path("$stage/shared");
-for my $f (qw(fix_home_permissions.html.tt bulk_permissions.html.tt ownership_report.html.tt manage_shell.html.tt app_helper.html.tt space_cleaner.html.tt site_doctor.html.tt exposed_files.html.tt)) {
+for my $f (qw(fix_home_permissions.html.tt bulk_permissions.html.tt ownership_report.html.tt manage_shell.html.tt app_helper.html.tt space_cleaner.html.tt site_doctor.html.tt exposed_files.html.tt cron_doctor.html.tt activity.html.tt)) {
     copy( "$page_dir/$f", "$stage/$f" ) or die "copy $f: $!\n";
 }
-for my $f (qw(fix_home_body.tt bulk_permissions_body.tt ownership_report_body.tt manage_shell_body.tt app_helper_body.tt space_cleaner_body.tt site_doctor_body.tt exposed_files_body.tt footer.tt)) {
+for my $f (qw(fix_home_body.tt bulk_permissions_body.tt ownership_report_body.tt manage_shell_body.tt app_helper_body.tt space_cleaner_body.tt site_doctor_body.tt exposed_files_body.tt cron_doctor_body.tt activity_body.tt footer.tt)) {
     copy( "$shared/$f", "$stage/shared/$f" ) or die "copy $f: $!\n";
 }
 
@@ -95,6 +95,16 @@ my %pages = (
         'exposed_scan_start', 'Move to quarantine', 'data-block',
         'exposed (confirmed)', 'exposed (likely)',
         'use Move to quarantine instead',
+    ],
+    'cron_doctor.html.tt' => [
+        '<title>Cron Doctor</title>', 'ut-scan', 'ut-lists', 'ut-dialog',
+        'UT_STR', 'as86.pro', 'Learn more', 'cron_scan',
+        'Silence output', 'Undo last fix',
+    ],
+    'activity.html.tt' => [
+        '<title>My Activity</title>', 'ut-lists',
+        'UT_STR', 'as86.pro', 'Learn more', 'activity_list',
+        'cannot be undone', 'data-undo',
     ],
 );
 

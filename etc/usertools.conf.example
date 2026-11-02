@@ -23,6 +23,10 @@ enable_site_doctor=0                    ; 0 = Site Doctor off even when
                                         ; the feature is ticked (default off)
 enable_exposed_files=0                  ; 0 = Exposed Files off even when
                                         ; the feature is ticked (default off)
+enable_cron_doctor=0                    ; 0 = Cron Doctor off even when
+                                        ; the feature is ticked (default off)
+                                        ; (My Activity has no switch: it
+                                        ; lists whatever the enabled tools do)
 allow_user_app_docroot=0               ; 1 lets users point their MAIN domain
                                        ; at public_html/public themselves
                                        ; (Admin SET_APP_DOCROOT); default off

@@ -245,6 +245,8 @@ frontend/jupiter/user_tools/app_helper.html.tt|/usr/local/cpanel/base/frontend/j
 frontend/jupiter/user_tools/space_cleaner.html.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/space_cleaner.html.tt|0644
 frontend/jupiter/user_tools/site_doctor.html.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/site_doctor.html.tt|0644
 frontend/jupiter/user_tools/exposed_files.html.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/exposed_files.html.tt|0644
+frontend/jupiter/user_tools/cron_doctor.html.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/cron_doctor.html.tt|0644
+frontend/jupiter/user_tools/activity.html.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/activity.html.tt|0644
 frontend/shared/fix_home_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/fix_home_body.tt|0644
 frontend/shared/bulk_permissions_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/bulk_permissions_body.tt|0644
 frontend/shared/ownership_report_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/ownership_report_body.tt|0644
@@ -253,6 +255,8 @@ frontend/shared/app_helper_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_
 frontend/shared/space_cleaner_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/space_cleaner_body.tt|0644
 frontend/shared/site_doctor_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/site_doctor_body.tt|0644
 frontend/shared/exposed_files_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/exposed_files_body.tt|0644
+frontend/shared/cron_doctor_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/cron_doctor_body.tt|0644
+frontend/shared/activity_body.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/activity_body.tt|0644
 frontend/shared/footer.tt|/usr/local/cpanel/base/frontend/jupiter/user_tools/shared/footer.tt|0644
 frontend/jupiter/user_tools/assets/usertools.css|/usr/local/cpanel/base/frontend/jupiter/user_tools/assets/usertools.css|0644
 frontend/jupiter/user_tools/assets/usertools.min.css|/usr/local/cpanel/base/frontend/jupiter/user_tools/assets/usertools.min.css|0644
@@ -545,6 +549,7 @@ usertools-install: to enable the tools for feature list '$list':
   3. Tick: usertools_shell usertools_fix_home usertools_bulk_perms
      usertools_ownership_report usertools_app_helper usertools_space_cleaner
      usertools_site_doctor usertools_exposed_files
+     usertools_cron_doctor usertools_activity
   4. Save. (Features stay off by default until you do this.)
 EOF
 }
@@ -593,7 +598,7 @@ verify_table() { # : prints PASS/MISSING per installed path + version
 whats_next() { # : the post-install box
     cat <<'EOF'
 usertools-install: What's next
-  1. WHM >> Packages >> Feature Manager: tick the 8 usertools_* features
+  1. WHM >> Packages >> Feature Manager: tick the 10 usertools_* features
      for the packages that get the tools (off by default), or run:
      ./install.sh --enable-features=LIST
   2. WHM >> Plugins >> UserTools Settings: policy, app packages, updates.

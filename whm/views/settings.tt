@@ -68,6 +68,11 @@
 <option value="1"[% IF settings.enable_exposed_files == '1' %] selected[% END %]>On</option>
 <option value="0"[% IF settings.enable_exposed_files != '1' %] selected[% END %]>Off</option>
 </select></td></tr>
+<tr><td><label for="f_cron">Cron Doctor enabled</label></td>
+<td><select id="f_cron" name="enable_cron_doctor" class="form-control">
+<option value="1"[% IF settings.enable_cron_doctor == '1' %] selected[% END %]>On</option>
+<option value="0"[% IF settings.enable_cron_doctor != '1' %] selected[% END %]>Off</option>
+</select></td></tr>
 <tr><td><label for="f_docroot">Users may switch their main domain to public_html/public</label></td>
 <td><select id="f_docroot" name="allow_user_app_docroot" class="form-control">
 <option value="1"[% IF settings.allow_user_app_docroot == '1' %] selected[% END %]>On</option>
@@ -135,7 +140,7 @@ paths=[% composer.path | html %]</pre>
 <label>Feature: <input name="feature" class="form-control" size="30"></label>
 <button type="submit" class="btn btn-primary">Show steps</button></p>
 </form>
-<p>Tool features: usertools_shell, usertools_fix_home, usertools_bulk_perms, usertools_ownership_report, usertools_app_helper, usertools_space_cleaner, usertools_site_doctor, usertools_exposed_files.</p>
+<p>Tool features: usertools_shell, usertools_fix_home, usertools_bulk_perms, usertools_ownership_report, usertools_app_helper, usertools_space_cleaner, usertools_site_doctor, usertools_exposed_files, usertools_cron_doctor, usertools_activity.</p>
 <h2>Updates</h2>
 [% IF cosign && cosign.found %]
 <p>Release verification: <strong>cosign found</strong> (<code>[% cosign.path | html %]</code>).</p>

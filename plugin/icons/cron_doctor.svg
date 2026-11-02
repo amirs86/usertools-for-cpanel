@@ -1,0 +1,10 @@
+<!-- Copyright 2026 Amir Sibaee (https://as86.pro)
+     SPDX-License-Identifier: Apache-2.0
+     Original icon for Cron Doctor: a clock face with a check mark.
+     48x48 as required for Jupiter feature icons. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <rect x="2" y="2" width="44" height="44" rx="8" fill="#e8f0fe"/>
+  <circle cx="24" cy="25" r="13" fill="#ffffff" stroke="#1a73e8" stroke-width="2"/>
+  <path d="M24 18 L24 25 L29 28" fill="none" stroke="#1a73e8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M33 35 L37 39 L43 31" fill="none" stroke="#34a853" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

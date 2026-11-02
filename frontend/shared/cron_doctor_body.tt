@@ -1,0 +1,205 @@
+[%# Copyright 2026 Amir Sibaee (https://as86.pro)
+    SPDX-License-Identifier: Apache-2.0
+    Shared Cron Doctor page body. Included once by each theme adapter.
+    Flow: Scan (read-only) lists every crontab line with flags, Fix
+    (output redirection only) behind a confirm dialog showing the diff
+    with backup, progress none (synchronous), Undo restores the newest
+    backup. A stored scan is not needed: every fix re-reads the live
+    crontab and refuses when the line changed. %]
+<div class="ut-wrap">
+  <p class="ut-lead">[% locale.maketext('Check your cron jobs: schedules that run too often, output nobody reads, missing scripts and fetches of your own pages. Only silencing a line changes anything, with backup and undo.') %]</p>
+  <details class="ut-learn">
+    <summary>[% locale.maketext('Learn more') %]</summary>
+    <p>[% locale.maketext('Every line of your crontab is shown with plain-words flags. The only fix on this page appends output redirection to a line you pick (cron emails you for every line without one). The whole crontab is backed up first; Undo restores the newest backup. Everything else is advice: edit the crontab yourself for those.') %]</p>
+  </details>
+  <div class="ut-banner warn" id="ut-banner" role="status" aria-live="polite">[% locale.maketext('Run a scan to check your cron jobs.') %]</div>
+  <div class="ut-controls">
+    <button class="ut-btn" id="ut-scan" type="button">[% locale.maketext('Scan') %]</button>
+  </div>
+  <div class="ut-lists" id="ut-lists" aria-live="polite"></div>
+  <dialog class="ut-dialog" id="ut-dialog" aria-labelledby="ut-dialog-title">
+    <h2 id="ut-dialog-title"></h2>
+    <p id="ut-dialog-body"></p>
+    <pre class="ut-out" id="ut-dialog-diff" hidden></pre>
+    <div class="ut-dialog-actions">
+      <button class="ut-btn" id="ut-dialog-apply" type="button"></button>
+      <button class="ut-btn secondary" id="ut-dialog-cancel" type="button">[% locale.maketext('Cancel') %]</button>
+    </div>
+  </dialog>
+[% PROCESS 'shared/footer.tt' -%]
+</div>
+<script>
+var UT_STR = {
+    scanning: "[% locale.maketext('Reading your crontab.') %]",
+    noneFound: "[% locale.maketext('No cron lines found.') %]",
+    foundOne: "[% locale.maketext('1 cron line needs a look:') %]",
+    foundMany: "[% locale.maketext('COUNT cron lines need a look:') %]",
+    failed: "[% locale.maketext('The scan failed. Please try again.') %]",
+    startFailed: "[% locale.maketext('Could not start: ') %]",
+    fix: "[% locale.maketext('Silence output') %]",
+    fixing: "[% locale.maketext('Fixing.') %]",
+    fixTitle: "[% locale.maketext('Confirm fix') %]",
+    fixBody: "[% locale.maketext('This appends output redirection to the line, so quiet runs stop emailing you. The whole crontab is backed up first.') %]",
+    fixApply: "[% locale.maketext('Silence now') %]",
+    fixed: "[% locale.maketext('Fixed. Use Undo below to put the old crontab back.') %]",
+    fixFailed: "[% locale.maketext('Fix failed: ') %]",
+    undo: "[% locale.maketext('Undo last fix') %]",
+    undoDone: "[% locale.maketext('Undone: the backed-up crontab is back.') %]",
+    undoFailed: "[% locale.maketext('Undo failed: ') %]",
+    noFix: "[% locale.maketext('Advice only') %]",
+    changed: "[% locale.maketext('Changed since the scan; scan again.') %]"
+};
+</script>
+<script>
+"use strict";
+window.addEventListener("DOMContentLoaded", function () {
+    if (!window.UserTools) {
+        document.getElementById("ut-banner").textContent = "UserTools failed to load.";
+        return;
+    }
+    var bannerEl = document.getElementById("ut-banner");
+    var scanBtn = document.getElementById("ut-scan");
+    var listsEl = document.getElementById("ut-lists");
+    var dlg = document.getElementById("ut-dialog");
+    var dlgTitle = document.getElementById("ut-dialog-title");
+    var dlgBody = document.getElementById("ut-dialog-body");
+    var dlgDiff = document.getElementById("ut-dialog-diff");
+    var dlgApply = document.getElementById("ut-dialog-apply");
+    var dlgCancel = document.getElementById("ut-dialog-cancel");
+    var lastApply = null;
+    var lastFocus = null;
+    var pendingFix = null;
+
+    function setBanner(kind, text) {
+        bannerEl.className = "ut-banner " + kind;
+        bannerEl.textContent = text;
+    }
+    function setBusy(busy) { scanBtn.disabled = busy; }
+    function openDialog(title, body, diff, applyLabel, onApply) {
+        lastFocus = document.activeElement;
+        dlgTitle.textContent = title;
+        dlgBody.textContent = body;
+        if (diff) { dlgDiff.textContent = diff; dlgDiff.hidden = false; }
+        else { dlgDiff.textContent = ""; dlgDiff.hidden = true; }
+        dlgApply.textContent = applyLabel;
+        lastApply = onApply;
+        if (dlg.showModal) { dlg.showModal(); } else { dlg.setAttribute("open", ""); }
+        dlgCancel.focus();
+    }
+    function closeDialog() {
+        if (dlg.close) { dlg.close(); } else { dlg.removeAttribute("open"); }
+        lastApply = null;
+        if (lastFocus && lastFocus.focus) { lastFocus.focus(); }
+    }
+    dlgApply.addEventListener("click", function () {
+        var fn = lastApply;
+        closeDialog();
+        if (fn) { fn(); }
+    });
+    dlgCancel.addEventListener("click", closeDialog);
+
+    function startJob() {
+        setBusy(true);
+        UserTools.callApi("cron_scan", {}, "GET").then(function (data) {
+            setBusy(false);
+            renderResult(data || {});
+        }).catch(function (err) {
+            setBusy(false);
+            setBanner("err", UT_STR.startFailed + err.message);
+        });
+    }
+    function flagList(flags) {
+        return (flags || []).map(function (f) {
+            return "<li>" + UserTools.escHtml(f.text || f.kind || f) + "</li>";
+        }).join("");
+    }
+    function renderResult(data) {
+        var lines = data.lines || [];
+        var findings = data.findings || [];
+        if (!data.present) {
+            setBanner("ok", UT_STR.noneFound);
+            listsEl.innerHTML = "";
+            return;
+        }
+        var bad = 0;
+        var html = '<table class="ut-table"><thead><tr><th>Line</th><th>Schedule</th><th>Command</th><th>Flags</th><th></th></tr></thead><tbody>';
+        lines.forEach(function (ln) {
+            if (ln.kind !== "entry") { return; }
+            var nflag = (ln.flags || []).length;
+            if (nflag) { bad++; }
+            html += "<tr><td>" + UserTools.escHtml(ln.id || "?") + "</td><td>" +
+                UserTools.escHtml(ln.schedule || "") + "</td><td>" +
+                UserTools.escHtml(ln.command || "") + "</td><td>" +
+                (nflag ? "<ul>" + flagList(ln.flags) + "</ul>" : UserTools.escHtml(UT_STR.noFix)) +
+                "</td><td>";
+            if (ln.fixable) {
+                html += '<button class="ut-btn small" type="button" data-fix="' +
+                    UserTools.escHtml(ln.id) + '" data-text="' +
+                    UserTools.escHtml(ln.raw || "") + '">' +
+                    UserTools.escHtml(UT_STR.fix) + "</button>";
+            } else if (nflag) {
+                html += UserTools.escHtml(UT_STR.noFix);
+            }
+            html += "</td></tr>";
+        });
+        listsEl.innerHTML = html + "</tbody></table>" +
+            '<div class="ut-controls"><button class="ut-btn secondary" type="button" id="ut-undo">' +
+            UserTools.escHtml(UT_STR.undo) + "</button></div>";
+        if (!bad) {
+            setBanner("ok", UT_STR.noneFound);
+        } else {
+            setBanner("warn", UserTools.plural(bad, UT_STR.foundOne, UT_STR.foundMany));
+        }
+        Array.prototype.forEach.call(listsEl.querySelectorAll("[data-fix]"), function (btn) {
+            btn.addEventListener("click", function () {
+                previewFix(btn.getAttribute("data-fix"), btn.getAttribute("data-text"));
+            });
+        });
+        var undoBtn = document.getElementById("ut-undo");
+        if (undoBtn) {
+            undoBtn.addEventListener("click", function () {
+                setBusy(true);
+                UserTools.callApi("cron_undo", {}, "POST").then(function () {
+                    setBusy(false);
+                    setBanner("ok", UT_STR.undoDone);
+                    startJob();
+                }).catch(function (err) {
+                    setBusy(false);
+                    setBanner("err", UT_STR.undoFailed + err.message);
+                });
+            });
+        }
+    }
+    function previewFix(line, text) {
+        setBanner("warn", UT_STR.fixing);
+        UserTools.callApi("cron_fix_preview", { line: line, text: text }, "GET").then(function (data) {
+            if (!data.new) {
+                setBanner("err", UT_STR.fixFailed + UT_STR.changed);
+                return;
+            }
+            pendingFix = { line: line, text: text };
+            openDialog(UT_STR.fixTitle, UT_STR.fixBody,
+                "- " + (data.old || "") + "\n+ " + (data.new || ""),
+                UT_STR.fixApply, applyFix);
+        }).catch(function (err) {
+            setBanner("err", UT_STR.fixFailed + err.message);
+        });
+    }
+    function applyFix() {
+        if (!pendingFix) { return; }
+        var fix = pendingFix;
+        pendingFix = null;
+        UserTools.callApi("cron_fix_output", { line: fix.line, text: fix.text }, "POST").then(function () {
+            setBanner("ok", UT_STR.fixed);
+            startJob();
+        }).catch(function (err) {
+            setBanner("err", UT_STR.fixFailed + err.message);
+        });
+    }
+    scanBtn.addEventListener("click", function () {
+        listsEl.innerHTML = "";
+        startJob();
+    });
+    startJob();
+});
+</script>

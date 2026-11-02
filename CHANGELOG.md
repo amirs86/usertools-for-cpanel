@@ -24,6 +24,18 @@ All notable changes to this project are documented here. Versions follow
   cannot be quoted safely are never written to `.htaccess` (Move only).
   Off by default: `enable_exposed_files=0` policy key, WHM checkbox,
   and its own Feature Manager feature.
+- Cron Doctor: read-only flags over the user's own crontab (every-minute
+  schedules, unredirected output, bare `php` without a path, duplicate
+  lines, missing script files, `wget`/`curl` of the account's own URLs),
+  with one fix in this release (append output redirection to a chosen
+  line, full crontab backed up) and an undo that restores the newest
+  backup. Off by default: `enable_cron_doctor=0` policy key, WHM
+  checkbox, and its own Feature Manager feature.
+- My Activity: every UAPI action that changes something appends one JSON
+  line to `~/.cpanel/usertools/activity.jsonl` (0600, capped at 1,000
+  lines): time, tool, action, summary counts and an undo reference when
+  one exists. The page lists the latest 100 with Undo buttons that call
+  the tool's existing undo. No file contents, no secrets in the log.
 
 - Space Cleaner: preview and reclaim disk space and inodes across six
   fixed categories (big `error_log` and per-website PHP logs truncated

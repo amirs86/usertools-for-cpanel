@@ -1365,6 +1365,13 @@ sub site_wait_done {
     $ok  = Cpanel::API::UserTools::doctor_htaccess_fix(
         FakeArgs->new( job_id => 'doctor-1', domain => 'primary.test' ), $res );
     ok( $ok, 'fix applied' );
+    my $alog = Cpanel::API::UserTools::_activity_list( $home, 100 );
+    is( scalar(@{$alog}), 1, 'fix logged' );
+    is( $alog->[0]{tool}, 'site_doctor', 'tool recorded' );
+    is( $alog->[0]{undo}{fn}, 'doctor_htaccess_undo', 'fix carries its undo' );
+    is_deeply( $alog->[0]{undo}{args},
+        { job_id => 'doctor-1', domain => 'primary.test' },
+        'undo args recorded' );
     my $after = do { open my $rfh, '<', "$home/public_html/.htaccess" or die $!; local $/; <$rfh> };
     like( $after, qr/# BEGIN UserTools Site Doctor/, 'marked block added' );
     like( $after, qr/# php_value upload_max_filesize 64M/, 'line commented' );
@@ -1498,6 +1505,9 @@ sub site_wait_done {
     like( $ht, qr/Require all denied/, 'deny rule present' );
     ok( index( $ht, '<If "%{REQUEST_FILENAME} == \'' . "$home/public_html/backup.sql" . '\'">' ) >= 0,
         'file rule matches the mapped filename, not the URL' );
+    my $alog = Cpanel::API::UserTools::_activity_list( $home, 100 );
+    is( scalar(@{$alog}), 1, 'block logged' );
+    is( $alog->[0]{undo}{fn}, 'exposed_unblock', 'block carries its undo' );
     $res = FakeResult->new();
     $ok  = Cpanel::API::UserTools::exposed_unblock(
         FakeArgs->new( job_id => 'exposed-1', finding => 'f1' ), $res );
@@ -1750,6 +1760,354 @@ sub stop_probe_server {
     is( $res->{data}{restored}, 1, 'one file restored' );
     ok( -f "$home/public_html/backup.sql", 'file really back' );
     stop_probe_server($pid);
+}
+
+# --- Cron Doctor + My Activity --------------------------------------------------------------
+for my $fn (
+    qw(cron_scan cron_fix_preview cron_fix_output cron_undo) )
+{
+    is( $Cpanel::API::UserTools::API{$fn}{needs_feature}, 'usertools_cron_doctor',
+        "%API declares needs_feature for $fn" );
+}
+is( $Cpanel::API::UserTools::API{activity_list}{needs_feature}, 'usertools_activity',
+    '%API declares needs_feature for activity_list' );
+
+sub cron_policy_file {
+    my ($home) = @_;
+    open my $fh, '>', "$home/cron-policy.conf" or die $!;
+    print $fh "enable_cron_doctor=1\n";
+    close $fh;
+    return "$home/cron-policy.conf";
+}
+
+{
+    # Parser flags: one table, no I/O beyond the fixture home.
+    my $home = make_home();
+    make_path("$home/scripts");
+    open my $fh, '>', "$home/scripts/nightly.sh" or die $!;
+    print $fh "#!/bin/sh\n";
+    close $fh;
+    open my $gh, '>', "$home/scripts/hourly.php" or die $!;
+    print $gh "<?php\n";
+    close $gh;
+    my $content = join( '',
+        "MAILTO=ops\@example.com\n",
+        "# owner comment\n",
+        "\n",
+        "* * * * * /bin/sh $home/scripts/nightly.sh\n",
+        "*/5 * * * * php $home/scripts/hourly.php\n",
+        "0 6 * * * echo hi >> /tmp/t.log\n",
+        "30 3 * * * /usr/bin/php $home/scripts/missing.php\n",
+        "0 7 * * * /usr/bin/wget -q https://primary.test/cron.php -O /dev/null\n",
+        "0 7 * * * /usr/bin/wget -q https://primary.test/cron.php -O /dev/null\n",
+    );
+    my $parsed = Cpanel::API::UserTools::_cron_parse(
+        $content, $home, ['primary.test'] );
+    my @lines = @{ $parsed->{lines} };
+    is( scalar(@lines), 9, 'one record per physical line' );
+    is( $lines[0]{kind}, 'env',     'mailto is env' );
+    is( $lines[1]{kind}, 'comment', 'comment kind' );
+    is( $lines[2]{kind}, 'blank',   'blank kind' );
+    is( $lines[3]{id},   'L4',      'ids count physical lines' );
+    my %by_id = map { $_->{id} => $_ } @lines;
+    my $kinds = sub { map { $_->{kind} } @{ $_[0] } };
+    ok( ( grep { $_ eq 'every_minute' } $kinds->( $by_id{L4}{flags} ) ),
+        'every-minute flagged' );
+    ok( ( grep { $_ eq 'no_redirect' } $kinds->( $by_id{L4}{flags} ) ),
+        'unredirected flagged' );
+    ok( $by_id{L4}{fixable}, 'unredirected line is fixable' );
+    ok( ( grep { $_ eq 'bare_php' } $kinds->( $by_id{L5}{flags} ) ),
+        'bare php flagged' );
+    is( scalar( grep { $_->{kind} eq 'no_redirect' } @{ $by_id{L6}{flags} } ),
+        0, 'redirected line is quiet' );
+    ok( ( grep { $_ eq 'missing_script' } $kinds->( $by_id{L7}{flags} ) ),
+        'missing script flagged' );
+    ok( !( grep { $_ eq 'missing_script' } $kinds->( $by_id{L4}{flags} ) ),
+        'existing script not flagged' );
+    ok( ( grep { $_ eq 'own_url_fetch' } $kinds->( $by_id{L8}{flags} ) ),
+        'own-url fetch flagged' );
+    ok( !( grep { $_ eq 'missing_script' } $kinds->( $by_id{L8}{flags} ) ),
+        'the fetched URL is not mistaken for a script' );
+    ok( !( grep { $_ eq 'no_redirect' } $kinds->( $by_id{L8}{flags} ) ),
+        '-O /dev/null counts as redirected' );
+    ok( ( grep { $_ eq 'duplicate' } $kinds->( $by_id{L8}{flags} ) ),
+        'duplicate flagged on both copies' );
+    ok( ( grep { $_ eq 'duplicate' } $kinds->( $by_id{L9}{flags} ) ),
+        'duplicate flagged on both copies (second)' );
+    my @dup = grep { $_->{kind} eq 'duplicate' } @{ $parsed->{findings} };
+    is( scalar(@dup), 2, 'two duplicate findings' );
+    my $foreign = Cpanel::API::UserTools::_cron_parse(
+        "0 7 * * * /usr/bin/wget -q https://other.test/x\n",
+        $home, ['primary.test'] );
+    ok( !( grep { $_->{kind} eq 'own_url_fetch' }
+            @{ $foreign->{lines}[0]{flags} } ),
+        'foreign url not flagged' );
+    my $logged = Cpanel::API::UserTools::_cron_parse(
+        "0 7 * * * /usr/bin/wget -q https://primary.test/x -O /tmp/x.out\n",
+        $home, ['primary.test'] );
+    ok( ( grep { $_->{kind} eq 'no_redirect' }
+            @{ $logged->{lines}[0]{flags} } ),
+        'output to a file still counts as unredirected' );
+    ok( !Cpanel::API::UserTools::_cron_parse( '', $home, [] )->{lines}[0],
+        'empty crontab parses to nothing' );
+}
+
+{
+    # Feature + policy gates for Cron Doctor; activity needs no policy key.
+    my $home = site_make_home();
+    my $pconf = cron_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = "$home/empty-policy.conf";
+    open my $efh, '>', "$home/empty-policy.conf" or die $!;
+    print $efh "enable_cron_doctor=0\n";
+    close $efh;
+    local $HAVE_FEATURE = 0;
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::cron_scan( FakeArgs->new(), $res );
+    ok( !$ok, 'cron scan refused without the feature' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::activity_list( FakeArgs->new(), $res );
+    ok( !$ok, 'activity refused without the feature' );
+    local $HAVE_FEATURE = 1;
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::cron_scan( FakeArgs->new(), $res );
+    ok( !$ok, 'cron scan refused when the policy switch is off' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::activity_list( FakeArgs->new(), $res );
+    ok( $ok, 'activity works without any policy switch' );
+}
+
+{
+    # cron_scan end to end, then preview, fix, changed-text refusal, undo.
+    my $home = site_make_home();
+    my $pconf = cron_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    make_path("$home/scripts");
+    open my $sf, '>', "$home/scripts/nightly.php" or die $!;
+    print $sf "<?php\n";
+    close $sf;
+    my $bin = write_fake_crontab($home);
+    local $Cpanel::API::UserTools::TEST_CRONTAB = $bin;
+    local $ENV{CRONTAB_FILE} = "$home/crontab.txt";
+    local $ENV{DUMP_CRONTAB_ARGS} = "$home/crontab-argv.txt";
+    my $seed = join( '',
+        "MAILTO=ops\@example.com\n",
+        "* * * * * /usr/bin/php $home/scripts/nightly.php\n",
+        "*/5 * * * * echo hi >/dev/null 2>&1\n",
+    );
+    open my $cf, '>', "$home/crontab.txt" or die $!;
+    print $cf $seed;
+    close $cf;
+    no warnings 'redefine';
+    local *Cpanel::API::execute = sub { return { status => 0 }; };
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::cron_scan( FakeArgs->new(), $res );
+    ok( $ok, 'cron scan accepted' );
+    is( $res->{data}{present}, 1, 'crontab present' );
+    my @entries = grep { $_->{kind} eq 'entry' } @{ $res->{data}{lines} };
+    is( scalar(@entries), 2, 'two schedule entries' );
+    my ($noisy) = grep { $_->{id} eq 'L2' } @{ $res->{data}{lines} };
+    ok( $noisy->{fixable}, 'unredirected line is fixable' );
+    ok( ( grep { $_->{kind} eq 'every_minute' } @{ $noisy->{flags} } ),
+        'every-minute flagged live' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::cron_fix_preview(
+        FakeArgs->new( line => 'L2', text => $noisy->{raw} ), $res );
+    ok( $ok, 'preview accepted' );
+    like( $res->{data}{new}, qr{>/dev/null 2>&1$}, 'preview appends redirect' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::cron_fix_output(
+        FakeArgs->new( line => 'L2', text => 'stale text' ), $res );
+    ok( !$ok, 'fix refuses when the line changed' );
+    like( $res->{errors}[0][1], qr/changed/, 'refusal says why' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::cron_fix_output(
+        FakeArgs->new( line => 'L2', text => $noisy->{raw} ), $res );
+    ok( $ok, 'fix applied' );
+    ok( defined $res->{data}{backup}, 'backup recorded' );
+    my $new_text = $res->{data}{new};
+    my $after = do { open my $rfh, '<', "$home/crontab.txt" or die $!; local $/; <$rfh> };
+    like( $after, qr{\Q$home/scripts/nightly.php\E >/dev/null 2>&1},
+        'line silenced in place' );
+    like( $after, qr/^MAILTO=ops[@]example\.com$/m, 'other lines untouched' );
+    is( ( split /\n/, $after ), 3, 'no lines added or lost' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::cron_fix_output(
+        FakeArgs->new( line => 'L2', text => $new_text ), $res );
+    ok( !$ok, 'second fix refused (already redirected)' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::cron_undo( FakeArgs->new(), $res );
+    ok( $ok, 'undo accepted' );
+    my $back = do { open my $rfh, '<', "$home/crontab.txt" or die $!; local $/; <$rfh> };
+    is( $back, $seed, 'original crontab back byte-for-byte' );
+    my $alog = Cpanel::API::UserTools::_activity_list( $home, 100 );
+    is( scalar(@{$alog}), 2, 'fix and undo both logged' );
+    is( $alog->[0]{tool}, 'cron_doctor', 'undo logged newest-first' );
+    is( $alog->[0]{action}, 'undo cron fix', 'undo action recorded' );
+    is( $alog->[1]{action}, 'silence cron line', 'fix action recorded' );
+    is( $alog->[1]{undo}{fn}, 'cron_undo', 'fix carries its undo' );
+    my @baks = glob "$home/.cpanel/usertools/cron/crontab-*.bak";
+    is( scalar(@baks), 0, 'used backup consumed' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::cron_undo( FakeArgs->new(), $res );
+    ok( !$ok, 'undo with no backup refused' );
+}
+
+{
+    # Backup rotation keeps the newest three.
+    my $home = make_home();
+    my $dir  = "$home/.cpanel/usertools/cron";
+    for my $i ( 1 .. 4 ) {
+        my $name = Cpanel::API::UserTools::_cron_backup_write( $home, "v$i\n" );
+        ok( defined $name, "backup $i written" );
+        sleep 1;
+    }
+    my @baks = sort glob "$dir/crontab-*.bak";
+    is( scalar(@baks), 3, 'only three backups kept' );
+    my $latest = Cpanel::API::UserTools::_cron_backup_latest($home);
+    is( $latest, $baks[-1], 'latest backup found' );
+}
+
+{
+    # Activity log: newest first, undo refs, 0600, cap at 1000, latest 100.
+    my $home = make_home();
+    for my $i ( 1 .. 1005 ) {
+        Cpanel::API::UserTools::_activity_log(
+            $home, 'cron_doctor', "action $i", { n => $i },
+            $i % 2 ? { fn => 'cron_undo', args => {} } : undef );
+    }
+    my $file = "$home/.cpanel/usertools/activity.jsonl";
+    open my $fh, '<', $file or die $!;
+    my @raw = <$fh>;
+    close $fh;
+    is( scalar(@raw), 1000, 'log capped at 1000 lines' );
+    my @st = stat $file;
+    is( $st[2] & 07777, 0600, 'activity log is 0600' );
+    my $entries = Cpanel::API::UserTools::_activity_list( $home, 100 );
+    is( scalar(@{$entries}), 100, 'latest 100 listed' );
+    is( $entries->[0]{summary}{n}, 1005, 'newest first' );
+    is( $entries->[-1]{summary}{n}, 906, 'window slides' );
+    is( $entries->[0]{undo}{fn}, 'cron_undo', 'undo ref kept' );
+    ok( !defined $entries->[1]{undo}, 'missing undo stays missing' );
+    is( $entries->[0]{tool}, 'cron_doctor', 'tool recorded' );
+    ok( defined $entries->[0]{time}, 'timestamp recorded' );
+}
+
+{
+    # Completed bulk job logs once with an undo ref; cancelled jobs do not.
+    my $home = make_home();
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = site_policy_file($home);
+    my $dir = "$home/.cpanel/usertools/jobs";
+    make_path($dir);
+    my $meta = { id => 'bulk-test-done1', pid => $$, tool => 'bulk', scope => $home };
+    open my $mf, '>', "$dir/bulk-test-done1.job.json" or die $!;
+    print $mf JSON::PP->new()->encode($meta);
+    close $mf;
+    my $summary = { counts => { changed => 3, scanned => 10 }, dry_run => 0 };
+    open my $rf, '>', "$dir/bulk-test-done1.result.json" or die $!;
+    print $rf JSON::PP->new()->encode($summary);
+    close $rf;
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::bulk_permissions_status(
+        FakeArgs->new( job_id => 'bulk-test-done1' ), $res );
+    ok( $ok, 'status accepted' );
+    my $entries = Cpanel::API::UserTools::_activity_list( $home, 100 );
+    is( scalar(@{$entries}), 1, 'one activity entry for the finished job' );
+    is( $entries->[0]{tool}, 'bulk_perms', 'tool recorded' );
+    is( $entries->[0]{undo}{fn}, 'bulk_permissions_undo', 'undo ref attached' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::bulk_permissions_status(
+        FakeArgs->new( job_id => 'bulk-test-done1' ), $res );
+    $entries = Cpanel::API::UserTools::_activity_list( $home, 100 );
+    is( scalar(@{$entries}), 1, 'second poll does not log again' );
+    # A cancelled job (sidecar present) logs nothing from status.
+    open my $cf, '>', "$dir/bulk-test-done1.cancelled" or die $!;
+    print $cf time(), "\n";
+    close $cf;
+    unlink "$dir/bulk-test-done1.activity_logged";
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::bulk_permissions_status(
+        FakeArgs->new( job_id => 'bulk-test-done1' ), $res );
+    is( $res->{data}{state}, 'cancelled', 'cancelled state reported' );
+    $entries = Cpanel::API::UserTools::_activity_list( $home, 100 );
+    is( scalar(@{$entries}), 1, 'cancelled status adds no entry' );
+}
+
+{
+    # Space clean done logs with a restore undo; dry runs do not log.
+    my $home = make_home();
+    open my $pfh, '>', "$home/space-policy.conf" or die $!;
+    print $pfh "enable_space_cleaner=1\n";
+    close $pfh;
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = "$home/space-policy.conf";
+    my $dir = "$home/.cpanel/usertools/jobs";
+    make_path($dir);
+    for my $job (
+        [ 'space-clean-done', 0, '20200101T000000' ],
+        [ 'space-scan-dry', 1, undef ],
+      )
+    {
+        my ( $id, $dry, $batch ) = @{$job};
+        my $meta =
+          { id => $id, pid => $$, tool => 'space-clean', scope => $home,
+            dry_run => $dry };
+        open my $mf, '>', "$dir/$id.job.json" or die $!;
+        print $mf JSON::PP->new()->encode($meta);
+        close $mf;
+        my $summary = { counts => { changed => 2 } };
+        $summary->{trash_batch} = $batch if defined $batch;
+        open my $rf, '>', "$dir/$id.result.json" or die $!;
+        print $rf JSON::PP->new()->encode($summary);
+        close $rf;
+    }
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::space_clean_status(
+        FakeArgs->new( job_id => 'space-clean-done' ), $res );
+    ok( $ok, 'status accepted' );
+    my $entries = Cpanel::API::UserTools::_activity_list( $home, 100 );
+    is( scalar(@{$entries}), 1, 'clean run logged' );
+    is( $entries->[0]{undo}{fn}, 'space_trash_restore', 'restore undo attached' );
+    is( $entries->[0]{undo}{args}{batch}, '20200101T000000', 'batch carried' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::space_clean_status(
+        FakeArgs->new( job_id => 'space-scan-dry' ), $res );
+    ok( $ok, 'dry status accepted' );
+    $entries = Cpanel::API::UserTools::_activity_list( $home, 100 );
+    is( scalar(@{$entries}), 1, 'dry run logs nothing' );
+}
+
+{
+    # Cancel of a live bulk job logs one entry.
+    my $home = make_home();
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = site_policy_file($home);
+    my $sleep = fork();
+    die "fork failed: $!" unless defined $sleep;
+    if ( $sleep == 0 ) {
+        exec 'sleep', '120';
+        POSIX::_exit(1);
+    }
+    my $dir = "$home/.cpanel/usertools/jobs";
+    make_path($dir);
+    open my $mf, '>', "$dir/bulk-test-live9.job.json" or die $!;
+    print $mf JSON::PP->new()->encode(
+        { id => 'bulk-test-live9', pid => $sleep + 0, tool => 'bulk' } );
+    close $mf;
+    # The engine lock must be held: cancel refuses when the engine looks idle.
+    make_path("$home/.cpanel/usertools");
+    open my $lfh, '>>', "$home/.cpanel/usertools/perm_engine.lock"
+      or die "lock open failed: $!";
+    flock( $lfh, LOCK_EX ) or die "flock failed: $!";
+    no warnings 'redefine';
+    local *Cpanel::API::UserTools::_proc_is_engine = sub {1};
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::bulk_permissions_cancel(
+        FakeArgs->new( job_id => 'bulk-test-live9' ), $res );
+    ok( $ok && $res->{data}{cancelled}, 'cancel accepted' );
+    my $entries = Cpanel::API::UserTools::_activity_list( $home, 100 );
+    is( scalar(@{$entries}), 1, 'cancel logged' );
+    is( $entries->[0]{action}, 'cancel job', 'cancel action recorded' );
+    close $lfh;
+    kill( 'KILL', $sleep );
+    waitpid( $sleep, 0 );
 }
 
 # --- CSV rules (Perl mirror of the usertools.js builders) -------------------------------

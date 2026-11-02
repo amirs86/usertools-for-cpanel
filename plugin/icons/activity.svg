@@ -1,0 +1,9 @@
+<!-- Copyright 2026 Amir Sibaee (https://as86.pro)
+     SPDX-License-Identifier: Apache-2.0
+     Original icon for My Activity: a list with a curved undo arrow.
+     48x48 as required for Jupiter feature icons. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <rect x="2" y="2" width="44" height="44" rx="8" fill="#e8f0fe"/>
+  <path d="M14 14 L28 14 M14 22 L28 22 M14 30 L24 30" stroke="#1a73e8" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M30 32 C30 28 33 27 36 27 M36 27 L33 24 M36 27 L33 30" fill="none" stroke="#34a853" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
