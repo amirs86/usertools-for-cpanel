@@ -86,8 +86,8 @@ my %pages = (
     ],
     'site_doctor.html.tt' => [
         '<title>Site Doctor</title>', 'ut-verdicts', 'ut-scan',
-        'data-fix', 'UT_STR', 'as86.pro', 'Learn more', 'ut-dialog',
-        'doctor_scan_start', 'comments out',
+        'data-fix', 'data-xmlrpc-fix', 'UT_STR', 'as86.pro', 'Learn more', 'ut-dialog',
+        'doctor_scan_start', 'comments out', 'xmlrpc',
     ],
     'exposed_files.html.tt' => [
         '<title>Exposed Files</title>', 'ut-scan', 'ut-trash-list',

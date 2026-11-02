@@ -1205,6 +1205,7 @@ sub space_wait_done {
 for my $fn (
     qw(doctor_scan_start doctor_scan_status doctor_scan_cancel
     doctor_htaccess_preview doctor_htaccess_fix doctor_htaccess_undo
+    doctor_xmlrpc_preview doctor_xmlrpc_fix doctor_xmlrpc_undo
     exposed_scan_start exposed_scan_status exposed_scan_cancel
     exposed_move exposed_restore exposed_quarantine_list
     exposed_block exposed_unblock)
@@ -1306,6 +1307,57 @@ sub site_make_home {
           htaccess => { present => 1, php_value_lines => [2] }, ssl => { ok => 1, days_left => 400 } }, { fpm => 0 } );
     ok( ( grep { /php_value/ } @{ $v->{lines} } ), 'php_value still reported without FPM' );
     ok( !( grep { /PHP-FPM rejects/ } @{ $v->{lines} } ), 'no FPM wording without FPM' );
+}
+
+{
+    # xmlrpc verdicts: served, Jetpack, not served, not checked, non-WP.
+    my $base = {
+        domain   => 'wp.test',
+        http     => { status => 200, ms => 4 },
+        docroot  => { usable => 1, index => 'index.php', mode => '0755', expected_mode => '0755', owner_ok => 1 },
+        htaccess => { present => 0 },
+        ssl      => { ok => 1, days_left => 300 },
+        logs     => {},
+    };
+    my $v = Cpanel::API::UserTools::_doctor_verdicts(
+        { %{$base},
+          xmlrpc => { wp => 1, jetpack => 0,
+                      probe => { status => 200, exposed => 1 },
+                      state => 'exposed', reason => undef } },
+        {} );
+    is( $v->{attention}, 1, 'served xmlrpc needs attention' );
+    ok( ( grep { /xmlrpc\.php is served.*block it/ } @{ $v->{lines} } ),
+        'served xmlrpc verdict offers the block' );
+    $v = Cpanel::API::UserTools::_doctor_verdicts(
+        { %{$base},
+          xmlrpc => { wp => 1, jetpack => 1,
+                      probe => { status => 200, exposed => 1 },
+                      state => 'exposed', reason => undef } },
+        {} );
+    is( $v->{attention}, 0, 'served xmlrpc with Jetpack needs no attention' );
+    ok( ( grep { /Jetpack.*not offered/ } @{ $v->{lines} } ),
+        'Jetpack explains why the fix is withheld' );
+    $v = Cpanel::API::UserTools::_doctor_verdicts(
+        { %{$base},
+          xmlrpc => { wp => 1, jetpack => 0,
+                      probe => { status => 404, exposed => 0 },
+                      state => 'not_exposed', reason => undef } },
+        {} );
+    is( $v->{attention}, 0, 'unserved xmlrpc needs no attention' );
+    ok( ( grep { /xmlrpc\.php is not served \(HTTP 404\)/ } @{ $v->{lines} } ),
+        'not-served xmlrpc verdict rendered' );
+    $v = Cpanel::API::UserTools::_doctor_verdicts(
+        { %{$base},
+          xmlrpc => { wp => 1, jetpack => 0,
+                      probe => { status => 301, location => 'https://x/',
+                                 exposed => 0, error => 'https follow failed: boom' },
+                      state => 'not_checked', reason => 'redirects to https://x/ (https follow failed: boom)' } },
+        {} );
+    is( $v->{attention}, 1, 'unchecked xmlrpc needs attention' );
+    ok( ( grep { /xmlrpc\.php could not be checked/ } @{ $v->{lines} } ),
+        'not-checked xmlrpc verdict rendered' );
+    $v = Cpanel::API::UserTools::_doctor_verdicts( { %{$base} }, {} );
+    ok( !( grep { /xmlrpc/ } @{ $v->{lines} } ), 'non-WordPress has no xmlrpc lines' );
 }
 
 {
@@ -1534,6 +1586,228 @@ sub site_wait_done {
     is( $rec->{attention}, 1, 'attention set' );
     is( $rec->{docroot}{expected_mode}, '0755',
         'expected mode default without fileprotect' );
+}
+
+{
+    # xmlrpc gates: feature + policy, like the htaccess fix.
+    my $home = site_make_home();
+    my $pconf = site_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    local $HAVE_FEATURE = 0;
+    for my $fn (qw(doctor_xmlrpc_preview doctor_xmlrpc_fix doctor_xmlrpc_undo)) {
+        my $res = FakeResult->new();
+        my $ok  = Cpanel::API::UserTools->can($fn)->( FakeArgs->new(), $res );
+        ok( !$ok, "$fn refused without the feature" );
+        is( $res->{errors}[0][0], '_ERROR_FEATURE', "$fn reports the feature error" );
+    }
+    open my $fh, '>', "$home/policy-off.conf" or die $!;
+    print $fh "enable_site_doctor=0\n";
+    close $fh;
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = "$home/policy-off.conf";
+    local $HAVE_FEATURE = 1;
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::doctor_xmlrpc_preview(
+        FakeArgs->new( job_id => 'doctor-1', domain => 'primary.test' ), $res );
+    ok( !$ok, 'xmlrpc preview refused when the policy switch is off' );
+}
+
+{
+    # Doctor xmlrpc fix: preview diff, apply deny block, undo restores the
+    # exact original bytes; Jetpack / non-WP / unserved are refused.
+    my $home = site_make_home();
+    my $pconf = site_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    local $Cpanel::API::UserTools::TEST_EXPOSED_PROBE = { status => 403, exposed => 0 };
+    my $udir = "$home/userdata";
+    make_path("$udir/testuser");
+    local $Cpanel::API::UserTools::TEST_DOMAIN_DATA_DIR = $udir;
+    open my $duf, '>', "$udir/testuser/primary.test" or die $!;
+    print $duf "---\ndocumentroot: $home/public_html\nip: 127.0.0.1\nport: 9\n";
+    close $duf;
+    open my $xf, '>', "$home/public_html/xmlrpc.php" or die $!;
+    print $xf "<?php // xmlrpc\n";
+    close $xf;
+    open my $wf, '>', "$home/public_html/wp-config.php" or die $!;
+    print $wf "<?php // config\n";
+    close $wf;
+    open my $hf, '>', "$home/public_html/.htaccess" or die $!;
+    print $hf "RewriteEngine On\n";
+    close $hf;
+    my $xrec = { wp => 1, jetpack => 0,
+                 probe => { status => 200, exposed => 1 },
+                 state => 'exposed', reason => undef };
+    my $job = {
+        counts  => {},
+        domains => [ { domain => 'primary.test', xmlrpc => $xrec } ],
+    };
+    make_path("$home/.cpanel/usertools/jobs");
+    open my $jf, '>', "$home/.cpanel/usertools/jobs/doctor-2.result.json" or die $!;
+    print $jf JSON::PP->new()->encode($job);
+    close $jf;
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::doctor_xmlrpc_preview(
+        FakeArgs->new( job_id => 'doctor-2', domain => 'primary.test' ), $res );
+    ok( $ok, 'xmlrpc preview accepted' );
+    like( $res->{data}{diff}, qr/BEGIN UserTools Site Doctor XML-RPC/,
+        'preview diff adds the xmlrpc block' );
+    like( $res->{data}{diff}, qr/Require all denied/, 'preview diff denies' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_xmlrpc_fix(
+        FakeArgs->new( job_id => 'doctor-2', domain => 'primary.test' ), $res );
+    ok( $ok, 'xmlrpc fix applied' );
+    is( $res->{data}{reprobed}{status}, 403, 'canned re-probe reported' );
+    my $alog = Cpanel::API::UserTools::_activity_list( $home, 100 );
+    is( scalar(@{$alog}), 1, 'fix logged' );
+    is( $alog->[0]{tool}, 'site_doctor', 'tool recorded' );
+    is( $alog->[0]{action}, 'fix xmlrpc', 'action recorded' );
+    is( $alog->[0]{undo}{fn}, 'doctor_xmlrpc_undo', 'fix carries its undo' );
+    is( $alog->[0]{undo}{args}{domain}, 'primary.test', 'undo names the domain' );
+    like( $alog->[0]{undo}{args}{backup} // '',
+        qr/^\.htaccess\.usertools-bak-/, 'undo names the backup' );
+    my $after = do { open my $rfh, '<', "$home/public_html/.htaccess" or die $!; local $/; <$rfh> };
+    like( $after, qr/# BEGIN UserTools Site Doctor XML-RPC/, 'marked block added' );
+    like( $after, qr{\Q<If "%{REQUEST_FILENAME} == '$home/public_html/xmlrpc.php'">\E},
+        'rule matches the mapped filename' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_xmlrpc_fix(
+        FakeArgs->new( job_id => 'doctor-2', domain => 'primary.test' ), $res );
+    ok( !$ok, 'second apply refused (already blocked)' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_xmlrpc_undo(
+        FakeArgs->new( job_id => 'doctor-2', domain => 'primary.test' ), $res );
+    ok( $ok, 'undo accepted' );
+    is( $res->{data}{restored}, 1, 'undo restored the file' );
+    my $back = do { open my $rfh, '<', "$home/public_html/.htaccess" or die $!; local $/; <$rfh> };
+    is( $back, "RewriteEngine On\n", 'original bytes back' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_xmlrpc_undo(
+        FakeArgs->new( job_id => 'doctor-2', domain => 'primary.test' ), $res );
+    ok( !$ok, 'used undo refused' );
+    is( $res->{errors}[0][0], 'already undone', 'used reads as undone' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_xmlrpc_fix(
+        FakeArgs->new( job_id => 'doctor-2', domain => 'nosuch.test' ), $res );
+    ok( !$ok, 'fix for a foreign domain refused' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_xmlrpc_preview(
+        FakeArgs->new( job_id => 'doctor-nope', domain => 'primary.test' ), $res );
+    ok( !$ok, 'preview without a scan refused' );
+}
+
+{
+    # Jetpack, non-WordPress and unserved xmlrpc are all refused with
+    # the reason spelled out.
+    my $home = site_make_home();
+    my $pconf = site_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    my $udir = "$home/userdata";
+    make_path("$udir/testuser");
+    local $Cpanel::API::UserTools::TEST_DOMAIN_DATA_DIR = $udir;
+    open my $duf, '>', "$udir/testuser/primary.test" or die $!;
+    print $duf "---\ndocumentroot: $home/public_html\nip: 127.0.0.1\nport: 9\n";
+    close $duf;
+    open my $xf, '>', "$home/public_html/xmlrpc.php" or die $!;
+    print $xf "<?php // xmlrpc\n";
+    close $xf;
+    make_path("$home/.cpanel/usertools/jobs");
+    my $mkjob = sub {
+        my ( $id, $xrec ) = @_;
+        open my $jf, '>', "$home/.cpanel/usertools/jobs/$id.result.json" or die $!;
+        print $jf JSON::PP->new()->encode(
+            { counts => {}, domains => [ { domain => 'primary.test', xmlrpc => $xrec } ] } );
+        close $jf;
+    };
+    $mkjob->( 'doctor-jp',
+        { wp => 1, jetpack => 1, probe => { status => 200, exposed => 1 },
+          state => 'exposed', reason => undef } );
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::doctor_xmlrpc_preview(
+        FakeArgs->new( job_id => 'doctor-jp', domain => 'primary.test' ), $res );
+    ok( !$ok, 'Jetpack preview refused' );
+    like( $res->{errors}[0][1], qr/Jetpack/, 'refusal names Jetpack' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_xmlrpc_fix(
+        FakeArgs->new( job_id => 'doctor-jp', domain => 'primary.test' ), $res );
+    ok( !$ok, 'Jetpack fix refused' );
+    $mkjob->( 'doctor-plain', { wp => 0, jetpack => 0 } );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_xmlrpc_preview(
+        FakeArgs->new( job_id => 'doctor-plain', domain => 'primary.test' ), $res );
+    ok( !$ok, 'non-WordPress preview refused' );
+    like( $res->{errors}[0][1], qr/WordPress/, 'refusal says why' );
+    $mkjob->( 'doctor-cold',
+        { wp => 1, jetpack => 0, probe => { status => 404, exposed => 0 },
+          state => 'not_exposed', reason => undef } );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_xmlrpc_preview(
+        FakeArgs->new( job_id => 'doctor-cold', domain => 'primary.test' ), $res );
+    ok( !$ok, 'unserved xmlrpc preview refused' );
+    like( $res->{errors}[0][1], qr/not served/, 'refusal says why' );
+}
+
+{
+    # doctor_scan_status annotates fix_xmlrpc only when the block is
+    # offered: served, WordPress, no Jetpack.
+    my $home = site_make_home();
+    my $pconf = site_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    my $udir = "$home/userdata";
+    make_path("$udir/testuser");
+    local $Cpanel::API::UserTools::TEST_DOMAIN_DATA_DIR = $udir;
+    open my $duf, '>', "$udir/testuser/primary.test" or die $!;
+    print $duf "---\ndocumentroot: $home/public_html\nip: 127.0.0.1\nport: 9\n";
+    close $duf;
+    no warnings 'redefine';
+    local *Cpanel::API::execute = sub { return { status => 0 }; };
+    my $jobs = "$home/.cpanel/usertools/jobs";
+    make_path($jobs);
+    open my $mf, '>', "$jobs/doctor-x.job.json" or die $!;
+    print $mf JSON::PP->new()->encode( { id => 'doctor-x', pid => $$ } );
+    close $mf;
+    my $mkrec = sub {
+        my ($xr) = @_;
+        return { domain  => 'primary.test',
+                 docroot => { usable => 1, index => 'index.php',
+                              mode => '0755', owner_ok => 1,
+                              abs => "$home/public_html", hrel => 'public_html' },
+                 http     => { status => 200, ms => 3 },
+                 htaccess => { present => 0 },
+                 xmlrpc   => $xr,
+                 ssl      => { ok => 1, days_left => 300 },
+                 logs     => {} };
+    };
+    my $summary = {
+        counts  => {},
+        command => 'doctor-scan',
+        domains => [ $mkrec->( { wp => 1, jetpack => 0,
+                                 probe => { status => 200, exposed => 1 },
+                                 state => 'exposed', reason => undef } ) ],
+    };
+    open my $rf, '>', "$jobs/doctor-x.result.json" or die $!;
+    print $rf JSON::PP->new()->encode($summary);
+    close $rf;
+    my $res = FakeResult->new();
+    my $ok  = Cpanel::API::UserTools::doctor_scan_status(
+        FakeArgs->new( job_id => 'doctor-x' ), $res );
+    ok( $ok, 'status accepted' );
+    my ($rec) = grep { $_->{domain} eq 'primary.test' }
+      @{ $res->{data}{summary}{domains} };
+    is( $rec->{fix_xmlrpc}, 1, 'Fix button data present for served xmlrpc' );
+    ok( ( grep { /block it/ } @{ $rec->{verdict} } ), 'xmlrpc verdict offers the block' );
+    $summary->{domains} = [ $mkrec->( { wp => 1, jetpack => 1,
+                                        probe => { status => 200, exposed => 1 },
+                                        state => 'exposed', reason => undef } ) ];
+    open $rf, '>', "$jobs/doctor-x.result.json" or die $!;
+    print $rf JSON::PP->new()->encode($summary);
+    close $rf;
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_scan_status(
+        FakeArgs->new( job_id => 'doctor-x' ), $res );
+    ok( $ok, 'status accepted' );
+    ($rec) = grep { $_->{domain} eq 'primary.test' }
+      @{ $res->{data}{summary}{domains} };
+    ok( !defined $rec->{fix_xmlrpc}, 'no Fix button data with Jetpack' );
+    ok( ( grep { /Jetpack/ } @{ $rec->{verdict} } ), 'Jetpack verdict rendered' );
 }
 
 {

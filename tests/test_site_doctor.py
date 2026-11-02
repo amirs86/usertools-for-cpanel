@@ -294,7 +294,7 @@ def test_www_variant_followed_when_listed(tmp_path, web):
     assert state == "exposed"
 
 
-def test_www_variant_not_listed_stays_not_checked(tmp_path, web):
+def test_www_counterpart_implicitly_listed(tmp_path, web):
     port, app = web
     seen = []
     srv, stop, thread, tlsport = _tls_path_server(
@@ -306,6 +306,53 @@ def test_www_variant_not_listed_stays_not_checked(tmp_path, web):
         out = sd.http_probe("127.0.0.1", port, "example.test",
                             "/backup.sql", 5, https_port=tlsport,
                             alt_hosts=["example.test"])
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+        srv.close()
+    assert out["status"] == 200, out
+    assert out["scheme"] == "https"
+    assert out["exposed"] is True
+    assert "/backup.sql" in seen, seen
+    assert "HOST:www.example.test" in seen, seen
+    state, _reason = sd.finding_state(out)
+    assert state == "exposed"
+
+
+def test_bare_counterpart_of_listed_www_followed(tmp_path, web):
+    port, app = web
+    seen = []
+    srv, stop, thread, tlsport = _tls_path_server(
+        tmp_path, {"/backup.sql": (200, b"dump\n")}, seen)
+    try:
+        app.routes["/backup.sql"] = (
+            301, {"Location": "https://example.test:%d/" % tlsport},
+            b"")
+        out = sd.http_probe("127.0.0.1", port, "www.example.test",
+                            "/backup.sql", 5, https_port=tlsport,
+                            alt_hosts=["www.example.test"])
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+        srv.close()
+    assert out["status"] == 200, out
+    assert out["scheme"] == "https"
+    assert out["exposed"] is True
+    assert "HOST:example.test" in seen, seen
+
+
+def test_unrelated_host_stays_not_checked(tmp_path, web):
+    port, app = web
+    seen = []
+    srv, stop, thread, tlsport = _tls_path_server(
+        tmp_path, {"/backup.sql": (200, b"dump\n")}, seen)
+    try:
+        app.routes["/backup.sql"] = (
+            301, {"Location": "https://other.test:%d/" % tlsport},
+            b"")
+        out = sd.http_probe("127.0.0.1", port, "example.test",
+                            "/backup.sql", 5, https_port=tlsport,
+                            alt_hosts=["example.test", "www.example.test"])
     finally:
         stop.set()
         thread.join(timeout=10)
@@ -445,6 +492,90 @@ def test_doctor_follows_same_host_https(tmp_path, web):
         srv.close()
     assert rec["http"]["status"] == 200
     assert rec["http"]["scheme"] == "https"
+
+
+def seed_wordpress(docroot, jetpack=False):
+    (docroot / "xmlrpc.php").write_text("<?php // xmlrpc\n")
+    (docroot / "wp-config.php").write_text("<?php // cfg\n")
+    if jetpack:
+        (docroot / "wp-content" / "plugins" / "jetpack").mkdir(parents=True)
+
+
+def test_xmlrpc_served_wordpress_no_jetpack(tmp_path):
+    home = make_home(tmp_path)
+    seed_wordpress(home / "public_html")
+    srv, thread = _file_server(home / "public_html")
+    try:
+        tgt = target_for("example.test", str(home / "public_html"),
+                         srv.server_address[1])
+        rc, summary, _ = lockless("doctor-scan", "--target", tgt, home=home)
+    finally:
+        srv.shutdown()
+        thread.join(timeout=10)
+    assert rc == 0
+    rec = summary["domains"][0]
+    xr = rec["xmlrpc"]
+    assert xr["wp"] is True
+    assert xr["jetpack"] is False
+    assert xr["probe"]["status"] == 200
+    assert xr["probe"]["exposed"] is True
+    assert xr["state"] == "exposed"
+
+
+def test_xmlrpc_jetpack_detected(tmp_path):
+    home = make_home(tmp_path)
+    seed_wordpress(home / "public_html", jetpack=True)
+    srv, thread = _file_server(home / "public_html")
+    try:
+        tgt = target_for("example.test", str(home / "public_html"),
+                         srv.server_address[1])
+        rc, summary, _ = lockless("doctor-scan", "--target", tgt, home=home)
+    finally:
+        srv.shutdown()
+        thread.join(timeout=10)
+    assert rc == 0
+    xr = summary["domains"][0]["xmlrpc"]
+    assert xr["wp"] is True
+    assert xr["jetpack"] is True
+    assert xr["probe"]["status"] == 200
+    assert xr["state"] == "exposed"
+
+
+def test_xmlrpc_absent_not_wordpress(tmp_path):
+    home = make_home(tmp_path)
+    srv, thread = _file_server(home / "public_html")
+    try:
+        tgt = target_for("example.test", str(home / "public_html"),
+                         srv.server_address[1])
+        rc, summary, _ = lockless("doctor-scan", "--target", tgt, home=home)
+    finally:
+        srv.shutdown()
+        thread.join(timeout=10)
+    assert rc == 0
+    xr = summary["domains"][0]["xmlrpc"]
+    assert xr["wp"] is False
+    assert xr["jetpack"] is False
+    assert xr["probe"] is None
+    assert xr["state"] is None
+
+
+def test_xmlrpc_symlink_does_not_count_as_wordpress(tmp_path):
+    home = make_home(tmp_path)
+    real = home / "real-xmlrpc.php"
+    real.write_text("<?php // xmlrpc\n")
+    os.symlink(str(real), str(home / "public_html" / "xmlrpc.php"))
+    srv, thread = _file_server(home / "public_html")
+    try:
+        tgt = target_for("example.test", str(home / "public_html"),
+                         srv.server_address[1])
+        rc, summary, _ = lockless("doctor-scan", "--target", tgt, home=home)
+    finally:
+        srv.shutdown()
+        thread.join(timeout=10)
+    assert rc == 0
+    xr = summary["domains"][0]["xmlrpc"]
+    assert xr["wp"] is False
+    assert xr["probe"] is None
 
 
 def test_doctor_htaccess_flags(tmp_path, web):

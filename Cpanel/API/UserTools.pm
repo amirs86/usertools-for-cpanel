@@ -64,6 +64,9 @@ our %API = (
     'doctor_htaccess_preview' => { 'needs_feature' => $FEATURE_SITE_DOCTOR },
     'doctor_htaccess_fix'     => { 'needs_feature' => $FEATURE_SITE_DOCTOR },
     'doctor_htaccess_undo'    => { 'needs_feature' => $FEATURE_SITE_DOCTOR },
+    'doctor_xmlrpc_preview' => { 'needs_feature' => $FEATURE_SITE_DOCTOR },
+    'doctor_xmlrpc_fix'     => { 'needs_feature' => $FEATURE_SITE_DOCTOR },
+    'doctor_xmlrpc_undo'    => { 'needs_feature' => $FEATURE_SITE_DOCTOR },
     'exposed_scan_start'  => { 'needs_feature' => $FEATURE_EXPOSED_FILES },
     'exposed_scan_status' => { 'needs_feature' => $FEATURE_EXPOSED_FILES },
     'exposed_scan_cancel' => { 'needs_feature' => $FEATURE_EXPOSED_FILES },
@@ -2404,6 +2407,32 @@ sub _doctor_verdicts {
     else {
         push @lines, "No .htaccess in the document root.";
     }
+    my $xr = ref $rec->{xmlrpc} eq 'HASH' ? $rec->{xmlrpc} : {};
+    if ( $xr->{wp} ) {
+        my $xp = ref $xr->{probe} eq 'HASH' ? $xr->{probe} : {};
+        my $st = $xp->{status} // 0;
+        if ( $xp->{exposed} ) {
+            if ( $xr->{jetpack} ) {
+                push @lines,
+                  "xmlrpc.php is served (HTTP $st), but Jetpack is installed and needs XML-RPC: the deny fix is not offered.";
+            }
+            else {
+                $say->(
+                    "xmlrpc.php is served (HTTP $st): block it to stop login-flood and pingback abuse.",
+                    1
+                );
+            }
+        }
+        elsif ( $st == 401 || $st == 403 || $st == 404 || $st == 410 ) {
+            push @lines, "xmlrpc.php is not served (HTTP $st).";
+        }
+        else {
+            my $why = defined $xr->{reason} && $xr->{reason} ne ''
+              ? $xr->{reason}
+              : 'not checked';
+            $say->("xmlrpc.php could not be checked ($why).", 1);
+        }
+    }
     my $ssl = ref $rec->{ssl} eq 'HASH' ? $rec->{ssl} : {};
     if ( $ssl->{ok} ) {
         my $days = $ssl->{days_left} // 0;
@@ -2591,6 +2620,18 @@ sub doctor_scan_status {
                 # The page's Fix button appears only for this case.
                 $out{fix_php_lines} = $r{htaccess}{php_value_lines};
             }
+            if ( ref $r{xmlrpc} eq 'HASH'
+                && $r{xmlrpc}{wp}
+                && !$r{xmlrpc}{jetpack} )
+            {
+                my $xp = ref $r{xmlrpc}{probe} eq 'HASH'
+                  ? $r{xmlrpc}{probe}
+                  : {};
+                if ( $xp->{exposed} ) {
+                    # The page's xmlrpc Fix button appears only for this case.
+                    $out{fix_xmlrpc} = 1;
+                }
+            }
             push @with_verdicts, \%out;
         }
         $data{summary} = { %{$summary}, domains => \@with_verdicts };
@@ -2719,6 +2760,8 @@ sub _ht_section_rules {
 
 our $HT_DOC_BEGIN = '# BEGIN UserTools Site Doctor';
 our $HT_DOC_END   = '# END UserTools Site Doctor';
+our $HT_XML_BEGIN = '# BEGIN UserTools Site Doctor XML-RPC';
+our $HT_XML_END   = '# END UserTools Site Doctor XML-RPC';
 our $HT_EXP_BEGIN = '# BEGIN UserTools Exposed Files';
 our $HT_EXP_END   = '# END UserTools Exposed Files';
 
@@ -2945,6 +2988,19 @@ sub _doctor_job_domains {
     return $file->{domains};
 }
 
+sub _doctor_job_rec {
+    my ( $home, $job_id, $domain ) = @_;
+    # One scanned domain record (server-side only): the domain must have
+    # been scanned (job membership) and still belong to the account.
+    my $domains = _doctor_job_domains( $home, $job_id );
+    return ( undef, 'Unknown job.' ) unless defined $domains;
+    my ($found) =
+      grep { ref $_ eq 'HASH' && defined $_->{domain} && $_->{domain} eq $domain }
+      @{$domains};
+    return ( undef, 'Unknown website for this scan.' ) unless defined $found;
+    return ( $found, undef );
+}
+
 sub _doctor_docroot {
     my ( $home, $user, $job_id, $domain ) = @_;
     # The docroot a Site Doctor htaccess call may touch: the domain must
@@ -3121,6 +3177,258 @@ sub doctor_htaccess_undo {
     if ( rename( $pick, $path ) ) {
         chmod 0644, $path;
         _activity_log( $home, 'site_doctor', 'undo .htaccess fix',
+            { domain => $domain }, undef );
+        $result->data( { domain => $domain, restored => 1 } );
+        return 1;
+    }
+    $result->error('Could not restore the backup.');
+    return;
+}
+
+sub _doctor_xmlrpc_plan {
+    my ( $home, $domain, $real, $found ) = @_;
+    # Preview plan for denying xmlrpc.php in one docroot .htaccess.
+    # $found is the scanned domain record (server-side only); the rule
+    # matches the mapped filename, the same way as the Exposed Files
+    # rules. Returns (plan) or (undef, reason). The file is read fresh.
+    return ( undef, 'unknown website' ) unless defined $domain;
+    my $xr = ref $found eq 'HASH' && ref $found->{xmlrpc} eq 'HASH'
+      ? $found->{xmlrpc}
+      : {};
+    return ( undef, 'this does not look like a WordPress site' )
+      unless $xr->{wp};
+    if ( $xr->{jetpack} ) {
+        return ( undef,
+            'Jetpack is installed and needs XML-RPC, so the deny fix is not offered'
+        );
+    }
+    my $probe = ref $xr->{probe} eq 'HASH' ? $xr->{probe} : {};
+    if ( !$probe->{exposed} ) {
+        my $st = $probe->{status} // 0;
+        return ( undef,
+            $st ? "xmlrpc.php is not served (HTTP $st)" : 'xmlrpc.php is not served right now' );
+    }
+    my $abspath = "$real/xmlrpc.php";
+    my $rel = _ht_home_rel( $home, $abspath );
+    if ( !defined $rel || $rel eq '' ) {
+        return ( undef, 'the xmlrpc.php path is outside your home folder' );
+    }
+    for my $s ( $rel, '/xmlrpc.php', $abspath ) {
+        if ( !_expose_safe_path($s) ) {
+            return ( undef,
+                'the xmlrpc.php path is unsafe for .htaccess rules' );
+        }
+    }
+    my $path = "$real/.htaccess";
+    my $current = eval { _read_text_file($path) };
+    if ($@) {
+        return ( undef, "cannot read the .htaccess file: $@" );
+    }
+    $current = '' unless defined $current;
+    my @lines = split( /\n/, $current );
+    if ( grep { $_ eq $HT_XML_BEGIN } @lines ) {
+        return ( undef, 'a Site Doctor XML-RPC block is already applied' );
+    }
+    my $esc = $abspath;
+    $esc =~ s/([\\^\$.|?*+()\[\]{}])/\\$1/g;
+    $esc =~ s/#/[#]/g;
+    my @section = (
+        $HT_XML_BEGIN,
+        '# Site Doctor: deny xmlrpc.php (login-flood and pingback abuse).',
+        '# Removing this block restores access.',
+        '',
+        "# path: $rel",
+        '# url: /xmlrpc.php',
+        "# Site Doctor: deny $rel (xmlrpc)",
+        "<If \"%{REQUEST_FILENAME} == '$abspath'\">",
+        '    Require all denied',
+        '</If>',
+        $HT_XML_END,
+    );
+    my $new = _ht_named_section( $current, $HT_XML_BEGIN, $HT_XML_END,
+        \@section );
+    return (
+        {
+            domain => $domain,
+            path   => $path,
+            new    => $new,
+            diff   => _ht_diff( $current, $new ),
+        },
+        undef
+    );
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   doctor_xmlrpc_preview - Show what denying xmlrpc.php would change
+#   (changes nothing).
+#-------------------------------------------------------------------------------------------------
+sub doctor_xmlrpc_preview {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SITE_DOCTOR );
+    return unless _site_policy_enabled( $result, 'enable_site_doctor' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    my ($domain) = $args->get('domain');
+    my ( $real, $docroot_err ) = _doctor_docroot( $home, $user, $job_id, $domain );
+    if ( !defined $real ) {
+        if ( $docroot_err eq 'Unknown job.' || $docroot_err eq 'Unknown website for this scan.' ) {
+            $result->error($docroot_err);
+        }
+        else {
+            $result->error( 'Nothing to fix: [_1].', $docroot_err );
+        }
+        return;
+    }
+    my ( $found, $found_err ) = _doctor_job_rec( $home, $job_id, $domain );
+    if ( !defined $found ) {
+        $result->error( 'Nothing to fix: [_1].', $found_err );
+        return;
+    }
+    my ( $plan, $err ) = _doctor_xmlrpc_plan( $home, $domain, $real, $found );
+    if ( !defined $plan ) {
+        $result->error( 'Nothing to fix: [_1].', $err );
+        return;
+    }
+    $result->data(
+        {
+            domain => $plan->{domain},
+            file   => '.htaccess',
+            diff   => $plan->{diff},
+        }
+    );
+    return 1;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   doctor_xmlrpc_fix - Deny xmlrpc.php with a marked .htaccess block
+#   (backup kept, re-probed afterwards).
+#-------------------------------------------------------------------------------------------------
+sub doctor_xmlrpc_fix {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SITE_DOCTOR );
+    return unless _site_policy_enabled( $result, 'enable_site_doctor' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    my ($domain) = $args->get('domain');
+    my ( $real, $docroot_err ) = _doctor_docroot( $home, $user, $job_id, $domain );
+    if ( !defined $real ) {
+        if ( $docroot_err eq 'Unknown job.' || $docroot_err eq 'Unknown website for this scan.' ) {
+            $result->error($docroot_err);
+        }
+        else {
+            $result->error( 'Nothing to fix: [_1].', $docroot_err );
+        }
+        return;
+    }
+    my ( $found, $found_err ) = _doctor_job_rec( $home, $job_id, $domain );
+    if ( !defined $found ) {
+        $result->error( 'Nothing to fix: [_1].', $found_err );
+        return;
+    }
+    my ( $plan, $err ) = _doctor_xmlrpc_plan( $home, $domain, $real, $found );
+    if ( !defined $plan ) {
+        $result->error( 'Nothing to fix: [_1].', $err );
+        return;
+    }
+    if ( !_ht_ensure_orig( $home, $plan->{path} ) ) {
+        $result->error('Could not preserve the original .htaccess; nothing was changed.');
+        return;
+    }
+    my $bak = _ht_backup( $plan->{path} );
+    if ( !defined $bak ) {
+        $result->error('Could not back up the .htaccess; nothing was changed.');
+        return;
+    }
+    if ( !_write_text_file( $plan->{path}, $plan->{new}, 0644 ) ) {
+        _ht_restore_exact( $plan->{path}, $bak );
+        $result->error('Could not write the .htaccess file; the backup was restored.');
+        return;
+    }
+    _activity_log( $home, 'site_doctor', 'fix xmlrpc',
+        { domain => $domain },
+        { fn => 'doctor_xmlrpc_undo',
+          args => {
+            job_id => $job_id,
+            domain => $domain,
+            backup => ( split m{/}, $bak )[-1],
+          } } );
+    my $reprobe = { status => 0, exposed => 0 };
+    my ( $rec, $rec_err ) = _site_domain_rec( $user, $domain );
+    if ( defined $rec && defined $rec->{ip} && defined $rec->{port} ) {
+        $reprobe = _exposed_reprobe( $home, $rec->{ip}, $rec->{port},
+            $domain, '/xmlrpc.php', $user );
+    }
+    $result->data(
+        {
+            domain   => $plan->{domain},
+            file     => '.htaccess',
+            backup   => $bak,
+            diff     => $plan->{diff},
+            reprobed => $reprobe,
+        }
+    );
+    return 1;
+}
+
+#-------------------------------------------------------------------------------------------------
+# Name:
+#   doctor_xmlrpc_undo - Restore the newest backup of that .htaccess,
+#   or the named one (which must still be the newest).
+#-------------------------------------------------------------------------------------------------
+sub doctor_xmlrpc_undo {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_tool( $result, $FEATURE_SITE_DOCTOR );
+    return unless _site_policy_enabled( $result, 'enable_site_doctor' );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($job_id) = $args->get('job_id');
+    my ($domain) = $args->get('domain');
+    my ($backup_p) = $args->get('backup');
+    my ( $real, $docroot_err ) = _doctor_docroot( $home, $user, $job_id, $domain );
+    if ( !defined $real ) {
+        $result->error($docroot_err);
+        return;
+    }
+    my $path = "$real/.htaccess";
+    my @cands = sort grep { -f $_ } glob "$path.usertools-bak-*";
+    if ( !@cands ) {
+        $result->error('already undone');
+        return;
+    }
+    my $pick;
+    if ( defined $backup_p ) {
+        if ( $backup_p !~ /^\.htaccess\.usertools-bak-[0-9]+(-\d+)?$/ ) {
+            $result->error('already undone');
+            return;
+        }
+        my $want = "$real/$backup_p";
+        if ( !grep { $_ eq $want } @cands ) {
+            $result->error('already undone');
+            return;
+        }
+        if ( $want ne $cands[-1] ) {
+            $result->error('a newer change exists, undo that first');
+            return;
+        }
+        $pick = $want;
+    }
+    else {
+        @cands = sort { ( ( stat($b) )[9] // 0 ) <=> ( ( stat($a) )[9] // 0 ) } @cands;
+        $pick = $cands[0];
+    }
+    if ( rename( $pick, $path ) ) {
+        chmod 0644, $path;
+        _activity_log( $home, 'site_doctor', 'undo xmlrpc fix',
             { domain => $domain }, undef );
         $result->data( { domain => $domain, restored => 1 } );
         return 1;

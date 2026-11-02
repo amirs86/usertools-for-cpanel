@@ -66,6 +66,7 @@ window.addEventListener("DOMContentLoaded", function () {
     var UT_ALLOW = {
         cron_undo: 1, home_permissions_undo: 1, bulk_permissions_undo: 1,
         space_trash_restore: 1, doctor_htaccess_undo: 1,
+        doctor_xmlrpc_undo: 1,
         exposed_restore: 1, exposed_block: 1,
         exposed_unblock: 1, app_helper_undo_docroot: 1,
         app_helper_htaccess_undo: 1,

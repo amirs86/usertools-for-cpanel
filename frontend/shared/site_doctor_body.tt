@@ -2,15 +2,16 @@
     SPDX-License-Identifier: Apache-2.0
     Shared Site Doctor page body. Included once by each theme adapter.
     Flow: Scan (up to 10 websites, 30 s budget) with one plain-words
-    verdict per domain plus expandable details, Fix for the one auto-fix
-    (commenting out php_value lines) behind a confirm dialog showing the
+    verdict per domain plus expandable details, Fix for the two auto-fixes
+    (commenting out php_value lines, blocking xmlrpc.php on WordPress
+    sites without Jetpack) behind confirm dialogs showing the
     diff, progress with Cancel, Undo. A stored job id reattaches the page
     to a running job after a reload. %]
 <div class="ut-wrap">
   <p class="ut-lead">[% locale.maketext('Check every website at a glance: homepage status, folders, .htaccess mistakes, certificates and recent errors. This page changes nothing unless you apply a fix.') %]</p>
   <details class="ut-learn">
     <summary>[% locale.maketext('Learn more') %]</summary>
-    <p>[% locale.maketext('Each website gets one plain-words verdict. Details show the homepage check, the document root, the .htaccess findings, the certificate and the last error lines. The only automatic fix comments out php_value lines when the domain runs PHP-FPM (they cause HTTP 500 there); the original file is backed up and the change can be undone.') %]</p>
+    <p>[% locale.maketext('Each website gets one plain-words verdict. Details show the homepage check, the document root, the .htaccess findings, the certificate and the last error lines. The automatic fixes comment out php_value lines when the domain runs PHP-FPM (they cause HTTP 500 there), and block xmlrpc.php on WordPress sites without Jetpack (it draws login floods); the original file is backed up and each change can be undone.') %]</p>
   </details>
   <div class="ut-banner warn" id="ut-banner" role="status" aria-live="polite">[% locale.maketext('Run a scan to check your websites.') %]</div>
   <div class="ut-controls">
@@ -55,6 +56,11 @@ var UT_STR = {
     fixBodyOne: "[% locale.maketext('This comments out 1 line in the .htaccess file. The original file is backed up first.') %]",
     fixBodyMany: "[% locale.maketext('This comments out COUNT lines in the .htaccess file. The original file is backed up first.') %]",
     fixApply: "[% locale.maketext('Comment out now') %]",
+    fixXmlrpc: "[% locale.maketext('Block xmlrpc.php') %]",
+    fixXmlrpcTitle: "[% locale.maketext('Confirm xmlrpc.php block') %]",
+    fixXmlrpcBody: "[% locale.maketext('This adds a marked deny block for xmlrpc.php in the .htaccess file. The original file is backed up first, and the change can be undone.') %]",
+    fixXmlrpcApply: "[% locale.maketext('Block now') %]",
+    fixedXmlrpc: "[% locale.maketext('Blocked. The change can be undone.') %]",
     fixed: "[% locale.maketext('Fixed. The change can be undone.') %]",
     fixFailed: "[% locale.maketext('Fix failed: ') %]",
     undoDone: "[% locale.maketext('Fix undone: the original file is back.') %]",
@@ -94,6 +100,7 @@ window.addEventListener("DOMContentLoaded", function () {
     var pollTimer = null;
     var currentJob = null;
     var pendingFix = null;
+    var pendingUndo = null;
     var JOB_KEY = "ut_doctor_scan_last_job";
 
     function tok(s, name, value) { return String(s).split(name).join(value); }
@@ -210,6 +217,10 @@ window.addEventListener("DOMContentLoaded", function () {
                 html += '<div class="ut-controls"><button class="ut-btn" type="button" data-fix="' +
                     UserTools.escHtml(d.domain || "") + '">' + UserTools.escHtml(UT_STR.fix) + "</button></div>";
             }
+            if (d.fix_xmlrpc) {
+                html += '<div class="ut-controls"><button class="ut-btn" type="button" data-xmlrpc-fix="' +
+                    UserTools.escHtml(d.domain || "") + '">' + UserTools.escHtml(UT_STR.fixXmlrpc) + "</button></div>";
+            }
             html += "</div>";
         });
         verdictsEl.innerHTML = html;
@@ -222,6 +233,9 @@ window.addEventListener("DOMContentLoaded", function () {
         }
         Array.prototype.forEach.call(verdictsEl.querySelectorAll("[data-fix]"), function (btn) {
             btn.addEventListener("click", function () { previewFix(btn.getAttribute("data-fix")); });
+        });
+        Array.prototype.forEach.call(verdictsEl.querySelectorAll("[data-xmlrpc-fix]"), function (btn) {
+            btn.addEventListener("click", function () { previewXmlrpcFix(btn.getAttribute("data-xmlrpc-fix")); });
         });
     }
     function previewFix(domain) {
@@ -242,6 +256,29 @@ window.addEventListener("DOMContentLoaded", function () {
         pendingFix = null;
         UserTools.callApi("doctor_htaccess_fix", { job_id: currentJob, domain: domain }, "POST").then(function () {
             setBanner("ok", UT_STR.fixed);
+            pendingUndo = { fn: "doctor_htaccess_undo", domain: domain };
+            undoBtn.hidden = false;
+        }).catch(function (err) {
+            setBanner("err", UT_STR.fixFailed + err.message);
+        });
+    }
+    function previewXmlrpcFix(domain) {
+        if (!currentJob) { return; }
+        setBanner("warn", UT_STR.fixing);
+        UserTools.callApi("doctor_xmlrpc_preview", { job_id: currentJob, domain: domain }, "GET").then(function (data) {
+            pendingFix = { domain: domain, kind: "xmlrpc" };
+            openDialog(UT_STR.fixXmlrpcTitle, UT_STR.fixXmlrpcBody, data.diff || "", UT_STR.fixXmlrpcApply, applyXmlrpcFix);
+        }).catch(function (err) {
+            setBanner("err", UT_STR.fixFailed + err.message);
+        });
+    }
+    function applyXmlrpcFix() {
+        if (!pendingFix || !currentJob) { return; }
+        var domain = pendingFix.domain;
+        pendingFix = null;
+        UserTools.callApi("doctor_xmlrpc_fix", { job_id: currentJob, domain: domain }, "POST").then(function () {
+            setBanner("ok", UT_STR.fixedXmlrpc);
+            pendingUndo = { fn: "doctor_xmlrpc_undo", domain: domain };
             undoBtn.hidden = false;
         }).catch(function (err) {
             setBanner("err", UT_STR.fixFailed + err.message);
@@ -251,6 +288,7 @@ window.addEventListener("DOMContentLoaded", function () {
         verdictsEl.innerHTML = "";
         listsEl.innerHTML = "";
         undoBtn.hidden = true;
+        pendingUndo = null;
         startJob(null);
     });
     cancelBtn.addEventListener("click", function () {
@@ -264,14 +302,12 @@ window.addEventListener("DOMContentLoaded", function () {
         });
     });
     undoBtn.addEventListener("click", function () {
-        if (!currentJob) { return; }
-        var sel = verdictsEl.querySelector("[data-fix]");
-        var domain = sel ? sel.getAttribute("data-fix") : null;
-        if (!domain) { return; }
+        if (!currentJob || !pendingUndo) { return; }
         setBanner("warn", UT_STR.fixing);
-        UserTools.callApi("doctor_htaccess_undo", { job_id: currentJob, domain: domain }, "POST").then(function () {
+        UserTools.callApi(pendingUndo.fn, { job_id: currentJob, domain: pendingUndo.domain }, "POST").then(function () {
             setBanner("ok", UT_STR.undoDone);
             undoBtn.hidden = true;
+            pendingUndo = null;
         }).catch(function (err) {
             setBanner("err", UT_STR.undoFailed + err.message);
         });

@@ -5,7 +5,7 @@
 
 Runs ONLY as an unprivileged cPanel user. It checks the account's websites
 (homepage status, document roots, .htaccess pitfalls, TLS certificates,
-error logs) and scans document roots for files that must never be public
+error logs, xmlrpc.php exposure on WordPress sites) and scans document roots for files that must never be public
 (backups, dumps, copies of secrets). Anything it moves goes to a quarantine
 folder inside the home with restore. It refuses to run as root.
 
@@ -266,10 +266,12 @@ def _follow_target(location, host, https_port, alt_hosts):
     """Decide whether a 3xx Location deserves the single same-host hop.
 
     Returns (use_host, None) or None. Follows only https URLs whose host
-    is the probed domain itself, or its www/bare counterpart when that
-    counterpart is in the account's server-side domain list (alt_hosts,
-    any case). Takes only the scheme and host from the Location; the
-    path re-probed is always the ORIGINAL one, so a
+    is the probed domain itself, or its www/bare counterpart: cPanel
+    always serves www.<listed domain> as an alias of each listed domain
+    (and the bare form of a listed www. name), so the counterpart counts
+    as listed without appearing in the server-side domain list
+    (alt_hosts, any case). Takes only the scheme and host from the
+    Location; the path re-probed is always the ORIGINAL one, so a
     redirect-everything-to-/ host cannot make an unserved file look
     served. The TLS port must match exactly. No DNS is ever consulted.
     """
@@ -299,11 +301,7 @@ def _follow_target(location, host, https_port, alt_hosts):
         counterpart = base[4:]
     else:
         counterpart = "www." + base
-    allowed = set()
-    if alt_hosts:
-        allowed = set(
-            [h.lower() for h in alt_hosts if isinstance(h, str)])
-    if target != counterpart or target not in allowed:
+    if target != counterpart:
         return None
     return (parts.hostname, None)
 
@@ -801,12 +799,15 @@ class Checker(object):
                 docroot["abs"], docroot["hrel"])
             rec["logs"] = self.check_logs(domain, docroot["abs"],
                                           docroot["hrel"])
+            rec["xmlrpc"] = self.check_xmlrpc(target, docroot)
         else:
             rec["http"] = {"status": 0, "location": None, "ms": None,
                            "length": None, "exposed": False,
                            "error": "docroot unusable"}
             rec["htaccess"] = {"present": False}
             rec["logs"] = {}
+            rec["xmlrpc"] = {"wp": False, "jetpack": False, "probe": None,
+                             "state": None, "reason": None}
         rec["ssl"] = tls_expiry(target["ip"], domain, self.timeout)
         return rec
 
@@ -883,6 +884,100 @@ class Checker(object):
         if blob is not None:
             out["php_log"] = tail_lines(blob, LOG_TAIL_LINES)
         return out
+
+    def check_xmlrpc(self, target, docroot):
+        # type: (dict, dict) -> dict
+        """WordPress xmlrpc.php facts: served or not, Jetpack or not.
+
+        wp is true when the docroot holds xmlrpc.php or wp-config.php as
+        a regular file (symlinks never count). jetpack is true when
+        wp-content/plugins/jetpack is a real directory. Only WordPress
+        sites are probed, over HTTP exactly like an exposed file (same
+        literal IP, same redirect rules, HEAD then capped GET, never a
+        POST); state/reason come from finding_state, so redirects, failed
+        hops and server errors never read as safe.
+        """
+        out = {"wp": False, "jetpack": False, "probe": None,
+               "state": None, "reason": None}  # type: dict
+        fd = open_dir(docroot["abs"], None, docroot["hrel"], self.summary)
+        if fd is None:
+            return out
+        try:
+            if self._is_reg_file(fd, "xmlrpc.php") \
+                    or self._is_reg_file(fd, "wp-config.php"):
+                out["wp"] = True
+            out["jetpack"] = self._has_jetpack(fd, docroot["hrel"])
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if not out["wp"]:
+            return out
+        probe = http_probe(target["ip"], target["port"], target["domain"],
+                           "/xmlrpc.php", self.timeout, self.https_port,
+                           self.domains)
+        state, reason = finding_state(probe)
+        out["probe"] = probe
+        out["state"] = state
+        out["reason"] = reason
+        return out
+
+    @staticmethod
+    def _is_reg_file(dir_fd, name):
+        # type: (int, str) -> bool
+        """True when name is a regular file (symlinks never count)."""
+        try:
+            st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError:
+            return False
+        return stat.S_ISREG(st.st_mode)
+
+    def _has_jetpack(self, docroot_fd, hrel):
+        # type: (int, str) -> bool
+        """True when wp-content/plugins/jetpack is a real directory.
+
+        Each level opens O_NOFOLLOW, so a symlinked wp-content or
+        plugins tree never counts as an installed plugin.
+        """
+        try:
+            wfd = os.open("wp-content",
+                          os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                          dir_fd=docroot_fd)
+        except OSError as exc:
+            if pe._is_resource_error(exc):
+                raise pe.ResourceLimitError(
+                    "too many open files while checking %s: %s"
+                    % (hrel, exc))
+            return False
+        try:
+            try:
+                pfd = os.open("plugins",
+                              os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                              dir_fd=wfd)
+            except OSError as exc:
+                if pe._is_resource_error(exc):
+                    raise pe.ResourceLimitError(
+                        "too many open files while checking %s: %s"
+                        % (hrel, exc))
+                return False
+            try:
+                try:
+                    st = os.stat("jetpack", dir_fd=pfd,
+                                 follow_symlinks=False)
+                except OSError:
+                    return False
+                return stat.S_ISDIR(st.st_mode)
+            finally:
+                try:
+                    os.close(pfd)
+                except OSError:
+                    pass
+        finally:
+            try:
+                os.close(wfd)
+            except OSError:
+                pass
 
     def read_named(self, abs_dir, hrel, name):
         # type: (str, str, str) -> object
