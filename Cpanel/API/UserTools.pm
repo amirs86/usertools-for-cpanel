@@ -3056,6 +3056,31 @@ sub _doctor_docroot {
     return ( $real, undef );
 }
 
+sub _doctor_undo_docroot {
+    my ( $home, $user, $job_id, $domain ) = @_;
+    # Undo can outlive its scan job (jobs are pruned), so the job is only
+    # a preference: when it is gone or absent, resolve the same domain
+    # again from the live server-side record. A client never supplies a
+    # path, and both branches keep the result inside the home folder.
+    if ( defined $job_id && $job_id ne '' ) {
+        my ( $real, $err ) = _doctor_docroot( $home, $user, $job_id, $domain );
+        return ( $real, undef ) if defined $real;
+        return ( undef, $err )
+          unless defined $err
+          && ( $err eq 'Unknown job.' || $err eq 'Unknown website for this scan.' );
+    }
+    my ( $rec, $err ) = _site_domain_rec( $user, $domain );
+    return ( undef, $err ) unless defined $rec;
+    my $real = Cwd::realpath( $rec->{documentroot} );
+    if ( !defined $real || !-d $real ) {
+        return ( undef, 'the document root is missing' );
+    }
+    if ( $real ne $home && index( $real, "$home/" ) != 0 ) {
+        return ( undef, 'the document root is outside your home folder' );
+    }
+    return ( $real, undef );
+}
+
 #-------------------------------------------------------------------------------------------------
 # Name:
 #   doctor_htaccess_preview - Show what commenting out the php_value lines
@@ -3401,10 +3426,7 @@ sub doctor_xmlrpc_fix {
     _activity_log( $home, 'site_doctor', 'fix xmlrpc',
         { domain => $domain },
         { fn => 'doctor_xmlrpc_undo',
-          args => {
-            job_id => $job_id,
-            domain => $domain,
-          } } );
+          args => { domain => $domain } } );
     my $reprobe = { status => 0, exposed => 0 };
     my ( $rec, $rec_err ) = _site_domain_rec( $user, $domain );
     if ( defined $rec && defined $rec->{ip} && defined $rec->{port} ) {
@@ -3442,7 +3464,7 @@ sub doctor_xmlrpc_undo {
 
     my ($job_id) = $args->get('job_id');
     my ($domain) = $args->get('domain');
-    my ( $real, $docroot_err ) = _doctor_docroot( $home, $user, $job_id, $domain );
+    my ( $real, $docroot_err ) = _doctor_undo_docroot( $home, $user, $job_id, $domain );
     if ( !defined $real ) {
         $result->error($docroot_err);
         return;

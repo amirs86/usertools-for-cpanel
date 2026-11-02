@@ -1661,7 +1661,8 @@ sub site_wait_done {
     is( $alog->[0]{tool}, 'site_doctor', 'tool recorded' );
     is( $alog->[0]{action}, 'fix xmlrpc', 'action recorded' );
     is( $alog->[0]{undo}{fn}, 'doctor_xmlrpc_undo', 'fix carries its undo' );
-    is( $alog->[0]{undo}{args}{domain}, 'primary.test', 'undo names the domain' );
+    is_deeply( $alog->[0]{undo}{args}, { domain => 'primary.test' },
+        'undo ref names only the domain' );
     ok( !exists $alog->[0]{undo}{args}{backup},
         'undo does not point at a backup file' );
     my $after = do { open my $rfh, '<', "$home/public_html/.htaccess" or die $!; local $/; <$rfh> };
@@ -1710,6 +1711,37 @@ sub site_wait_done {
     $ok  = Cpanel::API::UserTools::doctor_xmlrpc_undo(
         FakeArgs->new( job_id => 'doctor-2', domain => 'primary.test' ), $res );
     ok( $ok, 'undo after still-served apply accepted' );
+
+    # The scan job can be pruned before the Activity Undo is used: the
+    # stored reference names the domain only and the live domain record
+    # still resolves the docroot.
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_xmlrpc_fix(
+        FakeArgs->new( job_id => 'doctor-2', domain => 'primary.test' ), $res );
+    ok( $ok, 'fix before job pruning accepted' );
+    open my $bfh, '>>', "$home/public_html/.htaccess" or die $!;
+    print $bfh "Second line written after the fix\n";
+    close $bfh;
+    my $alog2 = Cpanel::API::UserTools::_activity_list( $home, 100 );
+    my $stored = $alog2->[0]{undo};
+    is_deeply( $stored->{args}, { domain => 'primary.test' },
+        'stored undo ref has no job id' );
+    my @job_files = glob "$home/.cpanel/usertools/jobs/doctor-2.*";
+    ok( @job_files, 'scan job files exist before pruning' );
+    unlink @job_files;
+    ok( !-e "$home/.cpanel/usertools/jobs/doctor-2.result.json",
+        'scan job pruned' );
+    $res = FakeResult->new();
+    $ok  = Cpanel::API::UserTools::doctor_xmlrpc_undo(
+        FakeArgs->new( %{ $stored->{args} } ), $res );
+    ok( $ok, 'undo accepted after the job was pruned' );
+    is( $res->{data}{restored}, 1, 'pruned-job undo restored the file' );
+    my $pruned = do { open my $rfh, '<', "$home/public_html/.htaccess" or die $!; local $/; <$rfh> };
+    unlike( $pruned, qr/UserTools Site Doctor XML-RPC/,
+        'section gone after pruned-job undo' );
+    like( $pruned, qr/^Second line written after the fix$/m,
+        'line outside the section survived job pruning' );
+
     $res = FakeResult->new();
     $ok  = Cpanel::API::UserTools::doctor_xmlrpc_fix(
         FakeArgs->new( job_id => 'doctor-2', domain => 'nosuch.test' ), $res );
