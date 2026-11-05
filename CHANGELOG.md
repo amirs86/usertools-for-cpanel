@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. Versions follow
 [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] - 2026-11-06
 
 ### Added
 
@@ -13,7 +13,7 @@ All notable changes to this project are documented here. Versions follow
   and are shown in the preview as one row per folder with file, byte and
   inode counts. `.cache/pip` and `.cache/yarn` join the fixed developer
   caches. Both are moved to the trash and restored per batch like the
-  other cache categories.
+  other cache categories. The scan no longer walks into `node_modules`.
 - Site Doctor: the homepage check follows up to ten redirects on the same
   IP, the listed domain or its `www.`/bare counterpart, with chain URLs on
   the standard ports and connections on the server-side record port. It
