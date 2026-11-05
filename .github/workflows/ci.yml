@@ -8,7 +8,7 @@ on:
 
 jobs:
   engine-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ["3.9"]
@@ -63,7 +63,7 @@ jobs:
       - name: Shellcheck all shell files
         run: shellcheck install.sh uninstall.sh bootstrap-install.sh bin/usertools-update tests/test_install.sh tests/test_update.sh
   lint-python:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
