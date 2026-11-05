@@ -72,7 +72,8 @@ window.addEventListener("DOMContentLoaded", function () {
         app_helper_htaccess_undo: 1,
         app_helper_cron_add: 1, app_helper_cron_remove: 1,
         app_helper_remove: 1, app_helper_add: 1,
-        app_helper_primary_set: 1, app_helper_production_undo: 1
+        app_helper_primary_set: 1, app_helper_production_undo: 1,
+        app_helper_storage_undo: 1
     };
 
     function setBanner(kind, text) {

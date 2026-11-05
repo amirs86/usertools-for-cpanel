@@ -112,6 +112,7 @@ our %API = (
     'app_helper_production_preview' => { 'needs_feature' => $FEATURE_APP_HELPER },
     'app_helper_production_apply'   => { 'needs_feature' => $FEATURE_APP_HELPER },
     'app_helper_production_undo'    => { 'needs_feature' => $FEATURE_APP_HELPER },
+    'app_helper_storage_undo'       => { 'needs_feature' => $FEATURE_APP_HELPER },
     'app_helper_key_generate'    => { 'needs_feature' => $FEATURE_APP_HELPER },
 );
 
@@ -5599,15 +5600,89 @@ sub _app_composer_php_constraint {
     return $data->{require}{php};
 }
 
-sub _ensure_storage_link {
+sub _storage_link_journal_path {
+    my ( $home, $approot ) = @_;
+    my $rel = $approot;
+    $rel =~ s{^\Q$home\E/?}{};
+    return "$home/.cpanel/usertools/storage-link-"
+      . Digest::SHA::sha1_hex($rel) . '.json';
+}
+
+sub _storage_link_journal_save {
+    my ( $home, $approot, $old ) = @_;
+    # The old link text stays server-side; the undo action receives only
+    # the app id and reads this record back.
+    return 0 unless defined $old && $old ne '';
+    my $dir = "$home/.cpanel/usertools";
+    eval { make_path( $dir, { mode => 0700 } ) };
+    return 0 if $@;
+    my $rel = $approot;
+    $rel =~ s{^\Q$home\E/?}{};
+    my $json = JSON::PP->new()->canonical(1)->encode(
+        { v => 1, app => $rel, old => "$old", time => time() } );
+    return _write_text_file(
+        _storage_link_journal_path( $home, $approot ),
+        "$json\n", 0600 );
+}
+
+sub _storage_link_journal_read {
+    my ( $home, $approot ) = @_;
+    my $path = _storage_link_journal_path( $home, $approot );
+    my $raw = eval { _read_text_file($path) };
+    return undef if $@ || !defined $raw;
+    my $data = eval { JSON::PP->new()->decode($raw) };
+    return undef if $@ || ref $data ne 'HASH';
+    return undef unless ( $data->{v} // 0 ) == 1;
+    my $rel = $approot;
+    $rel =~ s{^\Q$home\E/?}{};
+    return undef unless defined $data->{app} && $data->{app} eq $rel;
+    my $old = $data->{old};
+    return undef unless defined $old && $old ne '' && length($old) <= 4096;
+    return undef if $old =~ /[\x00-\x1f\x7f]/;
+    return { app => $rel, old => "$old" };
+}
+
+sub _storage_link_journal_remove {
+    my ( $home, $approot ) = @_;
+    my $path = _storage_link_journal_path( $home, $approot );
+    return 1 unless lstat $path;
+    return unlink($path) ? 1 : 0;
+}
+
+sub _storage_link_dead {
     my ($approot) = @_;
+    my $path = "$approot/public/storage";
+    my @st = lstat $path;
+    return 0 unless @st && -l _;
+    return 0 if -e $path;
+    return 0 unless $!{ENOENT};
+    return 1;
+}
+
+sub _ensure_storage_link {
+    my ( $approot, $home ) = @_;
     # storage:link fallback: create public/storage -> ../storage/app/public.
-    # Only when the target is missing, the source is a real in-app dir, and
-    # nothing is replaced.
-    my $link = "$approot/public/storage";
+    # A missing link is created. A dead symlink is replaced only after every
+    # component check passes; its old text is saved for undo. A live link,
+    # a real directory or a file is never replaced.
+    my $link   = "$approot/public/storage";
+    my $target = '../storage/app/public';
+    my $old;
     my @lst = lstat $link;
     if (@lst) {
-        return ( 0, 'public/storage already exists; left alone' );
+        if ( !-l _ ) {
+            return ( 0, 'public/storage already exists; left alone' );
+        }
+        if ( -e $link ) {
+            return ( 0, 'public/storage already exists; left alone' );
+        }
+        if ( !$!{ENOENT} ) {
+            return ( 0, 'public/storage target cannot be checked; left alone' );
+        }
+        $old = readlink $link;
+        if ( !defined $old || $old eq '' ) {
+            return ( 0, 'public/storage is a dead link with no readable target; left alone' );
+        }
     }
     for my $comp (qw(public storage storage/app storage/app/public)) {
         my $p = "$approot/$comp";
@@ -5622,10 +5697,78 @@ sub _ensure_storage_link {
             return ( 0, "$comp is not a directory; left alone" );
         }
     }
-    if ( symlink( '../storage/app/public', $link ) ) {
+    if ( defined $old ) {
+        if ( !unlink $link ) {
+            return ( 0, "cannot remove the dead link: $!" );
+        }
+        if ( !symlink( $target, $link ) ) {
+            my $err = $!;
+            my $back = symlink( $old, $link ) ? 1 : 0;
+            return ( 0,
+                "cannot create link: $err"
+                  . ( $back ? '; the old link was restored' : '; the old link could not be restored' ) );
+        }
+        if ( !_storage_link_journal_save( $home, $approot, $old ) ) {
+            unlink $link;
+            my $back = symlink( $old, $link ) ? 1 : 0;
+            return ( 0,
+                'cannot save the undo record'
+                  . ( $back ? '; the old link was restored' : '; the old link could not be restored' ) );
+        }
+        return ( 1, "replaced the dead public/storage link (was $old)", $old );
+    }
+    if ( symlink( $target, $link ) ) {
         return ( 1, 'created public/storage link' );
     }
     return ( 0, "cannot create link: $!" );
+}
+
+sub app_helper_storage_undo {
+    my ( $args, $result ) = @_;
+
+    return unless _gate_app( $result, $FEATURE_APP_HELPER );
+    my ( $user, $uid, $home ) = _gate_caller($result);
+    return unless defined $user;
+
+    my ($app_param) = $args->get('app');
+    my ( $approot, $app_err ) = _resolve_app( $home, $app_param );
+    if ( !defined $approot ) {
+        $result->error( 'Invalid app: [_1].', $app_err );
+        return;
+    }
+    my $journal = _storage_link_journal_read( $home, $approot );
+    if ( !$journal ) {
+        $result->error('No saved storage link repair to undo.');
+        return;
+    }
+    my $link = "$approot/public/storage";
+    my @lst = lstat $link;
+    if ( !@lst || !-l _ ) {
+        $result->error('public/storage is not the repaired link; left alone.');
+        return;
+    }
+    my $current = readlink $link;
+    if ( !defined $current || $current ne '../storage/app/public' ) {
+        $result->error('public/storage changed since the repair; left alone.');
+        return;
+    }
+    if ( !unlink $link ) {
+        $result->error( 'Cannot remove the repaired link: [_1].', "$!" );
+        return;
+    }
+    if ( !symlink( $journal->{old}, $link ) ) {
+        my $err = $!;
+        symlink( '../storage/app/public', $link );
+        $result->error( 'Cannot restore the old link: [_1].', "$err" );
+        return;
+    }
+    _storage_link_journal_remove( $home, $approot );
+    _activity_log( $home, 'app_helper', 'undo storage link repair',
+        { app => $app_param, old_target => $journal->{old} }, undef );
+    $result->data(
+        { user => $user, app => $app_param, restored => 1,
+          old_target => $journal->{old} } );
+    return 1;
 }
 
 sub _gate_app {
@@ -5929,9 +6072,13 @@ sub app_helper_artisan {
         $friendly = _friendly_artisan_error( $approot, 0, $res );
     }
     my $fallback = undef;
-    if ( $failed && $command eq 'storage:link' && defined $friendly && $friendly eq 'disabled_symlink' ) {
-        my ( $made, $note ) = _ensure_storage_link($approot);
+    if ( $failed && $command eq 'storage:link'
+        && ( ( defined $friendly && $friendly eq 'disabled_symlink' )
+            || _storage_link_dead($approot) ) ) {
+        my ( $made, $note, $old_target ) = _ensure_storage_link( $approot, $home );
         $fallback = { created => $made ? 1 : 0, detail => $note };
+        $fallback->{old_target} = $old_target
+          if $made && defined $old_target && $old_target ne '';
     }
     my %friendly_text = (
         disabled_symlink => 'PHP has symlink() disabled, so storage:link cannot link.',
@@ -5954,9 +6101,15 @@ sub app_helper_artisan {
             timed_out => $res->{timed_out} ? 1 : 0,
         }
     );
-    _activity_log( $home, 'app_helper', 'run artisan',
-        { app => $app_param, command => $command, exit => $res->{exit} + 0 },
-        undef );
+    my %activity = (
+        app => $app_param, command => $command, exit => $res->{exit} + 0 );
+    my $undo;
+    if ( ref $fallback eq 'HASH' && defined $fallback->{old_target} ) {
+        $activity{old_target} = $fallback->{old_target};
+        $undo = { fn => 'app_helper_storage_undo',
+                  args => { app => $app_param } };
+    }
+    _activity_log( $home, 'app_helper', 'run artisan', \%activity, $undo );
     return 1;
 }
 
@@ -9628,7 +9781,20 @@ sub _readiness_flags {
     my $prod  = ( $env{APP_ENV} // '' ) eq 'production' ? 1 : 0;
     my $key_empty = !( defined $env{APP_KEY} && $env{APP_KEY} ne '' );
     my @mapped = _mapped_domains( $user, $approot );
-    my $storage_link = -e "$approot/public/storage" ? 1 : 0;
+    my $storage_path = "$approot/public/storage";
+    my $storage_link = 'missing';
+    my $storage_link_target;
+    my @storage_lstat = lstat $storage_path;
+    if (@storage_lstat) {
+        if ( -l _ && !-e $storage_path ) {
+            $storage_link = 'broken';
+            my $old = readlink $storage_path;
+            $storage_link_target = $old if defined $old && $old ne '';
+        }
+        else {
+            $storage_link = 'ok';
+        }
+    }
     my $big_log_mb = 0;
     for my $log ( @{ _list_logs($approot) } ) {
         my $mb = int( $log->{size} / ( 1024 * 1024 ) );
@@ -9655,6 +9821,9 @@ sub _readiness_flags {
         env_production => $prod,
         key_empty    => $key_empty ? 1 : 0,
         storage_link => $storage_link,
+        ( defined $storage_link_target
+            ? ( storage_link_target => $storage_link_target )
+            : () ),
         big_log_mb   => $big_log_mb + 0,
         env_exposed  => $crit ? 1 : 0,
         config_cache => $config_cache,

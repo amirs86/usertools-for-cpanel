@@ -27,6 +27,7 @@ use lib "$FindBin::Bin/lib";
 
 our ( %FAKE_UID, %FAKE_GID, %FAKE_GRPNAME, %FAKE_ERRNO );
 our $HAVE_FEATURE = 1;
+our $FAIL_SYMLINK = 0;
 
 my $REAL_GID;
 
@@ -66,6 +67,13 @@ BEGIN {
             return ( 'testuser', 'x', 1000, 1000, '', '', '', $h, '/bin/bash' );
         }
         return CORE::getpwnam($name);
+    };
+    *CORE::GLOBAL::symlink = sub {
+        if ($FAIL_SYMLINK) {
+            $FAIL_SYMLINK--;
+            return 0;
+        }
+        return CORE::symlink( $_[0], $_[1] );
     };
 }
 
@@ -2853,7 +2861,7 @@ for my $fn (qw(app_helper_list app_helper_add app_helper_remove
   app_helper_maintenance app_helper_cron_status app_helper_cron_add
   app_helper_cron_remove app_helper_readiness app_helper_production_preview
   app_helper_production_apply app_helper_production_undo
-  app_helper_key_generate)) {
+  app_helper_storage_undo app_helper_key_generate)) {
     is( $Cpanel::API::UserTools::API{$fn}{needs_feature},
         'usertools_app_helper', "%API declares needs_feature for $fn" );
 }
@@ -3333,6 +3341,147 @@ sub fakephp_argv {
         FakeArgs->new( app => 'myapp', command => 'storage:link' ), $res );
     is( $res->{data}{fallback}{created}, 0, 'existing target never replaced' );
     like( $res->{data}{fallback}{detail}, qr/already exists/, 'refusal explained' );
+}
+
+{
+    # A dead link is replaced only after every component check, and undo
+    # restores the old link text from the server-side record.
+    my $home = make_app_home();
+    my $old = "$home/moved-home/storage/app/public";
+    symlink $old, "$home/myapp/public/storage" or die $!;
+    make_fake_php("$home/phpbin");
+    local $Cpanel::API::UserTools::TEST_PHP_DIR = "$home/phpbin/opt/cpanel";
+    fakephp_conf("$home/myapp", exit => "1",
+        out => 'The [public/storage] link already exists.');
+    $Cpanel::API::UserTools::TEST_ARTISAN_TIMEOUT = 30;
+    unlink "$home/myapp/.env";
+    my $res = FakeResult->new();
+    my $ok = Cpanel::API::UserTools::app_helper_artisan(
+        FakeArgs->new( app => 'myapp', command => 'storage:link' ), $res );
+    ok( $ok, 'dead link repair call returns' );
+    is( $res->{data}{fallback}{created}, 1, 'dead link repaired' );
+    is( $res->{data}{fallback}{old_target}, $old, 'old target reported' );
+    is( readlink("$home/myapp/public/storage"), '../storage/app/public',
+        'repaired link is the fixed target' );
+    ok( -f Cpanel::API::UserTools::_storage_link_journal_path( $home, "$home/myapp" ),
+        'undo record saved server-side' );
+    open my $af, '<', "$home/.cpanel/usertools/activity.jsonl" or die $!;
+    my @acts = map { JSON::PP->new()->decode($_) } grep { /\S/ } <$af>;
+    close $af;
+    my ($run) = grep { $_->{action} eq 'run artisan' } @acts;
+    is( $run->{summary}{old_target}, $old, 'activity records the old target' );
+    is( $run->{undo}{fn}, 'app_helper_storage_undo', 'activity carries undo' );
+    is_deeply( $run->{undo}{args}, { app => 'myapp' },
+        'undo receives only the app id' );
+
+    $res = FakeResult->new();
+    $ok = Cpanel::API::UserTools::app_helper_storage_undo(
+        FakeArgs->new( app => 'myapp' ), $res );
+    ok( $ok, 'storage link undo accepted' );
+    is( $res->{data}{restored}, 1, 'undo reports the restore' );
+    is( readlink("$home/myapp/public/storage"), $old, 'undo puts the old text back' );
+    ok( !-e Cpanel::API::UserTools::_storage_link_journal_path( $home, "$home/myapp" ),
+        'undo record removed after use' );
+
+    $res = FakeResult->new();
+    $ok = Cpanel::API::UserTools::app_helper_storage_undo(
+        FakeArgs->new( app => 'myapp' ), $res );
+    ok( !$ok, 'second undo refused' );
+    like( $res->{errors}[0][0], qr/No saved storage link repair/,
+        'second undo explains there is nothing left' );
+}
+
+{
+    # Readiness distinguishes ok, missing and broken, and shows the old
+    # target for broken links.
+    my $home = make_app_home();
+    my $approot = "$home/myapp";
+    my $link = "$approot/public/storage";
+    no warnings 'redefine';
+    local *Cpanel::API::UserTools::_mapped_domains = sub { return (); };
+    local *Cpanel::API::UserTools::_env_probe_app = sub { return { checked => [] }; };
+    local *Cpanel::API::UserTools::_list_logs = sub { return []; };
+    local *Cpanel::API::UserTools::_proc_open_disabled_for_app = sub { return 0; };
+    local *Cpanel::API::UserTools::_missing_extensions_for_app = sub { return []; };
+
+    my $flags = Cpanel::API::UserTools::_readiness_flags(
+        'testuser', $home, 1000, $approot );
+    is( $flags->{storage_link}, 'missing', 'readiness: missing' );
+    ok( !exists $flags->{storage_link_target}, 'missing has no old target' );
+
+    my $old = "$home/other-home/storage/app/public";
+    symlink $old, $link or die $!;
+    $flags = Cpanel::API::UserTools::_readiness_flags(
+        'testuser', $home, 1000, $approot );
+    is( $flags->{storage_link}, 'broken', 'readiness: broken' );
+    is( $flags->{storage_link_target}, $old, 'broken shows the old target' );
+
+    unlink $link or die $!;
+    symlink '../storage/app/public', $link or die $!;
+    $flags = Cpanel::API::UserTools::_readiness_flags(
+        'testuser', $home, 1000, $approot );
+    is( $flags->{storage_link}, 'ok', 'readiness: live link is ok' );
+
+    unlink $link or die $!;
+    mkdir $link or die $!;
+    $flags = Cpanel::API::UserTools::_readiness_flags(
+        'testuser', $home, 1000, $approot );
+    is( $flags->{storage_link}, 'ok', 'readiness: real directory is ok' );
+}
+
+{
+    # Never replace a live link, a real directory or a file.
+    my $home = make_app_home();
+    my $approot = "$home/myapp";
+    my $link = "$approot/public/storage";
+    symlink '../storage/app/public', $link or die $!;
+    my ( $made, $note ) = Cpanel::API::UserTools::_ensure_storage_link( $approot, $home );
+    is( $made, 0, 'live link left alone' );
+    like( $note, qr/already exists/, 'live link refusal explained' );
+    is( readlink($link), '../storage/app/public', 'live link text unchanged' );
+
+    unlink $link or die $!;
+    mkdir $link or die $!;
+    ( $made, $note ) = Cpanel::API::UserTools::_ensure_storage_link( $approot, $home );
+    is( $made, 0, 'real directory left alone' );
+    ok( -d $link, 'real directory still there' );
+
+    rmdir $link or die $!;
+    open my $fh, '>', $link or die $!;
+    print $fh "not a link\n";
+    close $fh;
+    ( $made, $note ) = Cpanel::API::UserTools::_ensure_storage_link( $approot, $home );
+    is( $made, 0, 'file left alone' );
+    ok( -f $link, 'file still there' );
+}
+
+{
+    # Repair cannot finish: the missing component is reported and the
+    # dead link is untouched.
+    my $home = make_app_home();
+    my $approot = "$home/myapp";
+    my $old = "$home/elsewhere/storage/app/public";
+    symlink $old, "$approot/public/storage" or die $!;
+    rmdir "$approot/storage/app/public" or die $!;
+    my ( $made, $note ) =
+      Cpanel::API::UserTools::_ensure_storage_link( $approot, $home );
+    is( $made, 0, 'dead link not repaired without storage/app/public' );
+    like( $note, qr/storage\/app\/public is missing/, 'reason names the component' );
+    is( readlink("$approot/public/storage"), $old, 'dead link still points at the old target' );
+}
+
+{
+    # A failed symlink call puts the old dead link back.
+    my $home = make_app_home();
+    my $approot = "$home/myapp";
+    my $old = "$home/gone/storage/app/public";
+    symlink $old, "$approot/public/storage" or die $!;
+    local $FAIL_SYMLINK = 1;
+    my ( $made, $note ) =
+      Cpanel::API::UserTools::_ensure_storage_link( $approot, $home );
+    is( $made, 0, 'symlink failure is reported' );
+    like( $note, qr/old link was restored/, 'failure says the old link came back' );
+    is( readlink("$approot/public/storage"), $old, 'old dead link restored unchanged' );
 }
 
 {

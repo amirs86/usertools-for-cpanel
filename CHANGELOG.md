@@ -19,6 +19,11 @@ All notable changes to this project are documented here. Versions follow
   on the standard ports. It reports a loop, too many redirects, an off-site
   hop or the final URL. A loop also lists the redirect-related `.htaccess`
   lines from the document root and its parent folders, read-only.
+- App Helper: readiness reports `public/storage` as `ok`, `missing` or
+  `broken` (a dead symlink, shown with its old target). The existing
+  `storage:link` fallback replaces only a dead symlink, after all component
+  checks, saves the old target, and restores it if the new link cannot be
+  made. The Activity entry carries the old target and an Undo action.
 
 ## [0.2.0] - 2026-11-02
 

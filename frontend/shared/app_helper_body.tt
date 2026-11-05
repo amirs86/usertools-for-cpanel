@@ -113,6 +113,7 @@ var UT_STR = {
     readinessDebug: "[% locale.maketext('Debug on') %]",
     readinessKey: "[% locale.maketext('APP_KEY empty') %]",
     readinessStorage: "[% locale.maketext('Storage link missing') %]",
+    readinessStorageBroken: "[% locale.maketext('Storage link broken; it points at: ') %]",
     readinessEnv: "[% locale.maketext('.env exposed') %]",
     readinessCache: "[% locale.maketext('Config cache stale or missing') %]",
     readinessLog: "[% locale.maketext('Oversized log (MB): ') %]",
@@ -703,7 +704,11 @@ window.addEventListener("DOMContentLoaded", function () {
             if (data.debug_true) { items.push(UT_STR.readinessDebug); }
             if (!data.env_production) { items.push(UT_STR.readinessProduction); }
             if (data.key_empty) { items.push(UT_STR.readinessKey); }
-            if (!data.storage_link) { items.push(UT_STR.readinessStorage); }
+            if (data.storage_link === "missing") {
+                items.push(UT_STR.readinessStorage);
+            } else if (data.storage_link === "broken") {
+                items.push(UT_STR.readinessStorageBroken + (data.storage_link_target || "?"));
+            }
             if (data.env_exposed) { items.push(UT_STR.readinessEnv); }
             if (data.config_cache !== "fresh") { items.push(UT_STR.readinessCache); }
             if (data.big_log_mb > 200) { items.push(UT_STR.readinessLog + data.big_log_mb); }
