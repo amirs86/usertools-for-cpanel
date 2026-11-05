@@ -25,13 +25,14 @@ Security properties (each covered by tests/test_site_doctor.py):
     the server-side domain plus the walked relative path only.
   * Probing is status and size only: HEAD first, then a capped GET.
     Bodies are read up to a cap and discarded, never stored or returned.
-    A plain-HTTP redirect to https://<same host> is followed once over
-    TLS to the same literal IP (SNI = domain, never verified) so that
-    forced-HTTPS sites report the real page; the scheme that answered
-    is recorded. Served bytes count as confirmed only when their length
-    matches the file on disk, otherwise likely (soft 404s answer 200
-    for anything). Names that cannot appear in a .htaccess rule are
-    marked unblockable: those are moved, never blocked.
+    The homepage check follows up to ten redirects to the same literal IP,
+    the listed domain or its www/bare counterpart, over http or https on
+    the standard ports, and reports a loop, too many redirects, an off-site
+    hop or the final URL. Exposed-file and xmlrpc.php probes keep their
+    single same-host HTTPS hop. Served bytes count as confirmed only when
+    their length matches the file on disk, otherwise likely (soft 404s
+    answer 200 for anything). Names that cannot appear in a .htaccess rule
+    are marked unblockable: those are moved, never blocked.
   * One live job per user: the same lock file as the other engines, so a
     scan never overlaps another job.
 
@@ -223,6 +224,11 @@ def _add_capped(summary, key, value):
 # ---------------------------------------------------------------------------
 
 HTTPS_PORT = 443
+HTTP_PORT = 80
+MAX_REDIRECT_HOPS = 10
+MAX_REDIRECT_SOURCES = 100
+MAX_LOCATION_LENGTH = 2048
+REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 
 
 def _open_conn(ip, port, host, timeout, use_tls):
@@ -415,6 +421,238 @@ def http_probe(ip, port, host, path, timeout, https_port=None,
                 return first
             return second
     return first
+
+
+def _has_control(text):
+    # type: (str) -> bool
+    """True when a URL fragment contains control characters."""
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in text)
+
+
+def _unsafe_request(path, query):
+    # type: (str, str) -> bool
+    """Reject paths this probe must never send (same rule as http_probe)."""
+    return (_has_control(path) or _has_control(query)
+            or "\x00" in path or ".." in path.split("/"))
+
+
+def _quote_request(path, query):
+    # type: (str, str) -> object
+    """Quote one request target; None when the path is unsafe."""
+    if _unsafe_request(path, query):
+        return None
+    quoted = urllib.parse.quote(path, safe="/%:@!$&'()*+,;=-._~")
+    if query:
+        quoted += "?" + urllib.parse.quote(
+            query, safe="=&%:@!$'()*+,;/?-._~")
+    return quoted
+
+
+def _display_url(scheme, host, port, path, query):
+    # type: (str, str, int, str, str) -> str
+    """URL text for the page; standard ports stay implicit."""
+    default = HTTP_PORT if scheme == "http" else HTTPS_PORT
+    netloc = host if port == default else "%s:%d" % (host, port)
+    tail = path
+    if query:
+        tail += "?" + query
+    return "%s://%s%s" % (scheme, netloc, tail)
+
+
+def _allowed_hosts(host):
+    # type: (str) -> set
+    """The listed domain plus its www/bare counterpart (any case)."""
+    base = host.lower().rstrip(".")
+    allowed = {base}
+    if base.startswith("www."):
+        allowed.add(base[4:])
+    else:
+        allowed.add("www." + base)
+    return allowed
+
+
+def _loop_key(scheme, host, path, query):
+    # type: (str, str, str, str) -> tuple
+    """The repeat test for a chain: scheme, host, path and query."""
+    return (scheme.lower(), host.lower().rstrip("."), path or "/", query or "")
+
+
+def _redirect_location(location, current_url, allowed, http_port, https_port):
+    # type: (object, str, set, int, int) -> dict
+    """Resolve one Location without DNS, cookies or a second address.
+
+    Returns {"target": ...}, {"leaves_to": host, "url": ...} for another
+    host, or {"error": reason} when the address is not safe to probe.
+    """
+    if not isinstance(location, str) or len(location) > MAX_LOCATION_LENGTH \
+            or _has_control(location):
+        return {"error": "redirect address is not usable"}
+    try:
+        parts = urllib.parse.urlsplit(
+            urllib.parse.urljoin(current_url, location))
+    except ValueError:
+        return {"error": "redirect address is not usable"}
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https"):
+        return {"error": "redirect is not http or https"}
+    if parts.username or parts.password:
+        return {"error": "redirect contains sign-in details"}
+    try:
+        host = parts.hostname
+    except ValueError:
+        return {"error": "redirect address has no usable host"}
+    if not host:
+        return {"error": "redirect address has no host"}
+    host = host.lower().rstrip(".")
+    try:
+        explicit_port = parts.port
+    except ValueError:
+        return {"error": "redirect address has an invalid port"}
+    path = parts.path or "/"
+    query = parts.query or ""
+    if _unsafe_request(path, query):
+        return {"error": "redirect path cannot be probed safely"}
+    if scheme == "http":
+        port = explicit_port or HTTP_PORT
+        display_port = http_port
+    else:
+        port = explicit_port or HTTPS_PORT
+        display_port = https_port
+    url = _display_url(scheme, host, port, path, query)
+    if host not in allowed:
+        return {"leaves_to": host, "url": url}
+    if port != display_port:
+        return {"error": "redirect uses a non-standard port"}
+    return {"target": {
+        "scheme": scheme, "host": host, "port": port,
+        "path": path, "query": query, "url": url,
+        "key": _loop_key(scheme, host, path, query),
+    }}
+
+
+def _chain_result(verdict, chain, urls, status, final_url, probe=None,
+                  scheme="http", error=None, leaves_to=None, reason=None):
+    # type: (str, list, list, int, str, object, str, object, object, object) -> dict
+    """Build the homepage probe record shared with the engine summary."""
+    last = chain[-1] if chain else {}
+    body = probe if isinstance(probe, dict) else {}
+    return {
+        "status": status,
+        "location": last.get("location"),
+        "ms": last.get("ms"),
+        "length": body.get("length"),
+        "exposed": bool(body.get("exposed")),
+        "error": error if error is not None else body.get("error"),
+        "scheme": scheme,
+        "verdict": verdict,
+        "final_url": final_url,
+        "leaves_to": leaves_to,
+        "reason": reason,
+        "chain": chain,
+        "urls": urls,
+        "redirects": max(0, len(chain) - 1),
+    }
+
+
+def http_chain(ip, port, host, path, timeout, https_port=None,
+               max_hops=MAX_REDIRECT_HOPS):
+    # type: (str, int, str, str, float, object, int) -> dict
+    """Follow the homepage redirect chain on the same literal IP.
+
+    HEAD first, then the capped GET fallback, exactly like http_probe.
+    Every request goes to `ip`; only the listed domain and its www/bare
+    counterpart are allowed, over http/https on the standard ports (the
+    target's own http port and https_port stand in for 80/443 in tests).
+    A repeat of (scheme, host, path, query) stops as a loop. More than
+    max_hops followed redirects stops as too_many. An off-site Location
+    is reported as leaves_to and is never requested. Bodies are never
+    stored.
+    """
+    if https_port is None:
+        https_port = HTTPS_PORT
+    path = path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    quoted = _quote_request(path, "")
+    if quoted is None:
+        return _chain_result("error", [], [], 0, "", scheme="http",
+                             error="refusing to probe an unsafe path")
+    allowed = _allowed_hosts(host)
+    current = {
+        "scheme": "http", "host": host.lower().rstrip("."), "port": port,
+        "path": path, "query": "",
+        "url": _display_url("http", host.lower().rstrip("."), port, path, ""),
+        "key": _loop_key("http", host, path, ""),
+    }
+    chain = []
+    urls = []
+    visited = set()
+    redirects = 0
+    while True:
+        key = current["key"]
+        visited.add(key)
+        urls.append(current["url"])
+        quoted = _quote_request(current["path"], current["query"])
+        if quoted is None:
+            return _chain_result(
+                "error", chain, urls, 0, current["url"],
+                scheme=current["scheme"],
+                error="refusing to probe an unsafe path")
+        probe = _probe_scheme(ip, current["port"], current["host"], quoted,
+                              timeout, current["scheme"] == "https")
+        status = probe.get("status") or 0
+        if status == 0:
+            # Keep the last response that did answer so the page can
+            # still show the redirect that led to the failed request.
+            last = chain[-1] if chain else {}
+            return _chain_result(
+                "stopped" if chain else "error", chain, urls,
+                last.get("status") or 0, current["url"],
+                probe=probe, scheme=last.get("scheme", current["scheme"]),
+                error="follow failed: %s"
+                % (probe.get("error") or "request failed"))
+        chain.append({
+            "url": current["url"],
+            "scheme": current["scheme"],
+            "status": status,
+            "location": probe.get("location"),
+            "ms": probe.get("ms"),
+        })
+        if status not in REDIRECT_STATUSES:
+            return _chain_result(
+                "ok", chain, urls, status, current["url"],
+                probe=probe, scheme=current["scheme"])
+        location = probe.get("location")
+        if not location:
+            return _chain_result(
+                "ok", chain, urls, status, current["url"],
+                probe=probe, scheme=current["scheme"])
+        resolved = _redirect_location(location, current["url"], allowed,
+                                      port, https_port)
+        if "error" in resolved:
+            return _chain_result(
+                "stopped", chain, urls, status, current["url"],
+                probe=probe, scheme=current["scheme"],
+                error=probe.get("error"), reason=resolved["error"])
+        if "leaves_to" in resolved:
+            urls.append(resolved["url"])
+            return _chain_result(
+                "leaves", chain, urls, status, resolved["url"],
+                probe=probe, scheme=current["scheme"],
+                leaves_to=resolved["leaves_to"])
+        target = resolved["target"]
+        if redirects >= max_hops:
+            urls.append(target["url"])
+            return _chain_result(
+                "too_many", chain, urls, status, target["url"],
+                probe=probe, scheme=current["scheme"])
+        if target["key"] in visited:
+            urls.append(target["url"])
+            return _chain_result(
+                "loop", chain, urls, status, target["url"],
+                probe=probe, scheme=current["scheme"])
+        redirects += 1
+        current = target
 
 
 def _content_length(resp):
@@ -745,6 +983,27 @@ def analyse_htaccess(blob):
             "php_value_lines": php_lines,
             "missing_rewrite_engine": has_rewrite and not has_engine,
             "marker": marker}
+
+
+def redirect_source_line(code):
+    # type: (str) -> bool
+    """True for a line that can send a request to another URL."""
+    stripped = code.strip()
+    if not stripped:
+        return False
+    if re.match(r"Redirect(?:Match)?\b", stripped, re.IGNORECASE):
+        return True
+    if re.match(r"RewriteCond\b", stripped, re.IGNORECASE) \
+            and re.search(r"%\{HTTPS\}", stripped, re.IGNORECASE):
+        return True
+    if re.match(r"RewriteRule\b", stripped, re.IGNORECASE):
+        for match in re.finditer(r"\[([^\]]*)\]", stripped):
+            for flag in match.group(1).split(","):
+                flag = flag.strip().upper()
+                if flag == "R" or flag.startswith("R="):
+                    return True
+    return False
+
 # ---------------------------------------------------------------------------
 # Doctor scan: one fact record per website
 # ---------------------------------------------------------------------------
@@ -792,9 +1051,12 @@ class Checker(object):
         docroot = self.check_docroot(target)
         rec["docroot"] = docroot
         if docroot.get("usable"):
-            rec["http"] = http_probe(target["ip"], target["port"], domain,
-                                     "/", self.timeout, self.https_port,
-                                     self.domains)
+            rec["http"] = http_chain(
+                target["ip"], target["port"], domain, "/", self.timeout,
+                self.https_port)
+            if rec["http"].get("verdict") == "loop":
+                rec["http"]["sources"] = self.redirect_sources(
+                    docroot["hrel"])
             rec["htaccess"] = self.check_htaccess(
                 docroot["abs"], docroot["hrel"])
             rec["logs"] = self.check_logs(domain, docroot["abs"],
@@ -859,6 +1121,62 @@ class Checker(object):
         if blob is None:
             return {"present": False}
         return analyse_htaccess(blob)
+
+    def read_dir_htaccess(self, hrel):
+        # type: (str) -> object
+        """Read one .htaccess from a real, owned directory inside home."""
+        full = self.home if hrel == "." else os.path.join(self.home, hrel)
+        try:
+            st = os.lstat(full)
+        except OSError:
+            return None
+        if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode) \
+                or st.st_uid != self.uid or st.st_dev != self.top_dev:
+            return None
+        try:
+            fd = os.open(full, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            return None
+        try:
+            try:
+                fst = os.fstat(fd)
+            except OSError:
+                return None
+            if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino) \
+                    or fst.st_uid != self.uid or not stat.S_ISDIR(fst.st_mode):
+                return None
+            return read_htaccess(fd)
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def redirect_sources(self, docroot_hrel):
+        # type: (str) -> list
+        """Redirect-related .htaccess lines from the docroot up to home.
+
+        Read-only and capped. Symlinks, other owners, other filesystems
+        and anything above the home are never read. Each entry is
+        {file, line, text}; the file is home-relative.
+        """
+        out = []
+        rel = docroot_hrel
+        while True:
+            blob = self.read_dir_htaccess(rel)
+            if blob is not None:
+                text = blob.decode("utf-8", errors="replace")
+                for num, line in enumerate(text.splitlines(), 1):
+                    if not redirect_source_line(line.split("#", 1)[0]):
+                        continue
+                    name = ".htaccess" if rel == "." else rel + "/.htaccess"
+                    out.append({"file": name, "line": num,
+                                "text": line.strip()})
+                    if len(out) >= MAX_REDIRECT_SOURCES:
+                        return out
+            if rel == ".":
+                return out
+            rel = rel.rsplit("/", 1)[0] if "/" in rel else "."
 
     def check_logs(self, domain, abs_root, hrel):
         # type: (str, str, str) -> dict

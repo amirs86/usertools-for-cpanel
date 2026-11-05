@@ -2341,36 +2341,101 @@ sub _doctor_verdicts {
     }
     my $http = ref $rec->{http} eq 'HASH' ? $rec->{http} : {};
     my $status = $http->{status} // 0;
-    if ( !$status ) {
-        $say->( "$domain did not answer: the connection failed "
-          . "(the site may be down, or its DNS may not point here yet).", 1 );
+    my $verdict = $http->{verdict} // '';
+    my $urls = ref $http->{urls} eq 'ARRAY' ? $http->{urls} : [];
+    my $chain_text = join( ' -> ', @{$urls} );
+    my $handled_http = 0;
+    if ( $verdict eq 'loop' ) {
+        $say->("$domain loops between addresses: $chain_text.", 1);
+        $handled_http = 1;
     }
-    elsif ( $status == 200 ) {
-        my $ms = defined $http->{ms} ? " in $http->{ms} ms" : "";
-        push @lines, "$domain loads (HTTP 200$ms).";
+    elsif ( $verdict eq 'too_many' ) {
+        $say->("$domain redirects too many times (more than 10 hops): "
+          . "$chain_text.", 1);
+        $handled_http = 1;
     }
-    elsif ( $status >= 300 && $status < 400 ) {
+    elsif ( $verdict eq 'leaves' ) {
+        my $to = $http->{leaves_to} // 'another site';
+        my $final = $http->{final_url} // $http->{location} // '';
+        $say->("$domain leaves to $to: $final. The chain stops there "
+          . "and that site is not checked.", 1);
+        $handled_http = 1;
+    }
+    elsif ( $verdict eq 'stopped' ) {
         my $loc = $http->{location} // 'elsewhere';
-        my $extra = defined $http->{error} && $http->{error} ne ''
-          ? " ($http->{error}; not checked)"
-          : " (not checked)";
-        $say->("$domain redirects (HTTP $status to $loc); "
-          . "only the first redirect is shown, it is not followed further$extra.", 1);
+        my $why = defined $http->{error} && $http->{error} ne ''
+          ? $http->{error}
+          : ( $http->{reason} // 'the chain could not continue' );
+        $say->("$domain redirects (HTTP $status to $loc), but following "
+          . "it failed: $why.", 1);
+        $handled_http = 1;
     }
-    elsif ( $status == 403 ) {
-        $say->("$domain is forbidden (HTTP 403): check the .htaccess "
-          . "deny rules and the folder permissions.", 1);
+    elsif ( $verdict eq 'ok' && ( $http->{redirects} // 0 ) > 0 ) {
+        my $hops = $http->{redirects} // 0;
+        my $final = $http->{final_url} // $http->{location} // '';
+        if ( $status == 200 ) {
+            my $ms = defined $http->{ms} ? " in $http->{ms} ms" : "";
+            push @lines, "$domain loads (HTTP 200$ms after $hops redirects): "
+              . "$final.";
+        }
+        else {
+            $say->("$domain ends at $final after $hops redirects "
+              . "(HTTP $status).", $status >= 400 ? 1 : 0);
+        }
+        $handled_http = 1;
     }
-    elsif ( $status == 404 ) {
-        $say->("$domain returns not found (HTTP 404): check the "
-          . "document root and the default page.", 1);
+    if ( !$handled_http ) {
+        if ( !$status ) {
+            $say->( "$domain did not answer: the connection failed "
+              . "(the site may be down, or its DNS may not point here yet).", 1 );
+        }
+        elsif ( $status == 200 ) {
+            my $ms = defined $http->{ms} ? " in $http->{ms} ms" : "";
+            push @lines, "$domain loads (HTTP 200$ms).";
+        }
+        elsif ( $status >= 300 && $status < 400 ) {
+            my $loc = $http->{location} // 'elsewhere';
+            my $extra = defined $http->{error} && $http->{error} ne ''
+              ? " ($http->{error}; not checked)"
+              : " (not checked)";
+            $say->("$domain redirects (HTTP $status to $loc); "
+              . "only the first redirect is shown, it is not followed further$extra.", 1);
+        }
+        elsif ( $status == 403 ) {
+            $say->("$domain is forbidden (HTTP 403): check the .htaccess "
+              . "deny rules and the folder permissions.", 1);
+        }
+        elsif ( $status == 404 ) {
+            $say->("$domain returns not found (HTTP 404): check the "
+              . "document root and the default page.", 1);
+        }
+        elsif ( $status >= 500 ) {
+            $say->("$domain returns a server error (HTTP $status): "
+              . "check the error log below.", 1);
+        }
+        else {
+            $say->("$domain answered HTTP $status.", 1);
+        }
     }
-    elsif ( $status >= 500 ) {
-        $say->("$domain returns a server error (HTTP $status): "
-          . "check the error log below.", 1);
-    }
-    else {
-        $say->("$domain answered HTTP $status.", 1);
+    if ( $verdict eq 'loop' ) {
+        my $sources = ref $http->{sources} eq 'ARRAY' ? $http->{sources} : [];
+        if ( @{$sources} ) {
+            $say->('Redirect-related .htaccess lines (read-only):', 1);
+            for my $source ( @{$sources} ) {
+                next unless ref $source eq 'HASH';
+                my $file = $source->{file} // '.htaccess';
+                my $line = $source->{line} // 0;
+                my $text = $source->{text} // '';
+                $say->("$file line $line: $text", 1);
+            }
+        }
+        else {
+            $say->("No redirect-related .htaccess lines were found in the "
+              . "document root or its parent folders.", 1);
+        }
+        $say->("Also check cPanel's Domains -> Force HTTPS Redirect toggle "
+          . "and its Redirects page, and, on WordPress, the Site Address "
+          . "setting: it must use https:// when HTTPS is forced.", 1);
     }
     my $doc = ref $rec->{docroot} eq 'HASH' ? $rec->{docroot} : {};
     if ( !$doc->{usable} ) {

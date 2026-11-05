@@ -67,6 +67,10 @@ var UT_STR = {
     undoDone: "[% locale.maketext('Fix undone: the original file is back.') %]",
     undoFailed: "[% locale.maketext('Undo failed: ') %]",
     homepage: "[% locale.maketext('Homepage') %]",
+    finalAddress: "[% locale.maketext('Final address') %]",
+    redirectSources: "[% locale.maketext('Redirect-related .htaccess lines') %]",
+    redirectSourceLine: "[% locale.maketext('FILE, line LINE: TEXT') %]",
+    noRedirectSources: "[% locale.maketext('No redirect-related .htaccess lines were found in the document root or its parent folders.') %]",
     docroot: "[% locale.maketext('Document root') %]",
     htaccess: "[% locale.maketext('.htaccess') %]",
     php: "[% locale.maketext('PHP') %]",
@@ -200,10 +204,35 @@ window.addEventListener("DOMContentLoaded", function () {
             verdict.forEach(function (v) { html += "<li>" + UserTools.escHtml(v) + "</li>"; });
             html += "</ul>";
             var det = "";
-            det += detailBlock(UT_STR.homepage, "<ul>" + escList([
-                "HTTP " + ((d.http || {}).status || 0) +
-                ((d.http || {}).location ? " -> " + (d.http || {}).location : ""),
-            ].filter(function (x) { return x; })) + "</ul>");
+            var h = d.http || {};
+            var homeLines = [
+                "HTTP " + (h.status || 0) +
+                (h.location ? " -> " + h.location : ""),
+            ];
+            if (h.final_url) {
+                homeLines.push(UT_STR.finalAddress + ": " + h.final_url);
+            }
+            if ((h.chain || []).length > 1 || (h.redirects || 0) > 0) {
+                (h.chain || []).forEach(function (step) {
+                    homeLines.push("HTTP " + (step.status || 0) + ": " + (step.url || ""));
+                });
+            }
+            var homeHtml = "<ul>" + escList(homeLines.filter(function (x) { return x; })) + "</ul>";
+            if (h.verdict === "loop") {
+                var sources = h.sources || [];
+                homeHtml += "<h3>" + UserTools.escHtml(UT_STR.redirectSources) + "</h3>";
+                if (sources.length) {
+                    homeHtml += "<ul>" + escList(sources.map(function (s) {
+                        return tok(tok(tok(UT_STR.redirectSourceLine,
+                            "FILE", s.file || ".htaccess"),
+                            "LINE", s.line || 0),
+                            "TEXT", s.text || "");
+                    })) + "</ul>";
+                } else {
+                    homeHtml += "<p>" + UserTools.escHtml(UT_STR.noRedirectSources) + "</p>";
+                }
+            }
+            det += detailBlock(UT_STR.homepage, homeHtml);
             html += det;
             var logHtml = "";
             [["docroot_log", "error_log"], ["php_log", "PHP error log"]].forEach(function (pair) {

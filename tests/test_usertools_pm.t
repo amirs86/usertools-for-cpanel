@@ -1280,6 +1280,62 @@ sub site_make_home {
     is( $v->{attention}, 0, 'clean site needs no attention' );
     like( $v->{lines}[0], qr/loads \(HTTP 200/, 'homepage verdict' );
 
+    my $loop = {
+        %{$good},
+        http => {
+            status => 301, verdict => 'loop',
+            urls => [ 'http://a/', 'https://a/', 'http://a/' ],
+            final_url => 'http://a/',
+            chain => [
+                { url => 'http://a/',  status => 301 },
+                { url => 'https://a/', status => 301 },
+            ],
+            sources => [
+                { file => '.htaccess', line => 3,
+                  text => 'RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]' },
+            ],
+        },
+    };
+    $v = Cpanel::API::UserTools::_doctor_verdicts( $loop, {} );
+    is( $v->{attention}, 1, 'loop needs attention' );
+    ok( ( grep { /http:\/\/a\/ -> https:\/\/a\/ -> http:\/\/a\// } @{ $v->{lines} } ),
+        'loop lists the full chain' );
+    ok( ( grep { /\.htaccess line 3: RewriteRule/ } @{ $v->{lines} } ),
+        'loop lists the redirect source line with its number' );
+    ok( ( grep { /Force HTTPS Redirect.*Redirects page/ } @{ $v->{lines} } ),
+        'loop mentions the cPanel redirect controls' );
+    ok( ( grep { /WordPress.*Site Address/ } @{ $v->{lines} } ),
+        'loop mentions the WordPress site address' );
+
+    $v = Cpanel::API::UserTools::_doctor_verdicts(
+        { %{$good}, http => { status => 301, verdict => 'too_many',
+          urls => [ 'http://a/', 'http://a/b/' ], redirects => 10 } }, {} );
+    ok( ( grep { /too many times \(more than 10 hops\)/ } @{ $v->{lines} } ),
+        'too-many-redirects verdict' );
+
+    $v = Cpanel::API::UserTools::_doctor_verdicts(
+        { %{$good}, http => { status => 301, verdict => 'leaves',
+          urls => [ 'http://a/', 'https://other.test/' ],
+          leaves_to => 'other.test', final_url => 'https://other.test/' } }, {} );
+    is( $v->{attention}, 1, 'off-site redirect needs attention' );
+    ok( ( grep { /leaves to other\.test.*not checked/ } @{ $v->{lines} } ),
+        'off-site redirect is named and not followed' );
+
+    $v = Cpanel::API::UserTools::_doctor_verdicts(
+        { %{$good}, http => { status => 200, ms => 7, verdict => 'ok',
+          redirects => 3, final_url => 'http://a/home',
+          urls => [ 'http://a/', 'http://a/one', 'http://a/two', 'http://a/home' ] } }, {} );
+    is( $v->{attention}, 0, 'finished chain needs no attention' );
+    ok( ( grep { /loads \(HTTP 200 in 7 ms after 3 redirects\).*http:\/\/a\/home/ } @{ $v->{lines} } ),
+        'finished chain shows the final URL' );
+
+    $v = Cpanel::API::UserTools::_doctor_verdicts(
+        { %{$good}, http => { status => 301, verdict => 'stopped',
+          location => 'https://a/gone', error => 'follow failed: boom' } }, {} );
+    is( $v->{attention}, 1, 'failed follow needs attention' );
+    ok( ( grep { /following it failed: follow failed: boom/ } @{ $v->{lines} } ),
+        'failed follow keeps the redirect that led to it' );
+
     my $bad = {
         domain   => 'example.test',
         http     => { status => 500, ms => 30 },
