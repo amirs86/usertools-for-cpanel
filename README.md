@@ -99,7 +99,7 @@ Full removal including settings and log:
 - Ownership Report: read-only list of files not owned by the account, with CSV download for the host.
 - Manage Shell: let users turn SSH access off, jailed, or normal (if you allow it), with policy gates and audit.
 - App Helper: find web apps, run maintenance commands, install dependencies, view logs, manage the scheduler, check `.env` safety, and adjust document roots and `.htaccess` files.
-- Space Cleaner: preview, then reclaim disk space and inodes (big logs, crash dumps, framework and WordPress caches, developer caches, old plugin files), with trash, restore, and empty.
+- Space Cleaner: preview, then reclaim disk space and inodes (big logs, crash dumps, framework and WordPress caches, developer caches including project build caches, old plugin files), with trash, restore, and empty.
 - Site Doctor: check every website at a glance (homepage status, folders, `.htaccess` mistakes, certificates, recent errors), with fixes for php_value lines under PHP-FPM and a served `xmlrpc.php` on WordPress (not offered with Jetpack), each with undo.
 - Exposed Files: find files that must never be public and probe whether the web server serves them (following a same-host HTTPS hop, capping every read), then move them to quarantine (restore) or block them with a marked `.htaccess` rule that matches the mapped file (undo). Served lengths matching the file on disk read confirmed, otherwise likely; unquotable names are Move-only.
 - Cron Doctor: read-only flags over your own crontab (every-minute schedules, unredirected output, bare `php`, duplicates, missing scripts, own-URL fetches), with one fix (silence one line's output, full crontab backup) and undo.

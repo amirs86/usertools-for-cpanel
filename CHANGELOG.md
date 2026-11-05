@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. Versions follow
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Space Cleaner: project build caches (`node_modules/.cache`,
+  `node_modules/.vite`, `.next/cache`, `.parcel-cache`, `.angular/cache`)
+  are recognised only in directories that hold a regular `package.json`
+  and are shown in the preview as one row per folder with file, byte and
+  inode counts. `.cache/pip` and `.cache/yarn` join the fixed developer
+  caches. Both are moved to the trash and restored per batch like the
+  other cache categories.
+
 ## [0.2.0] - 2026-11-02
 
 ### Added

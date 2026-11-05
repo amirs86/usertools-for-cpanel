@@ -29,7 +29,7 @@
         <p>[% locale.maketext('Files inside wp-content/cache of detected WordPress sites. Moved to the trash.') %]</p>
         <div class="ut-path" id="ut-n-wp_cache" aria-live="polite"></div></div>
       <div class="ut-card"><label class="ut-check"><input type="checkbox" id="ut-cat-dev_caches" checked> <strong>[% locale.maketext('Developer caches') %]</strong></label>
-        <p>[% locale.maketext('npm, Composer and compile caches of the plugin itself. Moved to the trash; the tools rebuild them as needed.') %]</p>
+        <p>[% locale.maketext('npm, Composer and project build caches (Next.js, Vite, Parcel, Angular). Moved to the trash; the tools rebuild them as needed.') %]</p>
         <div class="ut-path" id="ut-n-dev_caches" aria-live="polite"></div></div>
       <div class="ut-card"><label class="ut-check"><input type="checkbox" id="ut-cat-usertools_old" checked> <strong>[% locale.maketext('Old plugin files') %]</strong></label>
         <p>[% locale.maketext('Old job records and undo journals of the plugin itself, older than 30 days (always keeps the newest 3 per tool). Deleted, not trashed.') %]</p>
@@ -84,6 +84,8 @@ var UT_STR = {
     startFailed: "[% locale.maketext('Could not start: ') %]",
     catCounts: "[% locale.maketext('FILES files, SIZE') %]",
     largest: "[% locale.maketext('Largest') %]",
+    cacheFolders: "[% locale.maketext('Project cache folders') %]",
+    folderRow: "[% locale.maketext('FILES files, INODES inodes, SIZE') %]",
     topSize: "[% locale.maketext('Biggest folders by size') %]",
     topInodes: "[% locale.maketext('Biggest folders by file count') %]",
     andMoreOne: "[% locale.maketext('and 1 more.') %]",
@@ -278,6 +280,11 @@ window.addEventListener("DOMContentLoaded", function () {
                 return it.path + " (" + fmtBytes(it.size) + ")";
             }, false);
         });
+        var cacheFolders = (cats.dev_caches || {}).folders || [];
+        html += listBlock(UT_STR.cacheFolders, cacheFolders, function (it) {
+            return it.path + " (" + tok(tok(tok(UT_STR.folderRow,
+                "FILES", it.files), "INODES", it.inodes), "SIZE", fmtBytes(it.bytes)) + ")";
+        }, false);
         var topSize = (summary.top_dirs_size || []).map(function (t) {
             return t.path + " (" + fmtBytes(t.bytes) + ")";
         });

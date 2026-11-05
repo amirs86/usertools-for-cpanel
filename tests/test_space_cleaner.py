@@ -373,21 +373,196 @@ def test_dev_caches_trash(tmp_path):
     comp = home / ".cache" / "composer"
     comp.mkdir(parents=True)
     (comp / "b").write_bytes(b"2" * 40)
+    pip = home / ".cache" / "pip"
+    pip.mkdir(parents=True)
+    (pip / "c").write_bytes(b"3" * 60)
+    yarn = home / ".cache" / "yarn"
+    yarn.mkdir(parents=True)
+    (yarn / "d").write_bytes(b"4" * 70)
     nodec = home / ".cache" / "usertools" / "node-compile-cache"
     nodec.mkdir(parents=True)
-    (nodec / "c").write_bytes(b"3" * 50)
+    (nodec / "e").write_bytes(b"5" * 50)
 
     rc, summary, _ = scan(home, "dev_caches")
     assert rc == 0
-    assert summary["categories"]["dev_caches"]["files"] == 3
-    assert summary["categories"]["dev_caches"]["bytes"] == 120
+    assert summary["categories"]["dev_caches"]["files"] == 5
+    assert summary["categories"]["dev_caches"]["bytes"] == 250
 
     rc, summary, _ = clean(home, "dev_caches")
     assert rc == 0
-    assert summary["counts"]["trashed_files"] == 3
+    assert summary["counts"]["trashed_files"] == 5
     assert not os.path.lexists(str(npm / "index-v5" / "a"))
+    assert not os.path.lexists(str(pip / "c"))
+    assert not os.path.lexists(str(yarn / "d"))
     # the cache roots themselves stay (only contents move)
     assert os.path.isdir(str(npm))
+    assert os.path.isdir(str(pip))
+    assert os.path.isdir(str(yarn))
+
+
+def seed_project(home):
+    """Fake Node project with all five build caches + keepers."""
+    proj = home / "site"
+    proj.mkdir()
+    (proj / "package.json").write_text('{"name": "site"}')
+    caches = (
+        ("node_modules/.cache", "babel", b"a" * 10),
+        ("node_modules/.vite", "deps", b"b" * 20),
+        (".next/cache", "webpack", b"c" * 30),
+        (".parcel-cache", "data", b"d" * 40),
+        (".angular/cache", "cli", b"e" * 50),
+    )
+    for rel, name, data in caches:
+        folder = proj / rel
+        folder.mkdir(parents=True)
+        (folder / name).write_bytes(data)
+    keepers = (
+        (".next/server/app.js", b"server"),
+        (".next/standalone/keep.txt", b"standalone"),
+        (".nuxt/dist/keep.js", b"nuxt"),
+        ("dist/bundle.js", b"dist"),
+        ("node_modules/react/index.js", b"react"),
+    )
+    for rel, data in keepers:
+        path = proj / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    return proj
+
+
+def test_project_build_caches_scan_clean_restore(tmp_path):
+    home = make_home(tmp_path)
+    proj = seed_project(home)
+
+    rc, summary, _ = scan(home, "dev_caches")
+    assert rc == 0
+    cat = summary["categories"]["dev_caches"]
+    assert cat["files"] == 5
+    assert cat["bytes"] == 150
+    folders = {f["path"]: f for f in cat["folders"]}
+    assert set(folders) == {
+        "site/node_modules/.cache", "site/node_modules/.vite",
+        "site/.next/cache", "site/.parcel-cache", "site/.angular/cache",
+    }
+    for row in folders.values():
+        assert row["files"] == 1
+        assert row["inodes"] == 1
+    assert folders["site/.next/cache"]["bytes"] == 30
+
+    rc, summary, _ = clean(home, "dev_caches")
+    assert rc == 0
+    assert summary["counts"]["trashed_files"] == 5
+    batch = summary["trash_batch"]
+    for rel in ("node_modules/.cache/babel", "node_modules/.vite/deps",
+                ".next/cache/webpack", ".parcel-cache/data",
+                ".angular/cache/cli"):
+        assert not os.path.lexists(str(proj / rel)), rel
+    for rel, data in ((".next/server/app.js", b"server"),
+                      (".next/standalone/keep.txt", b"standalone"),
+                      (".nuxt/dist/keep.js", b"nuxt"),
+                      ("dist/bundle.js", b"dist"),
+                      ("node_modules/react/index.js", b"react")):
+        assert (proj / rel).read_bytes() == data, rel
+
+    rc, summary, _ = lockless("trash-restore", "--batch", batch, home=home)
+    assert rc == 0
+    assert summary["counts"]["restored_files"] == 5
+    for rel, data in (("node_modules/.cache/babel", b"a" * 10),
+                      ("node_modules/.vite/deps", b"b" * 20),
+                      (".next/cache/webpack", b"c" * 30),
+                      (".parcel-cache/data", b"d" * 40),
+                      (".angular/cache/cli", b"e" * 50)):
+        assert (proj / rel).read_bytes() == data, rel
+
+
+def test_project_caches_need_package_json(tmp_path):
+    home = make_home(tmp_path)
+    plain = home / "plain"
+    (plain / ".next" / "cache").mkdir(parents=True)
+    (plain / ".next" / "cache" / "keep").write_bytes(b"keep")
+    (plain / "node_modules" / ".cache").mkdir(parents=True)
+    (plain / "node_modules" / ".cache" / "keep").write_bytes(b"keep")
+    linked = home / "linked"
+    (linked / ".parcel-cache").mkdir(parents=True)
+    (linked / ".parcel-cache" / "keep").write_bytes(b"keep")
+    os.symlink(str(home / "package.json"), str(linked / "package.json"))
+
+    rc, summary, _ = scan(home, "dev_caches")
+    assert rc == 0
+    assert summary["categories"]["dev_caches"]["files"] == 0
+    assert (plain / ".next" / "cache" / "keep").read_bytes() == b"keep"
+    assert (plain / "node_modules" / ".cache" / "keep").read_bytes() == b"keep"
+    assert (linked / ".parcel-cache" / "keep").read_bytes() == b"keep"
+
+
+def test_project_cache_symlink_skipped(tmp_path):
+    home = make_home(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_bytes(b"outside")
+    proj = home / "site"
+    proj.mkdir()
+    (proj / "package.json").write_text("{}")
+    (proj / ".next").mkdir()
+    os.symlink(str(outside), str(proj / ".next" / "cache"))
+
+    rc, summary, _ = scan(home, "dev_caches")
+    assert rc == 0
+    assert summary["categories"]["dev_caches"]["files"] == 0
+    reasons = [e["reason"] for e in summary["paths"]["errors"]
+               if e["path"] == "site/.next/cache"]
+    assert reasons and "symlink" in reasons[0]
+    assert (outside / "keep").read_bytes() == b"outside"
+
+
+def test_project_cache_other_owner_skipped(tmp_path, monkeypatch):
+    home = make_home(tmp_path)
+    proj = seed_project(home)
+    real_stat = os.stat
+
+    def fake_stat(path, *args, **kwargs):
+        st = real_stat(path, *args, **kwargs)
+        if path == ".parcel-cache":
+            return _FakeStat(st, 99)
+        return st
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+    summary = sc.new_clean_summary("clean-scan", str(home), True)
+    top_dev = real_stat(str(home)).st_dev
+    cleaner = sc.Cleaner(str(home), os.getuid(), summary,
+                         lambda d, s: None, None, 0, top_dev, None,
+                         {"log_min_bytes": 1}, False)
+    fd = cleaner.open_dir(str(home), None, ".")
+    assert fd is not None
+    try:
+        cleaner.walk_open(fd, ".", True, None)
+    finally:
+        os.close(fd)
+    assert summary["categories"]["dev_caches"]["files"] == 4
+    reasons = [e["reason"] for e in summary["paths"]["errors"]
+               if e["path"] == "site/.parcel-cache"]
+    assert reasons and "not owned" in reasons[0]
+    assert (proj / ".parcel-cache" / "data").read_bytes() == b"d" * 40
+
+
+def test_project_cache_depth_cap(tmp_path):
+    home = make_home(tmp_path)
+    edge = home / "a" / "b" / "c" / "edge"
+    (edge / ".parcel-cache").mkdir(parents=True)
+    (edge / "package.json").write_text("{}")
+    (edge / ".parcel-cache" / "found").write_bytes(b"edge")
+    deep = home / "a" / "b" / "c" / "d" / "deep"
+    (deep / ".parcel-cache").mkdir(parents=True)
+    (deep / "package.json").write_text("{}")
+    (deep / ".parcel-cache" / "keep").write_bytes(b"deep")
+
+    rc, summary, _ = scan(home, "dev_caches")
+    assert rc == 0
+    cat = summary["categories"]["dev_caches"]
+    assert cat["files"] == 1
+    assert [f["path"] for f in cat["folders"]] == [
+        "a/b/c/edge/.parcel-cache"]
+    assert (deep / ".parcel-cache" / "keep").read_bytes() == b"deep"
 
 
 # ---------------------------------------------------------------------------

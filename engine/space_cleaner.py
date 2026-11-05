@@ -20,9 +20,10 @@ Security properties (each covered by tests/test_space_cleaner.py):
   * Confined to the caller's home: the home is canonicalised with realpath.
     Writes only ever name categories from a fixed server-side list (never
     paths from the caller): the engine itself derives every candidate path
-    during its own walk, plus three fixed cache directories, the plugin's
-    own jobs/undo folders, and the per-domain PHP logs under ~/logs/.
-    Nothing else under ~/logs/ is ever listed for removal.
+    during its own walk, plus five fixed cache directories, the build-cache
+    folders of detected projects, the plugin's own jobs/undo folders, and
+    the per-domain PHP logs under ~/logs/. Nothing else under ~/logs/ is
+    ever listed for removal.
   * Fixed category list (the only selectable things): error_logs,
     core_dumps, app_cache, wp_cache, dev_caches, usertools_old. Anything
     outside these (backups, mail, settings, keys, the trash itself) is
@@ -104,7 +105,21 @@ BATCH_RE = re.compile(r"^[0-9]{8}T[0-9]{6}$")
 DEV_CACHE_RELS = (
     os.path.join(".npm", "_cacache"),
     os.path.join(".cache", "composer"),
+    os.path.join(".cache", "pip"),
+    os.path.join(".cache", "yarn"),
     os.path.join(".cache", "usertools", "node-compile-cache"),
+)
+
+# Build-cache folders inside a project root (a directory with a regular
+# package.json). Each tuple is walked one component at a time with
+# O_NOFOLLOW, so a symlinked node_modules, .next or .angular is never
+# followed. node_modules itself is never walked beyond these two folders.
+PROJECT_CACHE_RELS = (
+    ("node_modules", ".cache"),
+    ("node_modules", ".vite"),
+    (".next", "cache"),
+    (".parcel-cache",),
+    (".angular", "cache"),
 )
 
 PHP_LOGS_DIR_REL = "logs"
@@ -240,6 +255,7 @@ def new_clean_summary(command, home, dry_run):
     for cid in CATEGORIES:
         summary["categories"][cid] = {
             "files": 0, "bytes": 0, "inodes": 0, "largest": [],
+            "folders": [],
         }
     return summary
 
@@ -267,6 +283,28 @@ def record_candidate(summary, cid, hrel, size):
     else:
         summary["categories_omitted"][cid] = \
             summary["categories_omitted"].get(cid, 0) + 1
+
+
+def hrel_join(base, rel):
+    # type: (str, str) -> str
+    """Join a home-relative base with a slash-separated relative path."""
+    return rel if base == "." else base + "/" + rel
+
+
+def record_cache_folder(summary, cid, hrel, files, byte_count, inodes):
+    # type: (dict, str, str, int, int, int) -> None
+    """Add one preview row for a whole cache folder (files + inodes)."""
+    if files <= 0:
+        return
+    folders = summary["categories"][cid]["folders"]
+    if len(folders) >= PATH_CAP:
+        return
+    folders.append({
+        "path": hrel,
+        "files": files,
+        "bytes": byte_count,
+        "inodes": inodes,
+    })
 
 
 def finalize_largest(summary):
@@ -940,6 +978,140 @@ class Cleaner(object):
                               "app_cache")
                 self.walk_views(fd, hrel)
 
+    def cache_error(self, cache_hrel, reason):
+        # type: (str, str) -> None
+        """Record why one project build-cache folder was left alone."""
+        self.summary["counts"]["errors"] += 1
+        _add_capped(self.summary, "errors",
+                    {"path": cache_hrel, "reason": reason})
+
+    def open_cache_path(self, base_fd, base_hrel, cache_hrel, parts):
+        # type: (int, str, str, tuple) -> object
+        """Open a cache folder one real component at a time, no symlinks.
+
+        Missing components are normal and silent. A symlink, file, other
+        owner or other filesystem anywhere on the path leaves the whole
+        cache folder alone and records a reason in errors.
+        """
+        held = None
+        prefix = []
+
+        def fail(reason):
+            # type: (str) -> object
+            if held is not None:
+                try:
+                    os.close(held)
+                except OSError:
+                    pass
+            self.cache_error(cache_hrel, reason)
+            return None
+
+        for part in parts:
+            prefix.append(part)
+            part_hrel = hrel_join(base_hrel, "/".join(prefix))
+            try:
+                st = os.stat(part, dir_fd=(held if held is not None
+                                           else base_fd),
+                             follow_symlinks=False)
+            except OSError as exc:
+                if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+                    if held is not None:
+                        try:
+                            os.close(held)
+                        except OSError:
+                            pass
+                    return None
+                return fail("cannot access %s: %s" % (part_hrel, exc))
+            if stat.S_ISLNK(st.st_mode):
+                return fail("%s is a symlink; left alone" % part_hrel)
+            if not stat.S_ISDIR(st.st_mode):
+                return fail("%s is not a directory; left alone" % part_hrel)
+            if st.st_uid != self.uid:
+                return fail("%s is not owned by you; left alone" % part_hrel)
+            if st.st_dev != self.top_dev:
+                return fail("%s is on another filesystem; left alone"
+                            % part_hrel)
+            try:
+                fd = os.open(part,
+                             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                             dir_fd=(held if held is not None else base_fd))
+            except OSError as exc:
+                if pe._is_resource_error(exc):
+                    raise pe.ResourceLimitError(
+                        "too many open files while opening %s: %s"
+                        % (part_hrel, exc))
+                return fail("cannot open %s: %s" % (part_hrel, exc))
+            try:
+                fst = os.fstat(fd)
+            except OSError as exc:
+                os.close(fd)
+                return fail("cannot stat %s: %s" % (part_hrel, exc))
+            if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino) \
+                    or not stat.S_ISDIR(fst.st_mode):
+                os.close(fd)
+                return fail("%s changed during the walk; left alone"
+                            % part_hrel)
+            if held is not None:
+                try:
+                    os.close(held)
+                except OSError:
+                    pass
+            held = fd
+        return held
+
+    def walk_project_cache(self, project_fd, project_hrel, parts):
+        # type: (int, str, tuple) -> None
+        """Walk one project build-cache folder and add its preview row."""
+        cache_hrel = hrel_join(project_hrel, "/".join(parts))
+        cache_fd = self.open_cache_path(project_fd, project_hrel,
+                                        cache_hrel, parts)
+        if cache_fd is None:
+            return
+        try:
+            try:
+                fst = os.fstat(cache_fd)
+            except OSError:
+                self.cache_error(cache_hrel, "cannot stat cache folder")
+                return
+            self.handled.add((fst.st_dev, fst.st_ino))
+            cat = self.summary["categories"]["dev_caches"]
+            before_files = cat["files"]
+            before_bytes = cat["bytes"]
+            before_inodes = cat["inodes"]
+            self.walk_open(cache_fd, cache_hrel, False, "dev_caches")
+            record_cache_folder(
+                self.summary, "dev_caches", cache_hrel,
+                cat["files"] - before_files,
+                cat["bytes"] - before_bytes,
+                cat["inodes"] - before_inodes)
+        finally:
+            try:
+                os.close(cache_fd)
+            except OSError:
+                pass
+
+    def detect_project_caches(self, fd, hrel, depth):
+        # type: (int, str, int) -> None
+        """Find build caches of a project root (regular package.json).
+
+        Only directories at the main walk's depth cap are considered. A
+        missing cache folder is normal; every present but unusable one is
+        reported through errors. node_modules itself is never walked.
+        """
+        if not self.selected("dev_caches"):
+            return
+        if depth > pe.SCAN_MAX_DEPTH:
+            return
+        try:
+            marker = os.stat("package.json", dir_fd=fd,
+                             follow_symlinks=False)
+        except OSError:
+            return
+        if not stat.S_ISREG(marker.st_mode):
+            return
+        for parts in PROJECT_CACHE_RELS:
+            self.walk_project_cache(fd, hrel, parts)
+
     def open_sub(self, fd, rel):
         # type: (int, str) -> object
         """Open a known cache subfolder O_NOFOLLOW; None when absent.
@@ -1034,6 +1206,10 @@ class Cleaner(object):
         for child, st, cid in pending:
             if (st.st_dev, st.st_ino) in self.handled:
                 continue
+            # node_modules is never walked; the project cache probe stats
+            # only node_modules/.cache and node_modules/.vite directly.
+            if child == "node_modules" or child.endswith("/node_modules"):
+                continue
             sub = self.open_dir(os.path.join(self.home, child),
                                 (st.st_dev, st.st_ino), child)
             if sub is None:
@@ -1041,6 +1217,8 @@ class Cleaner(object):
             try:
                 if cid is None:
                     self.detect_roots(sub, child)
+                    self.detect_project_caches(
+                        sub, child, child.count("/") + 1)
                 self.walk_open(sub, child, enforce_protected, cid)
             finally:
                 try:
@@ -1120,7 +1298,7 @@ def scan_php_logs(cleaner):
 
 def scan_dev_caches(cleaner):
     # type: (Cleaner) -> None
-    """The three fixed developer cache directories (trash contents)."""
+    """The five fixed developer cache directories (trash contents)."""
     if not cleaner.selected("dev_caches"):
         return
     for rel in DEV_CACHE_RELS:
