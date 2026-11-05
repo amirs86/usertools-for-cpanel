@@ -26,10 +26,11 @@ Security properties (each covered by tests/test_site_doctor.py):
   * Probing is status and size only: HEAD first, then a capped GET.
     Bodies are read up to a cap and discarded, never stored or returned.
     The homepage check follows up to ten redirects to the same literal IP,
-    the listed domain or its www/bare counterpart, over http or https on
-    the standard ports, and reports a loop, too many redirects, an off-site
-    hop or the final URL. Exposed-file and xmlrpc.php probes keep their
-    single same-host HTTPS hop. Served bytes count as confirmed only when
+    the listed domain or its www/bare counterpart. Chain URLs always use
+    the scheme's standard port while connections go to the record's backend
+    port, and it reports a loop, too many redirects, an off-site hop or the
+    final URL. Exposed-file and xmlrpc.php probes keep their single same-host
+    HTTPS hop. Served bytes count as confirmed only when
     their length matches the file on disk, otherwise likely (soft 404s
     answer 200 for anything). Names that cannot appear in a .htaccess rule
     are marked unblockable: those are moved, never blocked.
@@ -448,15 +449,13 @@ def _quote_request(path, query):
     return quoted
 
 
-def _display_url(scheme, host, port, path, query):
-    # type: (str, str, int, str, str) -> str
-    """URL text for the page; standard ports stay implicit."""
-    default = HTTP_PORT if scheme == "http" else HTTPS_PORT
-    netloc = host if port == default else "%s:%d" % (host, port)
+def _display_url(scheme, host, path, query):
+    # type: (str, str, str, str) -> str
+    """URL text for the page; always on the scheme's standard port."""
     tail = path
     if query:
         tail += "?" + query
-    return "%s://%s%s" % (scheme, netloc, tail)
+    return "%s://%s%s" % (scheme, host, tail)
 
 
 def _allowed_hosts(host):
@@ -481,6 +480,9 @@ def _redirect_location(location, current_url, allowed, http_port, https_port):
     # type: (object, str, set, int, int) -> dict
     """Resolve one Location without DNS, cookies or a second address.
 
+    The URL always carries the scheme's standard port implicitly. A
+    Location may spell out that standard port, or the record's connection
+    port for the same scheme when a backend leaks it; anything else stops.
     Returns {"target": ...}, {"leaves_to": host, "url": ...} for another
     host, or {"error": reason} when the address is not safe to probe.
     """
@@ -512,19 +514,18 @@ def _redirect_location(location, current_url, allowed, http_port, https_port):
     query = parts.query or ""
     if _unsafe_request(path, query):
         return {"error": "redirect path cannot be probed safely"}
-    if scheme == "http":
-        port = explicit_port or HTTP_PORT
-        display_port = http_port
-    else:
-        port = explicit_port or HTTPS_PORT
-        display_port = https_port
-    url = _display_url(scheme, host, port, path, query)
+    url = _display_url(scheme, host, path, query)
     if host not in allowed:
         return {"leaves_to": host, "url": url}
-    if port != display_port:
+    if scheme == "http":
+        standard_port, record_port = HTTP_PORT, http_port
+    else:
+        standard_port, record_port = HTTPS_PORT, https_port
+    if explicit_port is not None \
+            and explicit_port not in (standard_port, record_port):
         return {"error": "redirect uses a non-standard port"}
     return {"target": {
-        "scheme": scheme, "host": host, "port": port,
+        "scheme": scheme, "host": host,
         "path": path, "query": query, "url": url,
         "key": _loop_key(scheme, host, path, query),
     }}
@@ -560,13 +561,15 @@ def http_chain(ip, port, host, path, timeout, https_port=None,
     """Follow the homepage redirect chain on the same literal IP.
 
     HEAD first, then the capped GET fallback, exactly like http_probe.
-    Every request goes to `ip`; only the listed domain and its www/bare
-    counterpart are allowed, over http/https on the standard ports (the
-    target's own http port and https_port stand in for 80/443 in tests).
-    A repeat of (scheme, host, path, query) stops as a loop. More than
-    max_hops followed redirects stops as too_many. An off-site Location
-    is reported as leaves_to and is never requested. Bodies are never
-    stored.
+    Every connection goes to `ip`; http uses the record's `port` and https
+    uses `https_port`. The URLs in the chain use the standard ports and
+    keep them implicit. Only the listed domain and its www/bare counterpart
+    are allowed. A Location may omit its port, write the standard port, or
+    leak the record's connection port for the same scheme; any other port
+    stops the chain. A repeat of (scheme, host, path, query) stops as a
+    loop. More than max_hops followed redirects stops as too_many. An
+    off-site Location is reported as leaves_to and is never requested.
+    Bodies are never stored.
     """
     if https_port is None:
         https_port = HTTPS_PORT
@@ -578,10 +581,11 @@ def http_chain(ip, port, host, path, timeout, https_port=None,
         return _chain_result("error", [], [], 0, "", scheme="http",
                              error="refusing to probe an unsafe path")
     allowed = _allowed_hosts(host)
+    host = host.lower().rstrip(".")
     current = {
-        "scheme": "http", "host": host.lower().rstrip("."), "port": port,
+        "scheme": "http", "host": host,
         "path": path, "query": "",
-        "url": _display_url("http", host.lower().rstrip("."), port, path, ""),
+        "url": _display_url("http", host, path, ""),
         "key": _loop_key("http", host, path, ""),
     }
     chain = []
@@ -598,7 +602,8 @@ def http_chain(ip, port, host, path, timeout, https_port=None,
                 "error", chain, urls, 0, current["url"],
                 scheme=current["scheme"],
                 error="refusing to probe an unsafe path")
-        probe = _probe_scheme(ip, current["port"], current["host"], quoted,
+        conn_port = port if current["scheme"] == "http" else https_port
+        probe = _probe_scheme(ip, conn_port, current["host"], quoted,
                               timeout, current["scheme"] == "https")
         status = probe.get("status") or 0
         if status == 0:
@@ -989,14 +994,22 @@ def redirect_source_line(code):
     # type: (str) -> bool
     """True for a line that can send a request to another URL."""
     stripped = code.strip()
-    if not stripped:
+    if not stripped or stripped.startswith("#"):
         return False
-    if re.match(r"Redirect(?:Match)?\b", stripped, re.IGNORECASE):
+    if re.match(r"Redirect(?:Match|Permanent|Temp)?\b",
+                stripped, re.IGNORECASE):
         return True
     if re.match(r"RewriteCond\b", stripped, re.IGNORECASE) \
-            and re.search(r"%\{HTTPS\}", stripped, re.IGNORECASE):
+            and re.search(
+                r"%\{(?:HTTPS|SERVER_PORT|HTTP:X-Forwarded-Proto)\}",
+                stripped, re.IGNORECASE):
         return True
     if re.match(r"RewriteRule\b", stripped, re.IGNORECASE):
+        fields = stripped.split()
+        if len(fields) >= 3:
+            target = fields[2].strip("\"'")
+            if re.match(r"https?://", target, re.IGNORECASE):
+                return True
         for match in re.finditer(r"\[([^\]]*)\]", stripped):
             for flag in match.group(1).split(","):
                 flag = flag.strip().upper()
@@ -1167,7 +1180,7 @@ class Checker(object):
             if blob is not None:
                 text = blob.decode("utf-8", errors="replace")
                 for num, line in enumerate(text.splitlines(), 1):
-                    if not redirect_source_line(line.split("#", 1)[0]):
+                    if not redirect_source_line(line):
                         continue
                     name = ".htaccess" if rel == "." else rel + "/.htaccess"
                     out.append({"file": name, "line": num,

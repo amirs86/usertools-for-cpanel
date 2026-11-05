@@ -482,7 +482,7 @@ def test_doctor_follows_same_host_https(tmp_path, web):
         tmp_path, body=b"secure home")
     try:
         app.routes["/"] = (
-            301, {"Location": "https://example.test:%d/" % tlsport}, b"")
+            301, {"Location": "https://example.test/"}, b"")
         home = make_home(tmp_path)
         summary = sd.new_clean_summary("doctor-scan", str(home), True)
         checker = sd.Checker(
@@ -509,9 +509,9 @@ def test_http_chain_loop_is_reported(tmp_path, web):
     srv, stop, thread, tlsport = _tls_path_server(
         tmp_path, tls_routes, seen)
     app.routes["/"] = (
-        301, {"Location": "https://example.test:%d/" % tlsport}, b"")
+        301, {"Location": "https://example.test/"}, b"")
     tls_routes["/"] = (
-        302, {"Location": "http://example.test:%d/" % port}, b"")
+        302, {"Location": "http://example.test/"}, b"")
     try:
         out = sd.http_chain("127.0.0.1", port, "example.test", "/", 5,
                             https_port=tlsport)
@@ -519,8 +519,8 @@ def test_http_chain_loop_is_reported(tmp_path, web):
         stop.set()
         thread.join(timeout=10)
         srv.close()
-    first = "http://example.test:%d/" % port
-    second = "https://example.test:%d/" % tlsport
+    first = "http://example.test/"
+    second = "https://example.test/"
     assert out["verdict"] == "loop", out
     assert out["urls"] == [first, second, first], out
     assert out["final_url"] == first
@@ -537,7 +537,7 @@ def test_http_chain_three_hops_ends_ok(tmp_path, web):
     out = sd.http_chain("127.0.0.1", port, "example.test", "/", 5)
     assert out["verdict"] == "ok", out
     assert out["status"] == 200
-    assert out["final_url"] == "http://example.test:%d/done" % port
+    assert out["final_url"] == "http://example.test/done"
     assert out["redirects"] == 3
     assert [entry["status"] for entry in out["chain"]] == [301, 302, 307, 200]
 
@@ -549,8 +549,7 @@ def test_http_chain_follows_www_counterpart(tmp_path, web):
         tmp_path, {"/home": (200, {})}, seen)
     try:
         app.routes["/"] = (
-            301, {"Location": "https://www.example.test:%d/home" % tlsport},
-            b"")
+            301, {"Location": "https://www.example.test/home"}, b"")
         out = sd.http_chain("127.0.0.1", port, "example.test", "/", 5,
                             https_port=tlsport)
     finally:
@@ -558,8 +557,7 @@ def test_http_chain_follows_www_counterpart(tmp_path, web):
         thread.join(timeout=10)
         srv.close()
     assert out["verdict"] == "ok", out
-    assert out["final_url"] == (
-        "https://www.example.test:%d/home" % tlsport)
+    assert out["final_url"] == "https://www.example.test/home"
     assert "HOST:www.example.test" in seen, seen
 
 
@@ -585,33 +583,67 @@ def test_http_chain_eleven_hops_is_too_many(tmp_path, web):
     out = sd.http_chain("127.0.0.1", port, "example.test", "/h0", 5)
     assert out["verdict"] == "too_many", out
     assert len(out["chain"]) == 11
-    assert out["final_url"] == "http://example.test:%d/h11" % port
+    assert out["final_url"] == "http://example.test/h11"
     assert out["urls"][-1] == out["final_url"]
     assert "/h11" not in [entry["url"] for entry in out["chain"]]
 
 
-def test_http_chain_rejects_other_port(tmp_path, web):
+def test_http_chain_follows_portless_absolute_http_location(tmp_path, web):
+    port, app = web
+    app.routes["/"] = (301, {"Location": "http://example.test/next"}, b"")
+    app.routes["/next"] = (200, {}, b"next")
+    out = sd.http_chain("127.0.0.1", port, "example.test", "/", 5)
+    assert out["verdict"] == "ok", out
+    assert out["final_url"] == "http://example.test/next"
+    assert out["urls"] == ["http://example.test/", "http://example.test/next"]
+    assert ":%d" % port not in " ".join(out["urls"])
+
+
+def test_http_chain_follows_leaked_record_port_without_showing_it(
+        tmp_path, web):
     port, app = web
     app.routes["/"] = (
-        301, {"Location": "http://example.test:8080/away"}, b"")
+        301, {"Location": "http://example.test:%d/next" % port}, b"")
+    app.routes["/next"] = (200, {}, b"next")
+    out = sd.http_chain("127.0.0.1", port, "example.test", "/", 5)
+    assert out["verdict"] == "ok", out
+    assert out["final_url"] == "http://example.test/next"
+    assert ":%d" % port not in " ".join(out["urls"])
+
+
+def test_http_chain_allows_written_standard_port(tmp_path, web):
+    port, app = web
+    app.routes["/"] = (301, {"Location": "http://example.test:80/next"}, b"")
+    app.routes["/next"] = (200, {}, b"next")
+    out = sd.http_chain("127.0.0.1", port, "example.test", "/", 5)
+    assert out["verdict"] == "ok", out
+    assert out["final_url"] == "http://example.test/next"
+
+
+def test_http_chain_rejects_other_port(tmp_path, web):
+    port, app = web
+    other_port = 1 if port != 1 else 2
+    app.routes["/"] = (
+        301, {"Location": "http://example.test:%d/away" % other_port}, b"")
     out = sd.http_chain("127.0.0.1", port, "example.test", "/", 5)
     assert out["verdict"] == "stopped", out
     assert out["reason"] == "redirect uses a non-standard port"
     assert len(out["chain"]) == 1
+    assert out["urls"] == ["http://example.test/"]
 
 
 def test_http_chain_failed_hop_keeps_redirect(tmp_path, web):
     port, app = web
     app.routes["/"] = (
-        301, {"Location": "https://example.test:1/gone"}, b"")
+        301, {"Location": "https://example.test/gone"}, b"")
     out = sd.http_chain("127.0.0.1", port, "example.test", "/", 5,
                         https_port=1)
     assert out["verdict"] == "stopped", out
     assert out["status"] == 301
-    assert out["location"] == "https://example.test:1/gone"
+    assert out["location"] == "https://example.test/gone"
     assert out["scheme"] == "http"
     assert "follow failed" in (out["error"] or "")
-    assert out["final_url"] == "https://example.test:1/gone"
+    assert out["final_url"] == "https://example.test/gone"
 
 
 def seed_wordpress(docroot, jetpack=False):
@@ -742,18 +774,27 @@ def test_redirect_source_line_variants():
         "Redirect 301 /old /new",
         "redirect permanent /old /new",
         "RedirectMatch 301 ^/old$ /new",
+        "RedirectPermanent /old /new",
+        "RedirectTemp /old /new",
         "RewriteCond %{HTTPS} off",
+        "RewriteCond %{SERVER_PORT} 80",
+        "RewriteCond %{HTTP:X-Forwarded-Proto} !https",
         "RewriteRule ^old$ /new [R,L]",
         "RewriteRule ^old$ /new [R=302,L]",
         "RewriteRule ^old$ /new [L,R=301]",
+        "RewriteRule ^old$ https://example.test/new [L]",
+        "RewriteRule ^promo$ https://example.test/a#b [NE,R=301,L]",
     ]
     for line in good:
         assert sd.redirect_source_line(line) is True, line
     bad = [
         "",
+        "# Redirect 301 /old /new",
         "Options -Indexes",
         "RewriteEngine On",
+        "RewriteRule ^index$ index.php [L]",
         "RewriteRule ^old$ /new [L]",
+        "RewriteRule ^http://old$ /new [L]",
         "RewriteCond %{HTTP_HOST} ^www\\. [NC]",
         "Header set X-Test yes",
     ]
@@ -766,16 +807,24 @@ def test_redirect_sources_docroot_and_parents(tmp_path):
     docroot = home / "public_html" / "site"
     docroot.mkdir()
     (docroot / ".htaccess").write_text(
-        "# Redirect 301 /old https://example.test/\n"
+        "# Redirect 301 /commented https://example.test/\n"
         "Options -Indexes\n"
         "RewriteEngine On\n"
+        "RewriteRule ^index$ index.php [L]\n"
         "RewriteRule ^plain$ /plain [L]\n"
         "RewriteRule ^old$ /new [R=301,L]\n"
         "RewriteCond %{HTTPS} off\n"
         "RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]\n"
         "RedirectMatch 301 ^/gone$ /new\n"
         "Redirect permanent /legacy /new\n"
+        "RedirectPermanent /old /new\n"
+        "RedirectTemp /temp /new\n"
+        "RewriteCond %{SERVER_PORT} 80\n"
+        "RewriteCond %{HTTP:X-Forwarded-Proto} !https\n"
+        "RewriteRule ^promo$ https://example.test/a#b [NE,R=301,L]\n"
+        "RewriteRule ^abs$ https://example.test/abs [L]\n"
         "RewriteCond %{HTTP_HOST} ^www\\. [NC]\n"
+        "RewriteRule ^http://old$ /new [L]\n"
         "Header set X-Test yes\n")
     (home / ".htaccess").write_text("Redirect 301 /home-old /home-new\n")
     (tmp_path / ".htaccess").write_text("Redirect 301 /outside /nope\n")
@@ -785,15 +834,24 @@ def test_redirect_sources_docroot_and_parents(tmp_path):
         time.monotonic() + 30, 0, os.stat(str(home)).st_dev, 5)
     found = checker.redirect_sources("public_html/site")
     assert [(entry["file"], entry["line"]) for entry in found] == [
-        ("public_html/site/.htaccess", 5),
         ("public_html/site/.htaccess", 6),
         ("public_html/site/.htaccess", 7),
         ("public_html/site/.htaccess", 8),
         ("public_html/site/.htaccess", 9),
+        ("public_html/site/.htaccess", 10),
+        ("public_html/site/.htaccess", 11),
+        ("public_html/site/.htaccess", 12),
+        ("public_html/site/.htaccess", 13),
+        ("public_html/site/.htaccess", 14),
+        ("public_html/site/.htaccess", 15),
+        ("public_html/site/.htaccess", 16),
         (".htaccess", 1),
     ], found
     assert found[0]["text"] == "RewriteRule ^old$ /new [R=301,L]"
+    assert found[9]["text"] == (
+        "RewriteRule ^promo$ https://example.test/a#b [NE,R=301,L]")
     assert not any("outside" in entry["text"] for entry in found)
+    assert not any("commented" in entry["text"] for entry in found)
 
 
 def test_doctor_loop_lists_redirect_sources(tmp_path, web):
@@ -808,9 +866,9 @@ def test_doctor_loop_lists_redirect_sources(tmp_path, web):
         "RewriteCond %{HTTPS} off\n"
         "RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]\n")
     app.routes["/"] = (
-        301, {"Location": "https://example.test:%d/" % tlsport}, b"")
+        301, {"Location": "https://example.test/"}, b"")
     tls_routes["/"] = (
-        302, {"Location": "http://example.test:%d/" % port}, b"")
+        302, {"Location": "http://example.test/"}, b"")
     try:
         summary = sd.new_clean_summary("doctor-scan", str(home), True)
         checker = sd.Checker(
@@ -827,8 +885,7 @@ def test_doctor_loop_lists_redirect_sources(tmp_path, web):
         thread.join(timeout=10)
         srv.close()
     assert rec["http"]["verdict"] == "loop"
-    assert rec["http"]["final_url"] == (
-        "http://example.test:%d/" % port)
+    assert rec["http"]["final_url"] == "http://example.test/"
     sources = rec["http"]["sources"]
     assert [(entry["line"], entry["text"]) for entry in sources] == [
         (2, "RewriteCond %{HTTPS} off"),

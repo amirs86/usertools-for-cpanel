@@ -15,10 +15,11 @@ All notable changes to this project are documented here. Versions follow
   caches. Both are moved to the trash and restored per batch like the
   other cache categories.
 - Site Doctor: the homepage check follows up to ten redirects on the same
-  IP, the listed domain or its `www.`/bare counterpart, over HTTP or HTTPS
-  on the standard ports. It reports a loop, too many redirects, an off-site
-  hop or the final URL. A loop also lists the redirect-related `.htaccess`
-  lines from the document root and its parent folders, read-only.
+  IP, the listed domain or its `www.`/bare counterpart, with chain URLs on
+  the standard ports and connections on the server-side record port. It
+  reports a loop, too many redirects, an off-site hop or the final URL. A
+  loop also lists the redirect-related `.htaccess` lines from the document
+  root and its parent folders, read-only.
 - App Helper: readiness reports `public/storage` as `ok`, `missing` or
   `broken` (a dead symlink, shown with its old target). The existing
   `storage:link` fallback replaces only a dead symlink, after all component
