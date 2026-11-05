@@ -1288,6 +1288,19 @@ sub site_make_home {
     is( $v->{attention}, 0, 'clean site needs no attention' );
     like( $v->{lines}[0], qr/loads \(HTTP 200/, 'homepage verdict' );
 
+    my $app_root_hint = "This website serves the app's whole folder, not its "
+      . "public/ folder, so files like .env can be reached. Use App Helper "
+      . "\x{2192} Document root to point it at public/.";
+    $v = Cpanel::API::UserTools::_doctor_verdicts(
+        { %{$good}, serves_app_root => 1 }, {} );
+    is( $v->{attention}, 1, 'app-root docroot needs attention' );
+    ok( ( grep { $_ eq $app_root_hint } @{ $v->{lines} } ),
+        'app-root docroot gets the exact App Helper hint' );
+    $v = Cpanel::API::UserTools::_doctor_verdicts(
+        { %{$good}, serves_app_root => 0 }, {} );
+    ok( !( grep { /serves the app's whole folder/ } @{ $v->{lines} } ),
+        'public/ or plain docroot gets no App Helper hint' );
+
     my $loop = {
         %{$good},
         http => {
@@ -1650,6 +1663,76 @@ sub site_wait_done {
     is( $rec->{attention}, 1, 'attention set' );
     is( $rec->{docroot}{expected_mode}, '0755',
         'expected mode default without fileprotect' );
+}
+
+{
+    # Only a docroot exactly equal to a detected app root gets the App
+    # Helper hint; public/ and plain site roots do not.
+    my $home = site_make_home();
+    make_path("$home/app/public");
+    my $pconf = site_policy_file($home);
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $pconf;
+    local $Cpanel::API::UserTools::TEST_DOMAIN_DATA_DIR = "$home/userdata";
+    make_path("$home/userdata/testuser");
+    no warnings 'redefine';
+    local *Cpanel::API::execute = sub {
+        my ( $mod, $fn, $args ) = @_;
+        if ( $mod eq 'LangPHP' ) {
+            return { status => 1, data => [] };
+        }
+        return { status => 0 };
+    };
+    local *Cpanel::API::UserTools::_scan_detected_apps = sub {
+        return [ { path => 'app' } ];
+    };
+    my $jobs = "$home/.cpanel/usertools/jobs";
+    make_path($jobs);
+    open my $mf, '>', "$jobs/doctor-8.job.json" or die $!;
+    print $mf JSON::PP->new()->encode( { id => 'doctor-8', pid => $$ } );
+    close $mf;
+    my $doc = sub {
+        return {
+            usable => 1, index => 'index.php', mode => '0755',
+            owner_ok => 1, abs => $_[0],
+            hrel => substr( $_[0], length("$home/") ),
+        };
+    };
+    my @domains = (
+        [ 'app.test',    "$home/app" ],
+        [ 'public.test', "$home/app/public" ],
+        [ 'plain.test',  "$home/public_html" ],
+    );
+    my $summary = {
+        counts  => {},
+        command => 'doctor-scan',
+        domains => [
+            map {
+                { domain => $_->[0], docroot => $doc->( $_->[1] ),
+                  http => { status => 200, ms => 3 },
+                  htaccess => { present => 0 },
+                  ssl => { ok => 1, days_left => 300 }, logs => {} }
+            } @domains
+        ],
+    };
+    open my $rf, '>', "$jobs/doctor-8.result.json" or die $!;
+    print $rf JSON::PP->new()->encode($summary);
+    close $rf;
+    my $res = FakeResult->new();
+    my $ok = Cpanel::API::UserTools::doctor_scan_status(
+        FakeArgs->new( job_id => 'doctor-8' ), $res );
+    ok( $ok, 'app-root status accepted' );
+    my %by = map { $_->{domain} => $_ }
+      @{ $res->{data}{summary}{domains} };
+    is( $by{'app.test'}{serves_app_root}, 1,
+        'exact app root flagged' );
+    ok( ( grep { /serves the app's whole folder/ }
+          @{ $by{'app.test'}{verdict} } ),
+        'exact app root gets the hint' );
+    ok( !$by{'public.test'}{serves_app_root}, 'public/ root not flagged' );
+    ok( !( grep { /serves the app's whole folder/ }
+           @{ $by{'public.test'}{verdict} } ),
+        'public/ root gets no hint' );
+    ok( !$by{'plain.test'}{serves_app_root}, 'plain site not flagged' );
 }
 
 {

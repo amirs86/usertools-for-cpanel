@@ -2452,6 +2452,9 @@ sub _doctor_verdicts {
     if ( $doc->{owner_ok} ? 0 : 1 ) {
         $say->("Document root is not owned by you.", 1);
     }
+    if ( $rec->{serves_app_root} ) {
+        $say->("This website serves the app's whole folder, not its public/ folder, so files like .env can be reached. Use App Helper \x{2192} Document root to point it at public/.", 1);
+    }
     my $ht = ref $rec->{htaccess} eq 'HASH' ? $rec->{htaccess} : {};
     if ( $ht->{present} ) {
         my @php_lines = ref $ht->{php_value_lines} eq 'ARRAY' ? @{ $ht->{php_value_lines} } : ();
@@ -2663,6 +2666,16 @@ sub doctor_scan_status {
     if ( defined $summary && ref $summary->{domains} eq 'ARRAY' ) {
         my $php_map = _site_php_map($user);
         my $fileprotect = _fileprotect_on($home);
+        my %app_roots;
+        my $detected = eval { _scan_detected_apps($home) };
+        if ( !$@ && ref $detected eq 'ARRAY' ) {
+            for my $app ( @{$detected} ) {
+                next unless ref $app eq 'HASH' && defined $app->{path};
+                my $abs = $app->{path} eq '.' ? $home : "$home/$app->{path}";
+                my $real = realpath($abs);
+                $app_roots{ defined $real ? $real : $abs } = 1;
+            }
+        }
         my @with_verdicts;
         for my $rec ( @{ $summary->{domains} } ) {
             next unless ref $rec eq 'HASH';
@@ -2673,6 +2686,11 @@ sub doctor_scan_status {
                     %{ $r{docroot} },
                     expected_mode => ( $fileprotect && $is_pub ) ? '0750' : '0755',
                 };
+            }
+            if ( ref $r{docroot} eq 'HASH'
+                && defined $r{docroot}{abs}
+                && $app_roots{ $r{docroot}{abs} } ) {
+                $r{serves_app_root} = 1;
             }
             my $php = $php_map->{ lc( $rec->{domain} // '' ) };
             my $v = _doctor_verdicts( \%r, $php );

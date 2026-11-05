@@ -24,6 +24,10 @@ All notable changes to this project are documented here. Versions follow
   `storage:link` fallback replaces only a dead symlink, after all component
   checks, saves the old target, and restores it if the new link cannot be
   made. The Activity entry carries the old target and an Undo action.
+- Site Doctor: when a website's document root is exactly an app root that
+  App Helper detected, the verdict says the whole app folder is served
+  (including `.env`) and points to App Helper → Document root. A `public/`
+  document root or a plain website gets no such hint.
 
 ## [0.2.0] - 2026-11-02
 
