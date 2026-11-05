@@ -522,6 +522,9 @@ window.addEventListener("DOMContentLoaded", function () {
             if (info.node.warning) {
                 html += '<div class="ut-banner warn">' + esc(info.node.warning) + "</div>";
             }
+            if (info.node.note) {
+                html += "<p>" + esc(info.node.note) + "</p>";
+            }
             html += '<p><label class="ut-check"><input type="checkbox" id="ut-rmnm-' + idx + '"> '
                 + esc(UT_STR.npmRemove) + "</label></p>";
             html += '<p><button class="ut-btn small" type="button" data-npm="' + idx + '">'
@@ -663,6 +666,9 @@ window.addEventListener("DOMContentLoaded", function () {
                 else if (data.state === "cancelled") { text = UT_STR.jobCancelled; }
                 var html = '<div class="ut-banner">' + esc(text) + "</div>";
                 if (data.resource_hint) { html += '<div class="ut-banner warn">' + esc(data.resource_hint) + "</div>"; }
+                if (data.state === "failed" && data.node_warning) {
+                    html += '<div class="ut-banner warn">' + esc(data.node_warning) + "</div>";
+                }
                 if (data.log) { html += "<pre></pre>"; }
                 if ((data.state === "done" || data.state === "failed") && data.node_modules) {
                     var nmNote = {

@@ -5237,19 +5237,26 @@ package main;
     my $ok = Cpanel::API::UserTools::app_helper_deploy_status( FakeArgs->new( job_id => 'deploy-nm1' ), $res );
     ok( $ok, 'status accepted' );
     is( $res->{data}{node_modules}, 'kept', 'ticked keep reports kept' );
-    write_deploy_job( $home, 'deploy-nm2', { %{$base_meta}, id => 'deploy-nm2', keep_node_modules => 0 },
+    write_deploy_job( $home, 'deploy-nm2',
+        { %{$base_meta}, id => 'deploy-nm2', keep_node_modules => 0,
+          node_warning => 'package.json wants Node >=99.' },
         { ok => 0, cleanup => 'removed', steps => [ { name => 'npm run build', exit => 1 } ] } );
     $res = FakeResult->new();
     $ok = Cpanel::API::UserTools::app_helper_deploy_status( FakeArgs->new( job_id => 'deploy-nm2' ), $res );
     ok( $ok, 'status accepted' );
     is( $res->{data}{state}, 'failed', 'failed state' );
     is( $res->{data}{node_modules}, 'removed-cleanup', 'failure cleanup reported' );
-    write_deploy_job( $home, 'deploy-nm3', { %{$base_meta}, id => 'deploy-nm3', keep_node_modules => 0 },
+    is( $res->{data}{node_warning}, 'package.json wants Node >=99.',
+        'failed job returns the node warning' );
+    write_deploy_job( $home, 'deploy-nm3',
+        { %{$base_meta}, id => 'deploy-nm3', keep_node_modules => 0,
+          node_warning => 'package.json wants Node >=99.' },
         { ok => 1, steps => [ { name => 'remove node_modules', exit => 0 } ] } );
     $res = FakeResult->new();
     $ok = Cpanel::API::UserTools::app_helper_deploy_status( FakeArgs->new( job_id => 'deploy-nm3' ), $res );
     ok( $ok, 'status accepted' );
     is( $res->{data}{node_modules}, 'removed', 'success-path removal reported' );
+    ok( !exists $res->{data}{node_warning}, 'successful job omits the node warning' );
     write_deploy_job( $home, 'deploy-nm4', { %{$base_meta}, id => 'deploy-nm4', keep_node_modules => 0 },
         { ok => 0, cleanup => 'cleanup-failed', steps => [ { name => 'npm run build', exit => 1 } ] } );
     $res = FakeResult->new();
@@ -5509,26 +5516,44 @@ SCRIPT
 }
 
 {
-    # engines parse: >=N, ^N, N.x, bare, object form, garbage.
+    # engines reader: raw string from the string or {node} form; absent,
+    # empty, wildcard-only, unreadable and bad JSON are no range.
     my $home = make_home();
     my $pkg  = "$home/pkg";
     make_path($pkg);
     for my $case (
-        [ '{"engines":">=18"}',      '18' ],
-        [ '{"engines":"^20"}',       '20' ],
-        [ '{"engines":"20.x"}',      '20' ],
-        [ '{"engines":"22"}',        '22' ],
-        [ '{"engines":{"node":">=16"}}', '16' ],
-        [ '{"engines":"latest"}',    undef ],
-        [ '{"engines":{"npm":">=9"}}', undef ],
-        [ 'not json',                undef ],
+        [ '{"engines":">=18"}',                      '>=18' ],
+        [ '{"engines":"^20"}',                       '^20' ],
+        [ '{"engines":"20.x"}',                      '20.x' ],
+        [ '{"engines":"22"}',                        '22' ],
+        [ '{"engines":{"node":">=16"}}',             '>=16' ],
+        [ '{"engines":{"node":"^20.19.0 || >=22.12.0"}}',
+          '^20.19.0 || >=22.12.0' ],
+        [ '{"engines":"latest"}',                    'latest' ],
+        [ '{"engines":{"npm":">=9"}}',               undef ],
+        [ '{"engines":""}',                          undef ],
+        [ '{"engines":"*"}',                         undef ],
+        [ '{"engines":"x"}',                         undef ],
+        [ '{"engines":{"node":18}}',                 undef ],
+        [ 'not json',                                undef ],
       )
     {
         open my $fh, '>', "$pkg/package.json" or die $!;
         print $fh $case->[0];
         close $fh;
-        is( Cpanel::API::UserTools::_node_wanted_major($pkg), $case->[1], "engines $case->[0]" );
+        is( Cpanel::API::UserTools::_node_engines_range($pkg), $case->[1],
+            "engines $case->[0]" );
     }
+    open my $big, '>', "$pkg/package.json" or die $!;
+    print $big '{"engines":">=18","pad":"' . ( 'x' x 262145 ) . '"}';
+    close $big;
+    is( Cpanel::API::UserTools::_node_engines_range($pkg), undef,
+        'oversized package.json is no range' );
+    my $linkapp = "$home/linkapp";
+    make_path($linkapp);
+    symlink "$pkg/package.json", "$linkapp/package.json" or die $!;
+    is( Cpanel::API::UserTools::_node_engines_range($linkapp), undef,
+        'symlinked package.json is no range' );
 }
 
 # --- logs ---------------------------------------------------------------------------------------

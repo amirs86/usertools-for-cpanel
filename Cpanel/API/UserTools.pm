@@ -19,6 +19,7 @@ use IO::Compress::Gzip qw(gzip $GzipError);
 use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
 use JSON::PP ();    # core; flat-record decode only
 use Digest::SHA ();   # core; cron marker ids only
+use B ();             # core; keep JSON strings and numbers apart
 use Cwd qw(realpath);
 use Time::HiRes qw(usleep);
 use POSIX qw(setsid WNOHANG);
@@ -4789,6 +4790,7 @@ our $ARTISAN_TIMEOUT = 120;
 our $ARTISAN_OUTPUT_CAP = 65536;
 our $ENV_CHECK_MAX_BYTES = 4096;
 our $ENV_CHECK_TIMEOUT = 5;
+our $NODE_VERSION_TIMEOUT = 5;
 our $MAX_ADDED_APPS = 20;
 
 our %ARTISAN_COMMANDS = map { $_ => 1 } qw(
@@ -7984,10 +7986,196 @@ sub _path_visible_in_cage {
     return 0;
 }
 
-sub _node_wanted_major {
+sub _node_num {
+    my ($text) = @_;
+    # Semver numeric component: no leading zeros, at most six digits.
+    return undef unless defined $text && $text =~ /^(?:0|[1-9]\d{0,5})$/;
+    return $text + 0;
+}
+
+sub _node_version_tuple {
+    my ($version) = @_;
+    return () unless defined $version && !ref $version;
+    my @raw = $version =~ /^(\d{1,6})\.(\d{1,6})\.(\d{1,6})$/;
+    return () unless @raw == 3;
+    my @parts = map { _node_num($_) } @raw;
+    return () if grep { !defined } @parts;
+    return @parts;
+}
+
+sub _node_cmp_tuple {
+    my ( $a, $b ) = @_;
+    for my $i ( 0 .. 2 ) {
+        my $cmp = $a->[$i] <=> $b->[$i];
+        return $cmp if $cmp;
+    }
+    return 0;
+}
+
+sub _node_parse_partial {
+    my ($text) = @_;
+    # One bare token: exact, major-only, minor-only, or a trailing wildcard.
+    return undef unless defined $text && !ref $text && $text ne '';
+    if ( $text =~ /^(\d{1,6})\.(\d{1,6})\.(\d{1,6})$/ ) {
+        my @parts = map { _node_num($_) } ( $1, $2, $3 );
+        return undef if grep { !defined } @parts;
+        return { kind => 'exact', parts => \@parts };
+    }
+    if ( $text =~ /^(\d{1,6})\.(\d{1,6})(?:\.(?:x|X|\*))$/ ) {
+        my @parts = map { _node_num($_) } ( $1, $2 );
+        return undef if grep { !defined } @parts;
+        return { kind => 'minor', parts => [ $parts[0], $parts[1], 0 ] };
+    }
+    if ( $text =~ /^(\d{1,6})\.(\d{1,6})$/ ) {
+        my @parts = map { _node_num($_) } ( $1, $2 );
+        return undef if grep { !defined } @parts;
+        return { kind => 'minor', parts => [ $parts[0], $parts[1], 0 ] };
+    }
+    if ( $text =~ /^(\d{1,6})(?:\.(?:x|X|\*)){1,2}$/ ) {
+        my $major = _node_num($1);
+        return undef unless defined $major;
+        return { kind => 'major', parts => [ $major, 0, 0 ] };
+    }
+    if ( $text =~ /^(\d{1,6})$/ ) {
+        my $major = _node_num($1);
+        return undef unless defined $major;
+        return { kind => 'major', parts => [ $major, 0, 0 ] };
+    }
+    return undef;
+}
+
+sub _node_token_constraints {
+    my ($token) = @_;
+    # One comparator, normalised to [operator, [major, minor, patch]].
+    return undef unless defined $token && !ref $token && $token ne '';
+    if ( $token =~ /^v(\d{1,6})\.(\d{1,6})\.(\d{1,6})$/ ) {
+        my @parts = map { _node_num($_) } ( $1, $2, $3 );
+        return undef if grep { !defined } @parts;
+        return [ [ '=', \@parts ] ];
+    }
+    my ( $op, $rest ) = $token =~ /^(>=|<=|\^|~|>|<|=)(.*)$/;
+    if ( defined $op ) {
+        return undef if $rest eq '' || $rest =~ /[xX*]/;
+        my $parsed = _node_parse_partial($rest);
+        return undef unless $parsed;
+        my ( $major, $minor, $patch ) = @{ $parsed->{parts} };
+        if ( $op eq '=' ) {
+            return undef unless $parsed->{kind} eq 'exact';
+            return [ [ '=', [ @{ $parsed->{parts} } ] ] ];
+        }
+        if ( $op eq '^' || $op eq '~' ) {
+            return undef if $major == 0;
+            my $lower = [ @{ $parsed->{parts} } ];
+            my $upper =
+                ( $op eq '^' || $parsed->{kind} eq 'major' )
+              ? [ $major + 1, 0, 0 ]
+              : [ $major, $minor + 1, 0 ];
+            return [ [ '>=', $lower ], [ '<', $upper ] ];
+        }
+        if ( $op eq '>=' ) {
+            return [ [ '>=', [ @{ $parsed->{parts} } ] ] ];
+        }
+        if ( $op eq '>' ) {
+            return [ [ '>', [ @{ $parsed->{parts} } ] ] ]
+              if $parsed->{kind} eq 'exact';
+            my $lower = $parsed->{kind} eq 'major'
+              ? [ $major + 1, 0, 0 ]
+              : [ $major, $minor + 1, 0 ];
+            return [ [ '>=', $lower ] ];
+        }
+        if ( $op eq '<' ) {
+            return [ [ '<', [ @{ $parsed->{parts} } ] ] ];
+        }
+        if ( $op eq '<=' ) {
+            return [ [ '<=', [ @{ $parsed->{parts} } ] ] ]
+              if $parsed->{kind} eq 'exact';
+            my $upper = $parsed->{kind} eq 'major'
+              ? [ $major + 1, 0, 0 ]
+              : [ $major, $minor + 1, 0 ];
+            return [ [ '<', $upper ] ];
+        }
+        return undef;
+    }
+    my $parsed = _node_parse_partial($token);
+    return undef unless $parsed;
+    return [ [ '=', [ @{ $parsed->{parts} } ] ] ]
+      if $parsed->{kind} eq 'exact';
+    my ( $major, $minor ) = @{ $parsed->{parts} };
+    my $upper = $parsed->{kind} eq 'major'
+      ? [ $major + 1, 0, 0 ]
+      : [ $major, $minor + 1, 0 ];
+    return [ [ '>=', [ @{ $parsed->{parts} } ] ], [ '<', $upper ] ];
+}
+
+sub _node_range_satisfies {
+    my ( $range, $version ) = @_;
+    # Conservative semver comparison. Returns ok, no, or unknown; any
+    # unrecognised part makes the whole range unknown.
+    return 'unknown' unless defined $range && !ref $range;
+    return 'unknown' if length($range) > 128;
+    my @alternatives = split /\|\|/, $range, -1;
+    return 'unknown' unless @alternatives && @alternatives <= 8;
+    my @version = _node_version_tuple($version);
+    return 'unknown' unless @version == 3;
+    my @parsed;
+    for my $alternative (@alternatives) {
+        $alternative =~ s/^\s+|\s+$//g;
+        return 'unknown' if $alternative eq '';
+        my @tokens = split /\s+/, $alternative;
+        my @joined;
+        while (@tokens) {
+            my $token = shift @tokens;
+            if ( $token =~ /^(?:>=|<=|>|<|=|\^|~)$/ ) {
+                return 'unknown' unless @tokens;
+                $token .= shift @tokens;
+            }
+            push @joined, $token;
+        }
+        my @constraints;
+        for my $token (@joined) {
+            my $constraints = _node_token_constraints($token);
+            return 'unknown' unless $constraints;
+            push @constraints, @{$constraints};
+        }
+        push @parsed, \@constraints;
+    }
+    for my $constraints (@parsed) {
+        my $all = 1;
+        for my $pair ( @{$constraints} ) {
+            my ( $op, $bound ) = @{$pair};
+            my $cmp = _node_cmp_tuple( \@version, $bound );
+            my $ok =
+                $op eq '='  ? $cmp == 0
+              : $op eq '>=' ? $cmp >= 0
+              : $op eq '>'  ? $cmp > 0
+              : $op eq '<=' ? $cmp <= 0
+              : $op eq '<'  ? $cmp < 0
+              :               0;
+            if ( !$ok ) {
+                $all = 0;
+                last;
+            }
+        }
+        return 'ok' if $all;
+    }
+    return 'no';
+}
+
+sub _json_string {
+    my ($value) = @_;
+    # JSON::PP decodes strings and numbers to plain Perl scalars; B flags
+    # keep "18" (a range) apart from 18 (not a string).
+    return undef if !defined $value || ref $value;
+    my $flags = B::svref_2object( \$value )->FLAGS;
+    return undef if $flags & ( B::SVf_IOK() | B::SVf_NOK() );
+    return "$value";
+}
+
+sub _node_engines_range {
     my ($approot) = @_;
-    # Parse package.json engines (string or {node}): a simple >=N, ^N, N.x
-    # or bare N yields the wanted major; anything else means no preference.
+    # Read package.json engines (string or {node}) and return the raw range.
+    # Absent, non-string, empty, wildcard-only, unreadable and bad JSON
+    # are "no range"; "*" and "x" are not checked.
     my $file = "$approot/package.json";
     my @st = lstat $file;
     if ( !@st || -l _ || !-f _ || $st[7] > 262144 ) {
@@ -8000,63 +8188,138 @@ sub _node_wanted_major {
         my $data = eval { JSON::PP->new()->decode( $raw // '' ) };
         if ( !$@ && ref $data eq 'HASH' ) {
             my $eng = $data->{engines};
-            my $want;
-            if ( !ref $eng && defined $eng ) {
-                $want = $eng;
+            my $range;
+            if ( ref $eng eq 'HASH' ) {
+                $range = _json_string( $eng->{node} );
             }
-            elsif ( ref $eng eq 'HASH' && defined $eng->{node} && !ref $eng->{node} ) {
-                $want = $eng->{node};
+            else {
+                $range = _json_string($eng);
             }
-            if ( defined $want ) {
-                $want =~ s/^\s+|\s+$//g;
-                if ( $want =~ /^(?:>=|\^|~)?(\d+)(?:\.[x*])?$/ ) {
-                    return "$1";
-                }
+            if ( defined $range ) {
+                $range =~ s/^\s+|\s+$//g;
+                return undef if $range eq '' || $range eq '*' || $range =~ /^x$/i;
+                return $range;
             }
         }
     }
     return undef;
 }
 
+sub _node_bin_version_run {
+    my ($bin) = @_;
+    # The binary is always one the directory scan produced. Never a caller
+    # path, a package.json path, or an npm shim.
+    my $res = _spawn_sync(
+        [ $bin, '--version' ], '/',
+        {
+            PATH => '/usr/local/bin:/usr/bin:/bin',
+            HOME => $ENV{HOME} // '/tmp',
+            LANG => 'C.UTF-8',
+        },
+        $NODE_VERSION_TIMEOUT, 256,
+    );
+    return { version => undef, timed_out => 0 } unless ref $res eq 'HASH';
+    my $timed_out = $res->{timed_out} ? 1 : 0;
+    return { version => undef, timed_out => $timed_out }
+      if $timed_out || $res->{truncated} || ( $res->{exit} // 1 ) != 0;
+    my $out = $res->{output} // '';
+    $out =~ s/^\s+|\s+$//g;
+    my @parts = $out =~ /^v(\d+)\.(\d+)\.(\d+)$/;
+    return { version => undef, timed_out => 0 } unless @parts == 3;
+    return { version => "$parts[0].$parts[1].$parts[2]", timed_out => 0 };
+}
+
+sub _node_bin_version {
+    my ($bin) = @_;
+    my $run = _node_bin_version_run($bin);
+    return $run->{version};
+}
+
 sub _select_node_for_app {
     my ( $approot, $cpanel_base, $alt_base ) = @_;
-    # Newest installed Node with the engines major, else newest available
-    # with a warning. Returns (bin, source, warning).
+    # Newest installed Node first, with the engines range checked against
+    # real versions. Returns (bin, source, warning, note). A mismatch never
+    # blocks the build; it only reaches the warning slot.
     # CloudLinux layout is root/usr/bin (alt-nodejsNN/root/usr/bin/node).
     my @families;
     push @families, [ defined $cpanel_base ? $cpanel_base : '/opt/cpanel', qr/^ea-nodejs(\d+)$/, 'bin/node' ];
     push @families, [ defined $alt_base ? $alt_base : '/opt/alt', qr/^alt-nodejs(\d+)$/, 'root/usr/bin/node' ];
     my @found;
+    my $family = 0;
     for my $fam (@families) {
         my ( $base, $re, $rel ) = @{$fam};
         my $dh;
-        if ( !opendir( $dh, $base ) ) {
-            next;
-        }
-        my @cands = map { /$re/ ? [ $1, $_ ] : () } readdir $dh;
-        closedir $dh;
-        for my $c (@cands) {
-            my $bin = "$base/$c->[1]/$rel";
-            if ( -f $bin && -x $bin ) {
-                push @found, { major => $c->[0], bin => $bin };
+        if ( opendir( $dh, $base ) ) {
+            my @cands = map { /$re/ ? [ $1, $_ ] : () } readdir $dh;
+            closedir $dh;
+            for my $c (@cands) {
+                my $bin = "$base/$c->[1]/$rel";
+                if ( -f $bin && -x $bin ) {
+                    push @found, {
+                        major  => $c->[0],
+                        bin    => $bin,
+                        family => $family,
+                    };
+                }
             }
         }
+        $family++;
     }
     if ( !@found ) {
-        return ( undef, undef, 'no Node.js available' );
+        return ( undef, undef, 'no Node.js available', undef );
     }
-    my $wanted = _node_wanted_major($approot);
-    if ( defined $wanted ) {
-        my @match = grep { $_->{major} == $wanted } @found;
-        if (@match) {
-            my ($best) = sort { $b->{major} <=> $a->{major} } @match;
-            return ( $best->{bin}, 'node', undef );
+    @found = sort {
+        $b->{major} <=> $a->{major}
+          || $a->{family} <=> $b->{family}
+          || $a->{bin} cmp $b->{bin}
+    } @found;
+    my $range = _node_engines_range($approot);
+    if ( !defined $range ) {
+        return ( $found[0]{bin}, 'node', undef, undef );
+    }
+    if ( _node_range_satisfies( $range, '0.0.0' ) eq 'unknown' ) {
+        my $candidate = $found[0];
+        my $run = _node_bin_version_run( $candidate->{bin} );
+        my $label = defined $run->{version}
+          ? $run->{version}
+          : $candidate->{major};
+        return ( $candidate->{bin}, 'node', undef,
+            "Cannot tell whether Node $label fits this app's package.json." );
+    }
+    my $newest_unreadable;
+    my $newest_version;
+    my $stop_spawning = 0;
+    for my $candidate (@found) {
+        my $run;
+        if ($stop_spawning) {
+            $run = { version => undef, timed_out => 0 };
         }
-        my ($best) = sort { $b->{major} <=> $a->{major} } @found;
-        return ( $best->{bin}, 'node', "engines wants Node $wanted, using newest available" );
+        else {
+            $run = _node_bin_version_run( $candidate->{bin} );
+            $stop_spawning = 1 if $run->{timed_out};
+        }
+        my $version = $run->{version};
+        if ( !defined $version ) {
+            $newest_unreadable //= $candidate;
+            next;
+        }
+        $newest_version //= $version;
+        if ( _node_range_satisfies( $range, $version ) eq 'ok' ) {
+            return ( $candidate->{bin}, 'node', undef,
+                "Node $version fits this app's package.json ($range)." );
+        }
     }
-    my ($best) = sort { $b->{major} <=> $a->{major} } @found;
-    return ( $best->{bin}, 'node', undef );
+    if ($newest_unreadable) {
+        return ( $newest_unreadable->{bin}, 'node', undef,
+            "Cannot tell whether Node $newest_unreadable->{major} fits this app's package.json." );
+    }
+    my $chosen  = $found[0];
+    my $version = $newest_version // 'unknown';
+    return ( $chosen->{bin}, 'node',
+        "This app's package.json asks for Node $range, but no installed version matches. "
+          . "The build would use Node $version. Ask your host to add a matching version, "
+          . "or update the app.",
+        undef );
 }
 
 sub _quota_info {
@@ -8506,7 +8769,8 @@ sub app_helper_deploy_info {
         return;
     }
     my ( $composer, $composer_err ) = _find_composer();
-    my ( $node_bin, $node_source, $node_warn ) = _select_node_for_app($approot);
+    my ( $node_bin, $node_source, $node_warn, $node_note ) =
+      _select_node_for_app($approot);
     my $npm = undef;
     if ( defined $node_bin ) {
         ( my $npmdir = $node_bin ) =~ s{/bin/node$}{/bin/npm};
@@ -8547,6 +8811,7 @@ sub app_helper_deploy_info {
                 found => defined $node_bin ? 1 : 0,
                 defined $node_bin ? ( bin => $node_bin, npm => $npm ) : (),
                 defined $node_warn ? ( warning => $node_warn ) : (),
+                defined $node_note ? ( note => $node_note ) : (),
             },
             quota       => $quota,
             cron        => $cron,
@@ -8716,6 +8981,12 @@ sub app_helper_deploy_status {
                 result => $final, log => $log_tail,
                 defined $nm ? ( node_modules => $nm ) : (),
                 defined $hint ? ( resource_hint => $hint ) : (),
+                ( !$final->{ok}
+                    && defined $meta->{node_warning}
+                    && !ref $meta->{node_warning}
+                    && $meta->{node_warning} ne ''
+                    ? ( node_warning => $meta->{node_warning} )
+                    : () ),
             }
         );
         return 1;
@@ -8741,6 +9012,11 @@ sub app_helper_deploy_status {
             error => 'The worker is gone without a result.',
             log => _deploy_log_tail($job),
             ( ( $meta->{recipe} // '' ) eq 'npm_build' ) ? ( node_modules => 'kept' ) : (),
+            ( defined $meta->{node_warning}
+                && !ref $meta->{node_warning}
+                && $meta->{node_warning} ne ''
+                ? ( node_warning => $meta->{node_warning} )
+                : () ),
         }
     );
     return 1;
