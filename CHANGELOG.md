@@ -3,6 +3,16 @@
 All notable changes to this project are documented here. Versions follow
 [SemVer](https://semver.org/).
 
+## [0.5.1] - 2026-11-07
+
+### Changed
+
+- Release build only, with no change to the installed tools: every CI job now
+  runs on a fixed Ubuntu version, every action is pinned by commit, and CI
+  permissions are read-only except for the job that signs and publishes. A
+  test keeps these in place. Releases are still signed the same way, by the
+  same workflow, so verification is unchanged.
+
 ## [0.5.0] - 2026-11-06
 
 ### Security
