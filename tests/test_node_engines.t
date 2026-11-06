@@ -9,6 +9,7 @@ use FindBin;
 use File::Basename qw(dirname);
 use File::Path qw(make_path);
 use File::Temp qw(tempdir);
+use Time::HiRes qw(time);
 
 use lib "$FindBin::Bin/lib";
 require "$FindBin::Bin/../Cpanel/API/UserTools.pm";
@@ -163,6 +164,53 @@ subtest 'unknown forms reject the whole range' => sub {
         'unknown', 'one unknown alternative poisons the match' );
 };
 
+subtest 'major pruning' => sub {
+    my @cases = (
+        [ '<24',          0 ],
+        [ '<=23.9.9',     0 ],
+        [ '>=25',         0 ],
+        [ '>25',          0 ],
+        [ '=25.0.0',      0 ],
+        [ '<=24',         1 ],
+        [ '<24.0.1',      1 ],
+        [ '>=24.5',       1 ],
+        [ '>23.9.9',      1 ],
+        [ '=24.1.0',      1 ],
+        [ '^24',          1 ],
+        [ '^22 || ^24',   1 ],
+    );
+    for my $case (@cases) {
+        my $parsed = Cpanel::API::UserTools::_node_range_parse( $case->[0] );
+        ok( defined $parsed, "parse $case->[0]" );
+        is( Cpanel::API::UserTools::_node_major_may_fit( $parsed, 24 ),
+            $case->[1], "major 24 may fit $case->[0]" );
+    }
+};
+
+subtest 'raw value cap and ASCII digits' => sub {
+    my $home = tempdir( CLEANUP => 1 );
+    my $app  = "$home/app";
+    write_package( $app,
+        '{"engines":">=18' . ( ' ' x 260000 ) . 'a"}' );
+    my $start = time();
+    my $raw = Cpanel::API::UserTools::_node_engines_range($app);
+    my $elapsed = time() - $start;
+    is( length($raw), 129, 'oversized raw value is capped before trimming' );
+    is( Cpanel::API::UserTools::_node_range_satisfies( $raw, '18.0.0' ),
+        'unknown', 'capped raw value is unknown' );
+    ok( $elapsed < 1, "oversized raw value handled in $elapsed seconds" );
+
+    my @warnings;
+    my $non_ascii;
+    {
+        local $SIG{__WARN__} = sub { push @warnings, @_ };
+        $non_ascii = Cpanel::API::UserTools::_node_range_satisfies(
+            ">=\x{0661}8", '18.0.0' );
+    }
+    is( $non_ascii, 'unknown', 'non-ASCII digit is not a valid range' );
+    is( scalar @warnings, 0, 'non-ASCII digit raises no Perl warning' );
+};
+
 subtest 'node --version reader' => sub {
     my $home = tempdir( CLEANUP => 1 );
     my $bin = write_node_script( "$home/good", "printf 'v24.22.2\\n'" );
@@ -214,6 +262,18 @@ subtest 'binary selection' => sub {
     is( $note, 'Node 24.22.2 fits this app\'s package.json (>=18).',
         'matching range names the version and range' );
 
+    # >=18 with only 24 installed: a fit, never the false warning.
+    $home = tempdir( CLEANUP => 1 );
+    $app  = "$home/app";
+    add_node( $home, 'ea', 24, "printf 'v24.22.2\\n'" );
+    write_package( $app, '{"engines":">=18"}' );
+    ( $bin, $source, $warning, $note ) =
+      Cpanel::API::UserTools::_select_node_for_app( $app, "$home/cpanel", "$home/alt" );
+    like( $bin, qr/ea-nodejs24/, '>=18 with only 24 installed picks 24' );
+    is( $warning, undef, '>=18 with only 24 installed has no warning' );
+    is( $note, 'Node 24.22.2 fits this app\'s package.json (>=18).',
+        '>=18 with only 24 installed has the ok note' );
+
     # >=24 <26: 26 is newest but does not fit; 24 does.
     $home = tempdir( CLEANUP => 1 );
     $app  = "$home/app";
@@ -238,11 +298,14 @@ subtest 'binary selection' => sub {
     like( $bin, qr/ea-nodejs24/, 'alternative range picks the newest fit' );
     is( $warning, undef, 'alternative range has no warning' );
 
-    # Nothing fits: warning, still returns the newest binary.
+    # Nothing fits: warning, still returns the newest binary. Folder majors
+    # already rule everything out, so only the newest is spawned for the label.
     $home = tempdir( CLEANUP => 1 );
     $app  = "$home/app";
-    add_node( $home, 'ea', 26, "printf 'v26.13.0\\n'" );
-    add_node( $home, 'ea', 24, "printf 'v24.22.2\\n'" );
+    my $ran26 = "$home/ran26";
+    my $ran24 = "$home/ran24";
+    add_node( $home, 'ea', 26, "printf ran > '$ran26'; printf 'v26.13.0\\n'" );
+    add_node( $home, 'ea', 24, "printf ran > '$ran24'; printf 'v24.22.2\\n'" );
     write_package( $app, '{"engines":">=99"}' );
     ( $bin, $source, $warning, $note ) =
       Cpanel::API::UserTools::_select_node_for_app( $app, "$home/cpanel", "$home/alt" );
@@ -251,6 +314,7 @@ subtest 'binary selection' => sub {
         qr/asks for Node >=99, but no installed version matches.*Node 26\.13\.0/,
         'no match warning names the range and version' );
     is( $note, undef, 'warning and note are not both returned' );
+    ok( -e $ran26 && !-e $ran24, 'only the newest is spawned for the warning label' );
 
     # Unknown range: one spawn, cannot-tell note, range never echoed.
     $home = tempdir( CLEANUP => 1 );
@@ -275,34 +339,98 @@ subtest 'binary selection' => sub {
       Cpanel::API::UserTools::_select_node_for_app( $app, "$home/cpanel", "$home/alt" );
     like( $bin, qr{/cpanel/ea-nodejs24/}, 'same major prefers the first family' );
 
-    # Unreadable newer binary with no readable match: newest unreadable.
+    # A may-fit binary is unreadable: cannot-tell, not a mismatch warning.
     $home = tempdir( CLEANUP => 1 );
     $app  = "$home/app";
-    add_node( $home, 'ea', 26, 'exit 1' );
-    add_node( $home, 'ea', 24, "printf 'v24.22.2\\n'" );
-    write_package( $app, '{"engines":">=99"}' );
+    add_node( $home, 'ea', 24, 'exit 1' );
+    my $not_ran = "$home/not-ran";
+    add_node( $home, 'ea', 26,
+        "printf ran > '$not_ran'; printf 'v26.13.0\\n'" );
+    write_package( $app, '{"engines":">=24 <25"}' );
     ( $bin, $source, $warning, $note ) =
       Cpanel::API::UserTools::_select_node_for_app( $app, "$home/cpanel", "$home/alt" );
-    like( $bin, qr/ea-nodejs26/, 'unreadable newest is selected when nothing fits' );
-    is( $warning, undef, 'unreadable is not a mismatch warning' );
-    is( $note, 'Cannot tell whether Node 26 fits this app\'s package.json.',
+    like( $bin, qr/ea-nodejs24/, 'unreadable may-fit binary is selected' );
+    is( $warning, undef, 'unreadable may-fit binary has no warning' );
+    is( $note, 'Cannot tell whether Node 24 fits this app\'s package.json.',
         'unreadable note uses the folder major' );
+    ok( !-e $not_ran, 'a ruled-out newer binary is not spawned' );
 
-    # Timed-out newest: stop spawning, mark the rest unreadable, no warning.
+    # A version the walk cannot judge is unreadable, not a mismatch.
     $home = tempdir( CLEANUP => 1 );
     $app  = "$home/app";
-    my $marker = "$home/later-ran";
-    add_node( $home, 'ea', 26, "sleep 2; printf 'v26.13.0\\n'" );
-    add_node( $home, 'ea', 24, "printf ran > '$marker'; printf 'v24.22.2\\n'" );
+    add_node( $home, 'ea', 24, "printf 'v24.02.0\\n'" );
+    write_package( $app, '{"engines":">=18"}' );
+    ( $bin, $source, $warning, $note ) =
+      Cpanel::API::UserTools::_select_node_for_app( $app, "$home/cpanel", "$home/alt" );
+    like( $bin, qr/ea-nodejs24/, 'unjudgeable version keeps the binary' );
+    is( $warning, undef, 'unjudgeable version is not a mismatch warning' );
+    is( $note, 'Cannot tell whether Node 24 fits this app\'s package.json.',
+        'unjudgeable version gets the cannot-tell note' );
+
+    # ^24, 24.x and >=24 <25 with 24 and 26 both cold: only 24 is spawned.
+    for my $range ( '^24', '24.x', '>=24 <25' ) {
+        $home = tempdir( CLEANUP => 1 );
+        $app  = "$home/app";
+        my $ran26 = "$home/ran26";
+        my $ran24 = "$home/ran24";
+        add_node( $home, 'ea', 26,
+            "printf ran > '$ran26'; sleep 2; printf 'v26.13.0\\n'" );
+        add_node( $home, 'ea', 24,
+            "printf ran > '$ran24'; sleep 2; printf 'v24.22.2\\n'" );
+        write_package( $app, '{"engines":"' . $range . '"}' );
+        local $Cpanel::API::UserTools::NODE_VERSION_TIMEOUT = 1;
+        ( $bin, $source, $warning, $note ) =
+          Cpanel::API::UserTools::_select_node_for_app(
+            $app, "$home/cpanel", "$home/alt" );
+        like( $bin, qr/ea-nodejs24/, "$range cold picks 24" );
+        is( $warning, undef, "$range cold has no warning" );
+        is( $note, 'Cannot tell whether Node 24 fits this app\'s package.json.',
+            "$range cold note uses Node 24" );
+        ok( -e $ran24 && !-e $ran26,
+            "$range cold never spawns 26" );
+    }
+
+    # >=99 with every binary cold: warning, label is the folder major, and
+    # only the newest binary is spawned.
+    $home = tempdir( CLEANUP => 1 );
+    $app  = "$home/app";
+    my $slow26 = "$home/slow26";
+    my $slow24 = "$home/slow24";
+    add_node( $home, 'ea', 26,
+        "printf ran > '$slow26'; sleep 2; printf 'v26.13.0\\n'" );
+    add_node( $home, 'ea', 24,
+        "printf ran > '$slow24'; sleep 2; printf 'v24.22.2\\n'" );
     write_package( $app, '{"engines":">=99"}' );
     local $Cpanel::API::UserTools::NODE_VERSION_TIMEOUT = 1;
     ( $bin, $source, $warning, $note ) =
       Cpanel::API::UserTools::_select_node_for_app( $app, "$home/cpanel", "$home/alt" );
-    like( $bin, qr/ea-nodejs26/, 'timed-out binary is selected' );
-    is( $warning, undef, 'timed-out binary never produces the warning' );
+    like( $bin, qr/ea-nodejs26/, 'cold proven mismatch picks newest' );
+    is( $note, undef, 'cold proven mismatch has no cannot-tell note' );
+    like( $warning, qr/asks for Node >=99.*Node 26\. Ask/,
+        'cold proven mismatch warns with the folder major' );
+    ok( -e $slow26 && !-e $slow24,
+        'cold proven mismatch spawns only the newest' );
+
+    # >=24 with 26 cold: 26 may fit, so it gets the cannot-tell note and
+    # the walk stops before spawning 24.
+    $home = tempdir( CLEANUP => 1 );
+    $app  = "$home/app";
+    my $may26 = "$home/may26";
+    my $may24 = "$home/may24";
+    add_node( $home, 'ea', 26,
+        "printf ran > '$may26'; sleep 2; printf 'v26.13.0\\n'" );
+    add_node( $home, 'ea', 24,
+        "printf ran > '$may24'; printf 'v24.22.2\\n'" );
+    write_package( $app, '{"engines":">=24"}' );
+    local $Cpanel::API::UserTools::NODE_VERSION_TIMEOUT = 1;
+    ( $bin, $source, $warning, $note ) =
+      Cpanel::API::UserTools::_select_node_for_app( $app, "$home/cpanel", "$home/alt" );
+    like( $bin, qr/ea-nodejs26/, '>=24 cold keeps the may-fit newer binary' );
+    is( $warning, undef, '>=24 cold has no warning for a may-fit timeout' );
     is( $note, 'Cannot tell whether Node 26 fits this app\'s package.json.',
-        'timed-out note uses the folder major' );
-    ok( !-e $marker, 'later binaries are not spawned after a timeout' );
+        '>=24 cold note uses Node 26' );
+    ok( -e $may26 && !-e $may24,
+        '>=24 cold stops before spawning the older binary' );
 };
 
 done_testing();

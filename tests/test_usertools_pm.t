@@ -5269,6 +5269,17 @@ package main;
     $ok = Cpanel::API::UserTools::app_helper_deploy_status( FakeArgs->new( job_id => 'deploy-nm5' ), $res );
     ok( $ok, 'status accepted' );
     ok( !exists $res->{data}{node_modules}, 'composer jobs omit node_modules' );
+    write_deploy_job( $home, 'deploy-gone',
+        { tool => 'deploy', id => 'deploy-gone', pid => 1,
+          recipe => 'npm_build', node_warning => 'gone warning' },
+        {} );
+    $res = FakeResult->new();
+    $ok = Cpanel::API::UserTools::app_helper_deploy_status(
+        FakeArgs->new( job_id => 'deploy-gone' ), $res );
+    ok( $ok, 'worker-gone status accepted' );
+    is( $res->{data}{state}, 'failed', 'worker-gone state is failed' );
+    is( $res->{data}{node_warning}, 'gone warning',
+        'worker-gone failure returns the node warning' );
 }
 
 # --- ANSI escapes stripped from captured logs ----------------------------------------------------------------

@@ -7989,14 +7989,14 @@ sub _path_visible_in_cage {
 sub _node_num {
     my ($text) = @_;
     # Semver numeric component: no leading zeros, at most six digits.
-    return undef unless defined $text && $text =~ /^(?:0|[1-9]\d{0,5})$/;
+    return undef unless defined $text && $text =~ /^(?:0|[1-9][0-9]{0,5})$/;
     return $text + 0;
 }
 
 sub _node_version_tuple {
     my ($version) = @_;
     return () unless defined $version && !ref $version;
-    my @raw = $version =~ /^(\d{1,6})\.(\d{1,6})\.(\d{1,6})$/;
+    my @raw = $version =~ /^([0-9]{1,6})\.([0-9]{1,6})\.([0-9]{1,6})$/;
     return () unless @raw == 3;
     my @parts = map { _node_num($_) } @raw;
     return () if grep { !defined } @parts;
@@ -8016,27 +8016,27 @@ sub _node_parse_partial {
     my ($text) = @_;
     # One bare token: exact, major-only, minor-only, or a trailing wildcard.
     return undef unless defined $text && !ref $text && $text ne '';
-    if ( $text =~ /^(\d{1,6})\.(\d{1,6})\.(\d{1,6})$/ ) {
+    if ( $text =~ /^([0-9]{1,6})\.([0-9]{1,6})\.([0-9]{1,6})$/ ) {
         my @parts = map { _node_num($_) } ( $1, $2, $3 );
         return undef if grep { !defined } @parts;
         return { kind => 'exact', parts => \@parts };
     }
-    if ( $text =~ /^(\d{1,6})\.(\d{1,6})(?:\.(?:x|X|\*))$/ ) {
+    if ( $text =~ /^([0-9]{1,6})\.([0-9]{1,6})(?:\.(?:x|X|\*))$/ ) {
         my @parts = map { _node_num($_) } ( $1, $2 );
         return undef if grep { !defined } @parts;
         return { kind => 'minor', parts => [ $parts[0], $parts[1], 0 ] };
     }
-    if ( $text =~ /^(\d{1,6})\.(\d{1,6})$/ ) {
+    if ( $text =~ /^([0-9]{1,6})\.([0-9]{1,6})$/ ) {
         my @parts = map { _node_num($_) } ( $1, $2 );
         return undef if grep { !defined } @parts;
         return { kind => 'minor', parts => [ $parts[0], $parts[1], 0 ] };
     }
-    if ( $text =~ /^(\d{1,6})(?:\.(?:x|X|\*)){1,2}$/ ) {
+    if ( $text =~ /^([0-9]{1,6})(?:\.(?:x|X|\*)){1,2}$/ ) {
         my $major = _node_num($1);
         return undef unless defined $major;
         return { kind => 'major', parts => [ $major, 0, 0 ] };
     }
-    if ( $text =~ /^(\d{1,6})$/ ) {
+    if ( $text =~ /^([0-9]{1,6})$/ ) {
         my $major = _node_num($1);
         return undef unless defined $major;
         return { kind => 'major', parts => [ $major, 0, 0 ] };
@@ -8048,7 +8048,7 @@ sub _node_token_constraints {
     my ($token) = @_;
     # One comparator, normalised to [operator, [major, minor, patch]].
     return undef unless defined $token && !ref $token && $token ne '';
-    if ( $token =~ /^v(\d{1,6})\.(\d{1,6})\.(\d{1,6})$/ ) {
+    if ( $token =~ /^v([0-9]{1,6})\.([0-9]{1,6})\.([0-9]{1,6})$/ ) {
         my @parts = map { _node_num($_) } ( $1, $2, $3 );
         return undef if grep { !defined } @parts;
         return [ [ '=', \@parts ] ];
@@ -8107,26 +8107,24 @@ sub _node_token_constraints {
     return [ [ '>=', [ @{ $parsed->{parts} } ] ], [ '<', $upper ] ];
 }
 
-sub _node_range_satisfies {
-    my ( $range, $version ) = @_;
-    # Conservative semver comparison. Returns ok, no, or unknown; any
-    # unrecognised part makes the whole range unknown.
-    return 'unknown' unless defined $range && !ref $range;
-    return 'unknown' if length($range) > 128;
+sub _node_range_parse {
+    my ($range) = @_;
+    # Return the alternatives as comparator lists, or undef for an unknown
+    # range. Any unrecognised part makes the whole range unknown.
+    return undef unless defined $range && !ref $range;
+    return undef if length($range) > 128;
     my @alternatives = split /\|\|/, $range, -1;
-    return 'unknown' unless @alternatives && @alternatives <= 8;
-    my @version = _node_version_tuple($version);
-    return 'unknown' unless @version == 3;
+    return undef unless @alternatives && @alternatives <= 8;
     my @parsed;
     for my $alternative (@alternatives) {
         $alternative =~ s/^\s+|\s+$//g;
-        return 'unknown' if $alternative eq '';
+        return undef if $alternative eq '';
         my @tokens = split /\s+/, $alternative;
         my @joined;
         while (@tokens) {
             my $token = shift @tokens;
             if ( $token =~ /^(?:>=|<=|>|<|=|\^|~)$/ ) {
-                return 'unknown' unless @tokens;
+                return undef unless @tokens;
                 $token .= shift @tokens;
             }
             push @joined, $token;
@@ -8134,12 +8132,65 @@ sub _node_range_satisfies {
         my @constraints;
         for my $token (@joined) {
             my $constraints = _node_token_constraints($token);
-            return 'unknown' unless $constraints;
+            return undef unless $constraints;
             push @constraints, @{$constraints};
         }
         push @parsed, \@constraints;
     }
-    for my $constraints (@parsed) {
+    return \@parsed;
+}
+
+sub _node_major_may_fit {
+    my ( $alternatives, $major ) = @_;
+    # True when some alternative could still match a version in this major.
+    # It may say true too often; false is the only proof.
+    return 0 unless ref $alternatives eq 'ARRAY' && defined $major;
+    my $floor = [ $major, 0, 0 ];
+    for my $constraints ( @{$alternatives} ) {
+        next unless ref $constraints eq 'ARRAY';
+        my $may_fit = 1;
+        for my $pair ( @{$constraints} ) {
+            next unless ref $pair eq 'ARRAY' && @{$pair} >= 2;
+            my ( $op, $bound ) = @{$pair};
+            next unless ref $bound eq 'ARRAY' && @{$bound} >= 3;
+            if ( $op eq '>=' || $op eq '>' ) {
+                if ( $bound->[0] > $major ) {
+                    $may_fit = 0;
+                    last;
+                }
+            }
+            elsif ( $op eq '<' ) {
+                if ( _node_cmp_tuple( $bound, $floor ) <= 0 ) {
+                    $may_fit = 0;
+                    last;
+                }
+            }
+            elsif ( $op eq '<=' ) {
+                if ( _node_cmp_tuple( $bound, $floor ) < 0 ) {
+                    $may_fit = 0;
+                    last;
+                }
+            }
+            elsif ( $op eq '=' ) {
+                if ( $bound->[0] != $major ) {
+                    $may_fit = 0;
+                    last;
+                }
+            }
+        }
+        return 1 if $may_fit;
+    }
+    return 0;
+}
+
+sub _node_range_satisfies {
+    my ( $range, $version ) = @_;
+    # Conservative semver comparison. Returns ok, no, or unknown.
+    my $parsed = _node_range_parse($range);
+    return 'unknown' unless $parsed;
+    my @version = _node_version_tuple($version);
+    return 'unknown' unless @version == 3;
+    for my $constraints ( @{$parsed} ) {
         my $all = 1;
         for my $pair ( @{$constraints} ) {
             my ( $op, $bound ) = @{$pair};
@@ -8196,6 +8247,7 @@ sub _node_engines_range {
                 $range = _json_string($eng);
             }
             if ( defined $range ) {
+                return substr( $range, 0, 129 ) if length($range) > 256;
                 $range =~ s/^\s+|\s+$//g;
                 return undef if $range eq '' || $range eq '*' || $range =~ /^x$/i;
                 return $range;
@@ -8224,7 +8276,7 @@ sub _node_bin_version_run {
       if $timed_out || $res->{truncated} || ( $res->{exit} // 1 ) != 0;
     my $out = $res->{output} // '';
     $out =~ s/^\s+|\s+$//g;
-    my @parts = $out =~ /^v(\d+)\.(\d+)\.(\d+)$/;
+    my @parts = $out =~ /^v([0-9]+)\.([0-9]+)\.([0-9]+)$/;
     return { version => undef, timed_out => 0 } unless @parts == 3;
     return { version => "$parts[0].$parts[1].$parts[2]", timed_out => 0 };
 }
@@ -8242,8 +8294,8 @@ sub _select_node_for_app {
     # blocks the build; it only reaches the warning slot.
     # CloudLinux layout is root/usr/bin (alt-nodejsNN/root/usr/bin/node).
     my @families;
-    push @families, [ defined $cpanel_base ? $cpanel_base : '/opt/cpanel', qr/^ea-nodejs(\d+)$/, 'bin/node' ];
-    push @families, [ defined $alt_base ? $alt_base : '/opt/alt', qr/^alt-nodejs(\d+)$/, 'root/usr/bin/node' ];
+    push @families, [ defined $cpanel_base ? $cpanel_base : '/opt/cpanel', qr/^ea-nodejs([0-9]+)$/, 'bin/node' ];
+    push @families, [ defined $alt_base ? $alt_base : '/opt/alt', qr/^alt-nodejs([0-9]+)$/, 'root/usr/bin/node' ];
     my @found;
     my $family = 0;
     for my $fam (@families) {
@@ -8277,7 +8329,8 @@ sub _select_node_for_app {
     if ( !defined $range ) {
         return ( $found[0]{bin}, 'node', undef, undef );
     }
-    if ( _node_range_satisfies( $range, '0.0.0' ) eq 'unknown' ) {
+    my $alternatives = _node_range_parse($range);
+    if ( !$alternatives ) {
         my $candidate = $found[0];
         my $run = _node_bin_version_run( $candidate->{bin} );
         my $label = defined $run->{version}
@@ -8286,10 +8339,12 @@ sub _select_node_for_app {
         return ( $candidate->{bin}, 'node', undef,
             "Cannot tell whether Node $label fits this app's package.json." );
     }
+    my @may_fit = grep {
+        _node_major_may_fit( $alternatives, $_->{major} )
+    } @found;
     my $newest_unreadable;
-    my $newest_version;
     my $stop_spawning = 0;
-    for my $candidate (@found) {
+    for my $candidate (@may_fit) {
         my $run;
         if ($stop_spawning) {
             $run = { version => undef, timed_out => 0 };
@@ -8299,14 +8354,21 @@ sub _select_node_for_app {
             $stop_spawning = 1 if $run->{timed_out};
         }
         my $version = $run->{version};
+        if ( defined $version ) {
+            $candidate->{version} = $version;
+        }
         if ( !defined $version ) {
             $newest_unreadable //= $candidate;
             next;
         }
-        $newest_version //= $version;
-        if ( _node_range_satisfies( $range, $version ) eq 'ok' ) {
+        my $state = _node_range_satisfies( $range, $version );
+        if ( $state eq 'ok' ) {
             return ( $candidate->{bin}, 'node', undef,
                 "Node $version fits this app's package.json ($range)." );
+        }
+        if ( $state eq 'unknown' ) {
+            $newest_unreadable //= $candidate;
+            next;
         }
     }
     if ($newest_unreadable) {
@@ -8314,10 +8376,15 @@ sub _select_node_for_app {
             "Cannot tell whether Node $newest_unreadable->{major} fits this app's package.json." );
     }
     my $chosen  = $found[0];
-    my $version = $newest_version // 'unknown';
+    my $version = $chosen->{version};
+    if ( !defined $version ) {
+        my $run = _node_bin_version_run( $chosen->{bin} );
+        $version = $run->{version};
+    }
+    my $label = defined $version ? $version : $chosen->{major};
     return ( $chosen->{bin}, 'node',
         "This app's package.json asks for Node $range, but no installed version matches. "
-          . "The build would use Node $version. Ask your host to add a matching version, "
+          . "The build would use Node $label. Ask your host to add a matching version, "
           . "or update the app.",
         undef );
 }
