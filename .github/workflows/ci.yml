@@ -6,6 +6,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   engine-tests:
     runs-on: ubuntu-24.04
@@ -13,8 +16,10 @@ jobs:
       matrix:
         python-version: ["3.9"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile check (py3.9)
@@ -24,9 +29,11 @@ jobs:
       - name: Run engine tests
         run: python -m pytest tests/ -q
   perl-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install test deps
         run: sudo apt-get update && sudo apt-get install -y libtemplate-perl
       - name: Compile check (UAPI module, off-server stubs)
@@ -36,9 +43,11 @@ jobs:
       - name: Static template render
         run: perl tests/render_check.pl
   shell:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Syntax check installer
         run: |
           bash -n install.sh
@@ -52,10 +61,12 @@ jobs:
       - name: Updater unit tests
         run: bash tests/test_update.sh
   lint-shell:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Install shellcheck (pinned to the version the suites are linted with)
@@ -65,8 +76,10 @@ jobs:
   lint-python:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.9"
       - name: Install ruff
@@ -74,19 +87,22 @@ jobs:
       - name: "Ruff check engine (ruff.toml gate: errors, not style)"
         run: ruff check engine/
   lint-perl:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install perlcritic
         run: sudo apt-get update && sudo apt-get install -y libperl-critic-perl
       - name: Perlcritic (severity 4, gentle, shipped code only)
         run: perlcritic --severity 4 admin/ Cpanel/ hooks/ whm/
   secrets:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Install pinned gitleaks binary (checksum-verified)
         run: |
           ver="8.16.0"
@@ -99,14 +115,16 @@ jobs:
       - name: Gitleaks detect (full history)
         run: gitleaks detect --source . --log-opts=--all --verbose
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [engine-tests, perl-tests, shell, lint-shell, lint-python, lint-perl, secrets]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Build release tarball (LF, umask 022, dev paths excluded)
         run: |
           ver="${GITHUB_REF_NAME}"
@@ -115,7 +133,7 @@ jobs:
           sha256sum "${base}.tar.gz" > "${base}.tar.gz.sha256"
           tar -tzf "${base}.tar.gz" | head -n 50
           cat "${base}.tar.gz.sha256"
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
         with:
           cosign-release: v2.4.1
       - name: Keyless-sign the tarball (Sigstore bundle)
@@ -126,7 +144,7 @@ jobs:
       # Never mark releases as pre-releases: bin/usertools-update finds new
       # versions via GitHub's releases/latest, which skips pre-releases.
       - name: Attach tarball to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: |
             usertools-for-cpanel-*.tar.gz
