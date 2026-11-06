@@ -5,7 +5,7 @@ package Cpanel::API::UserTools;
 use strict;
 use warnings;
 
-our $VERSION = '0.4.0';
+our $VERSION = '0.5.0';
 
 # Cpanel Dependencies
 use Cpanel                   ();

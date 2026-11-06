@@ -3,6 +3,38 @@
 All notable changes to this project are documented here. Versions follow
 [SemVer](https://semver.org/).
 
+## [0.5.0] - 2026-11-06
+
+### Security
+
+- **"Off by default" was not true through 0.4.0.** cPanel counts a plugin
+  feature with no line in a feature list as enabled, and the installer wrote
+  no lines. So on a fresh install, Manage Shell, Fix Home Permissions, Bulk
+  Permissions, Ownership Report and App Helper were available to every
+  account on any package whose feature list had no line for them. Manage
+  Shell let an account pick from `allowed_shell_modes`, which ships as
+  `disabled,jailed`. All nine tool switches now ship `0`.
+- `enable_fix_home`, `enable_bulk_perms` and `enable_ownership_report` were
+  not enforced anywhere, and `enable_app_helper` only stopped document-root
+  changes and the account hook. All four now stop every call of their tool.
+  Only `1` means on; a missing key or unreadable policy file means off.
+
+### Changed
+
+- **Upgrading does not switch anything off.** A server that already has a
+  tool at `1` keeps it, and `--upgrade` prints a notice naming those tools
+  and records it in the audit log. Review them in UserTools Settings. The one
+  change on a running server: a switch already set to `0`, which used to be
+  ignored, now takes effect.
+- The setup order is now: switch a tool on in UserTools Settings, then untick
+  its feature in Feature Manager for packages that should not have it. All
+  ten menu entries appear on a fresh install, and a tool that is off refuses
+  with a message. UserTools never writes to cPanel's feature lists.
+- The account hook needs `enable_app_helper=1`, so it stays inactive on a
+  fresh install until App Helper is switched on.
+- My Activity has no switch. It shows an account only its own activity and is
+  empty until an enabled tool records something.
+
 ## [0.4.0] - 2026-11-06
 
 ### Added

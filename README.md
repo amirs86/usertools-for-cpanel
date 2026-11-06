@@ -1,7 +1,7 @@
 # UserTools for cPanel
 
 Self-service tools for cPanel users, managed by the server admin.
-Version 0.4.0 (public beta).
+Version 0.5.0 (public beta).
 
 ## Requirements
 
@@ -14,18 +14,18 @@ Version 0.4.0 (public beta).
 One line (pinned release, verified download, then install):
 
 ```sh
-curl -fsSL https://github.com/amirs86/usertools-for-cpanel/releases/download/v0.4.0/bootstrap-install.sh | bash -s -- \
-    --repo amirs86/usertools-for-cpanel --version v0.4.0 --yes
+curl -fsSL https://github.com/amirs86/usertools-for-cpanel/releases/download/v0.5.0/bootstrap-install.sh | bash -s -- \
+    --repo amirs86/usertools-for-cpanel --version v0.5.0 --yes
 ```
 
 Pinned install with checksum check (recommended when you want a fixed
 version). Copy the expected hash from the release notes first:
 
 ```sh
-curl -fsSLO https://github.com/amirs86/usertools-for-cpanel/releases/download/v0.4.0/usertools-for-cpanel-v0.4.0.tar.gz
-curl -fsSLO https://github.com/amirs86/usertools-for-cpanel/releases/download/v0.4.0/usertools-for-cpanel-v0.4.0.tar.gz.sha256
-sha256sum -c usertools-for-cpanel-v0.4.0.tar.gz.sha256
-tar -xzf usertools-for-cpanel-v0.4.0.tar.gz && cd usertools-for-cpanel-*
+curl -fsSLO https://github.com/amirs86/usertools-for-cpanel/releases/download/v0.5.0/usertools-for-cpanel-v0.5.0.tar.gz
+curl -fsSLO https://github.com/amirs86/usertools-for-cpanel/releases/download/v0.5.0/usertools-for-cpanel-v0.5.0.tar.gz.sha256
+sha256sum -c usertools-for-cpanel-v0.5.0.tar.gz.sha256
+tar -xzf usertools-for-cpanel-v0.5.0.tar.gz && cd usertools-for-cpanel-*
 ./install.sh --yes
 ```
 
@@ -34,7 +34,7 @@ instead of the downloaded `.sha256` file (both files above come from the
 same place, so that check only proves the download was not damaged):
 
 ```sh
-./bootstrap-install.sh --repo amirs86/usertools-for-cpanel --version v0.4.0 --sha256 HEX --yes
+./bootstrap-install.sh --repo amirs86/usertools-for-cpanel --version v0.5.0 --sha256 HEX --yes
 ```
 
 ## Verify a release
@@ -45,8 +45,8 @@ the tagged commit — not merely that it downloaded intact. With
 [cosign](https://github.com/sigstore/cosign) installed:
 
 ```sh
-cosign verify-blob usertools-for-cpanel-v0.4.0.tar.gz \
-    --bundle usertools-for-cpanel-v0.4.0.tar.gz.sigstore.json \
+cosign verify-blob usertools-for-cpanel-v0.5.0.tar.gz \
+    --bundle usertools-for-cpanel-v0.5.0.tar.gz.sigstore.json \
     --certificate-identity-regexp '^https://github.com/amirs86/usertools-for-cpanel/\.github/workflows/ci\.yml@refs/tags/v' \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
