@@ -312,7 +312,7 @@ install_files() { # dry: installs the manifest + icons (0 ok)
 }
 
 upgrade_policy_notice() { # conf: one notice when a tool switch is on
-    local conf="$1" key val label
+    local conf="$1" key val label log line
     local -a names=()
     [ -f "$conf" ] || return 0
     while IFS='=' read -r key val; do
@@ -329,7 +329,15 @@ upgrade_policy_notice() { # conf: one notice when a tool switch is on
         [ "$val" = "1" ] && names+=("$label")
     done < <(grep -E '^[[:space:]]*enable_(shell|fix_home|bulk_perms|ownership_report|app_helper)[[:space:]]*=' "$conf" 2>/dev/null || true)
     [ "${#names[@]}" -gt 0 ] || return 0
-    info "notice: these tools are switched on and reach every account where their feature is ticked (cPanel ticks new features on every list): ${names[*]}"
+    line="notice: these tools are switched on and reach every account where their feature is ticked (cPanel ticks new features on every list): ${names[*]}"
+    info "$line"
+    # Automatic updates capture this output, so keep it in the audit log the
+    # WHM page shows.
+    log="$(dest /var/log/usertools.log)"
+    mkdir -p "$(dirname "$log")" 2>/dev/null || true
+    printf '%s %s
+' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line" >>"$log" 2>/dev/null || true
+    chmod 0600 "$log" 2>/dev/null || true
 }
 
 install_confs() { # dry upgrade: example confs (never overwrite); upgrade adds missing keys

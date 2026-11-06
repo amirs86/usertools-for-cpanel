@@ -205,12 +205,15 @@ assert_eq "upgrade keeps off value" "1" "$(grep -q '^enable_fix_home=0$' "$upd/e
 assert_eq "upgrade adds missing at 0" "1" "$(grep -q '^enable_app_helper=0$' "$upd/etc/usertools.conf" && echo 1 || echo 0)"
 assert_eq "notice names the on tool" "1" "$(printf '%s' "$out" | grep -q 'Manage Shell' && echo 1 || echo 0)"
 assert_eq "notice omits the off tool" "0" "$(printf '%s' "$out" | grep -q 'Fix Home Permissions' && echo 1 || echo 0)"
+assert_eq "notice reaches the audit log" "1" "$(grep -c 'notice: .*Manage Shell' "$upd/var/log/usertools.log")"
+assert_eq "audit log stays private" "600" "$(stat -c %a "$upd/var/log/usertools.log")"
 printf '%s\n' 'enable_ownership_report=1' 'enable_app_helper=1' >>"$upd/etc/usertools.conf"
 out="$(USERTOOLS_DESTDIR="$upd" USERTOOLS_ETC="/etc" install_confs 0 1)"
 assert_eq "notice lists each on tool" "3" "$(printf '%s' "$out" | grep -oE 'Manage Shell|Ownership Report|App Helper' | wc -l | tr -d ' ')"
 printf '%s\n' 'enable_shell=0' >"$upd/etc/usertools.conf"
 out="$(USERTOOLS_DESTDIR="$upd" USERTOOLS_ETC="/etc" install_confs 0 1)"
 assert_eq "no notice when all are off" "0" "$(printf '%s' "$out" | grep -c 'notice:')"
+assert_eq "no audit line when all are off" "2" "$(grep -c 'notice:' "$upd/var/log/usertools.log")"
 rm -rf "$upd"
 
 # --- install/upgrade never touch the feature lists --------------------------------

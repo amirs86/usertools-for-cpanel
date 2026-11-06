@@ -133,7 +133,7 @@ paths=[% composer.path | html %]</pre>
 — or set an absolute Composer path above. Whichever is used must be root-owned and not writable by group or others, or App Helper refuses it.</p>
 [% END %]
 [% END %]
-<h2>Enable a tool for a feature list</h2>
+<h2>Steps for a feature list</h2>
 <form method="post" action="">
 [% IF token %]<input type="hidden" name="token" value="[% token | html %]">[% END %]
 <input type="hidden" name="action" value="feature_help">
