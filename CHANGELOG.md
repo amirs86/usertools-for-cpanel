@@ -3,6 +3,36 @@
 All notable changes to this project are documented here. Versions follow
 [SemVer](https://semver.org/).
 
+## [0.4.0] - 2026-11-06
+
+### Added
+
+- App Helper: the `engines.node` range in `package.json` is checked against
+  the real version of each installed Node. The deploy panel says which
+  version fits, warns when no installed version matches, and says when it
+  cannot tell. A mismatch never blocks the build, and the warning is shown
+  again beside a failed build. Apps with no range see no change, and Node
+  is not run for them.
+
+### Changed
+
+- App Helper now builds on the newest installed Node that satisfies the
+  range. **`>=18` with Node 18 and 24 installed now builds on 24**, where it
+  used to build on 18. If an app needs the older version, narrow its range,
+  for example to `^18`.
+- Reading a Node version is limited to five seconds. On a server where Node
+  has not run recently, an account's I/O limit can make the first read
+  slower than that, so the panel can show "cannot tell" for the first page
+  loads until the files are cached.
+
+### Fixed
+
+- App Helper no longer warns about a range the installed Node satisfies, such
+  as `>=18` with only Node 24 installed.
+- Ranges with a minor or patch version, `||` alternatives or two bounds, such
+  as `>=18.17.0`, `^20.19.0 || >=22.12.0` and `>=18 <21`, are no longer
+  ignored.
+
 ## [0.3.0] - 2026-11-06
 
 ### Added
