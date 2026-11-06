@@ -19,8 +19,8 @@
 #   --dry-run          print what would change, change nothing
 #   --yes              non-interactive (no confirmations)
 #   --enable-features=LIST
-#                      print the exact WHM Feature Manager steps for LIST
-#                      (never edits feature lists silently)
+#                      print the exact WHM Settings and Feature Manager steps
+#                      for LIST (never edits feature lists silently)
 #   --uninstall        remove the plugin (delegates to uninstall.sh);
 #   --purge            also remove the policy files and the audit log
 #
@@ -311,6 +311,27 @@ install_files() { # dry: installs the manifest + icons (0 ok)
     return "$fails"
 }
 
+upgrade_policy_notice() { # conf: one notice when a tool switch is on
+    local conf="$1" key val label
+    local -a names=()
+    [ -f "$conf" ] || return 0
+    while IFS='=' read -r key val; do
+        key="$(printf '%s' "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        val="$(printf '%s' "$val" | sed 's/[[:space:]]*[;#].*$//;s/^[[:space:]]*//;s/[[:space:]]*$//')"
+        case "$key" in
+            enable_shell) label='Manage Shell' ;;
+            enable_fix_home) label='Fix Home Permissions' ;;
+            enable_bulk_perms) label='Bulk Permissions' ;;
+            enable_ownership_report) label='Ownership Report' ;;
+            enable_app_helper) label='App Helper' ;;
+            *) continue ;;
+        esac
+        [ "$val" = "1" ] && names+=("$label")
+    done < <(grep -E '^[[:space:]]*enable_(shell|fix_home|bulk_perms|ownership_report|app_helper)[[:space:]]*=' "$conf" 2>/dev/null || true)
+    [ "${#names[@]}" -gt 0 ] || return 0
+    info "notice: these tools are switched on and reach every account where their feature is ticked (cPanel ticks new features on every list): ${names[*]}"
+}
+
 install_confs() { # dry upgrade: example confs (never overwrite); upgrade adds missing keys
     local dry="$1" upgrade="$2" conf priv key val
     conf="$(dest "$ETC/$CONF_NAME")"
@@ -344,6 +365,7 @@ install_confs() { # dry upgrade: example confs (never overwrite); upgrade adds m
             esac
         done <"$SRC/etc/usertools.conf.example"
         info "upgrade: missing keys added, existing values kept"
+        upgrade_policy_notice "$conf"
     fi
     return 0
 }
@@ -543,14 +565,19 @@ enable_features_help() { # list: print exact WHM steps (never edits silently)
         info "warning: feature list '$list' does not exist on this server"
     fi
     cat <<EOF
-usertools-install: to enable the tools for feature list '$list':
-  1. WHM >> Home >> Packages >> Feature Manager
-  2. Manage feature list '$list'
-  3. Tick: usertools_shell usertools_fix_home usertools_bulk_perms
-     usertools_ownership_report usertools_app_helper usertools_space_cleaner
-     usertools_site_doctor usertools_exposed_files
-     usertools_cron_doctor usertools_activity
-  4. Save. (Features stay off by default until you do this.)
+usertools-install: to control the tools for feature list '$list':
+  1. WHM >> Home >> Plugins >> UserTools Settings: switch on each tool
+     this package should get. Every tool switch ships off.
+  2. WHM >> Home >> Packages >> Feature Manager
+  3. Manage feature list '$list'
+  4. Untick any usertools_* feature this package should not have. cPanel
+     ticks new features on every list, so Feature Manager only narrows the
+     tools per package.
+  5. Save.
+  Feature names: usertools_shell usertools_fix_home usertools_bulk_perms
+  usertools_ownership_report usertools_app_helper usertools_space_cleaner
+  usertools_site_doctor usertools_exposed_files usertools_cron_doctor
+  usertools_activity
 EOF
 }
 
@@ -598,10 +625,12 @@ verify_table() { # : prints PASS/MISSING per installed path + version
 whats_next() { # : the post-install box
     cat <<'EOF'
 usertools-install: What's next
-  1. WHM >> Packages >> Feature Manager: tick the 10 usertools_* features
-     for the packages that get the tools (off by default), or run:
-     ./install.sh --enable-features=LIST
-  2. WHM >> Plugins >> UserTools Settings: policy, app packages, updates.
+  1. WHM >> Plugins >> UserTools Settings: switch on the tools you want.
+     Every tool switch ships off; a tool that is off refuses with a message.
+  2. WHM >> Packages >> Feature Manager: cPanel ticks new features on every
+     list, so all ten menu entries appear. Untick any usertools_* feature a
+     package should not get. (./install.sh --enable-features=LIST prints the
+     exact steps for a list.)
   3. Verify: log in to a test cPanel account on one of those packages and
      open the UserTools pages under Security (Space Cleaner is under Files).
 EOF

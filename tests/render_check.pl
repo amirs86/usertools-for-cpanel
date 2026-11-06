@@ -135,6 +135,20 @@ for my $page ( sort keys %pages ) {
     }
     print "render OK: $page\n";
 }
+# The WHM settings page must explain where the real on/off switch is.
+{
+    my $settings_file = "$root/whm/views/settings.tt";
+    open my $sfh, '<:encoding(utf8)', $settings_file or die "cannot read $settings_file: $!\n";
+    my $settings = do { local $/; <$sfh> };
+    close $sfh;
+    if ( index( $settings, 'cPanel ticks new features on every list' ) < 0 ) {
+        print "render missing (settings): policy notice\n";
+        $fail = 1;
+    }
+    else {
+        print "render OK: settings policy notice\n";
+    }
+}
 # Every <summary> needs a visible marker (Jupiter strips the native
 # triangle). The stylesheet must carry the explicit marker rules.
 {

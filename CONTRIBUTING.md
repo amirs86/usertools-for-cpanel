@@ -6,6 +6,9 @@
   account or package names, emails, or names of people. Use placeholders
   (`example.com`, `<PORT>`, `uttest`) and runtime detection.
 - Security: never add `chown`, `chgrp`, or any path-taking AdminBin function.
+- Every new tool ships with its policy switch at `0`, enforced in its
+  `_gate_tool`, `_gate_app` or inline gate. A cPanel feature with no line
+  counts as enabled, so the feature list alone is never the off switch.
 - New dependencies need an Apache-2.0-compatible licence and an entry in
   `THIRD_PARTY_NOTICES.md`. Never copy files, templates, CSS, JS, icons or
   text from cPanel, hosting providers or Stack Overflow.

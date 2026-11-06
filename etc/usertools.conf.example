@@ -6,12 +6,17 @@
 ; lives in usertools.private.conf.example instead.
 ; The engine reads max_job_seconds from this file.
 
-enable_shell=1
+enable_shell=0                             ; 0 = Manage Shell off even when
+                                        ; the feature is ticked (default off)
 allowed_shell_modes=disabled,jailed          ; add "normal" to permit bash
-enable_fix_home=1
-enable_bulk_perms=1
-enable_ownership_report=1
-enable_app_helper=1
+enable_fix_home=0                          ; 0 = Fix Home off even when
+                                        ; the feature is ticked (default off)
+enable_bulk_perms=0                        ; 0 = Bulk Permissions off even
+                                        ; when the feature is ticked (default off)
+enable_ownership_report=0                  ; 0 = Ownership Report off even
+                                        ; when the feature is ticked (default off)
+enable_app_helper=0                        ; 0 = App Helper off even when
+                                        ; the feature is ticked (default off)
 enable_space_cleaner=0                     ; 0 = Space Cleaner off even when
                                         ; the feature is ticked (default off)
 cleaner_log_min_mb=50                   ; error_log and per-website PHP logs

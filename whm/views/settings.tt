@@ -15,6 +15,7 @@
 [% END %]
 [% IF message %]<p role="status">[% message | html %]</p>[% END %]
 <h2>Policy</h2>
+<p class="description">A tool switched on here reaches every package where its feature is ticked, and cPanel ticks new features on every list.</p>
 <form method="post" action="">
 [% IF token %]<input type="hidden" name="token" value="[% token | html %]">[% END %]
 <input type="hidden" name="action" value="save">

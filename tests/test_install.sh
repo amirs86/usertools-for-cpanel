@@ -173,6 +173,16 @@ assert_eq "conf created" "1" "$([ -f "$destd/etc/usertools.conf" ] && echo 1 || 
 assert_eq "conf mode 644" "644" "$(stat -c '%a' "$destd/etc/usertools.conf")"
 assert_eq "private mode 600" "600" "$(stat -c '%a' "$destd/etc/usertools.private.conf")"
 assert_eq "update_repo prefilled" "1" "$(grep -q '^update_repo=amirs86/usertools-for-cpanel' "$destd/etc/usertools.conf" && echo 1 || echo 0)"
+for key in enable_shell enable_fix_home enable_bulk_perms enable_ownership_report \
+    enable_app_helper enable_space_cleaner enable_site_doctor enable_exposed_files \
+    enable_cron_doctor; do
+    want="$(grep -E "^$key=" "$here/etc/usertools.conf.example" | head -n 1 | cut -d= -f2 | sed 's/[[:space:]]*[;#].*$//;s/^[[:space:]]*//;s/[[:space:]]*$//')"
+    got="$(grep -E "^$key=" "$destd/etc/usertools.conf" | head -n 1 | cut -d= -f2 | sed 's/[[:space:]]*[;#].*$//;s/^[[:space:]]*//;s/[[:space:]]*$//')"
+    assert_eq "fresh $key matches example" "$want" "$got"
+    assert_eq "fresh $key is off" "0" "$got"
+done
+assert_eq "all nine tool keys off" "0" \
+    "$(grep -E '^enable_(shell|fix_home|bulk_perms|ownership_report|app_helper|space_cleaner|site_doctor|exposed_files|cron_doctor)=' "$destd/etc/usertools.conf" | grep -vc '=0')"
 
 # --- confs: re-run and upgrade ------------------------------------------------------
 printf '%s\n' 'enable_app_helper=1' >>"$destd/etc/usertools.conf"
@@ -184,6 +194,37 @@ USERTOOLS_DESTDIR="$destd" USERTOOLS_ETC="/etc" install_confs 0 1 >/dev/null
 assert_eq "upgrade keeps ssh_port" "ssh_port=9999" "$(grep '^ssh_port=' "$destd/etc/usertools.conf")"
 assert_eq "upgrade adds keys" "1" "$(grep -c '^enable_shell=' "$destd/etc/usertools.conf")"
 assert_eq "upgrade keeps update_repo" "1" "$(grep -q '^update_repo=custom/repo$' "$destd/etc/usertools.conf" && echo 1 || echo 0)"
+
+# --- upgrade keeps switches, adds missing at 0, and notices the on tools ---
+upd="$(mktemp -d)"
+mkdir -p "$upd/etc"
+printf '%s\n' 'enable_shell=1' 'enable_fix_home=0' >"$upd/etc/usertools.conf"
+out="$(USERTOOLS_DESTDIR="$upd" USERTOOLS_ETC="/etc" install_confs 0 1)"
+assert_eq "upgrade keeps on value" "1" "$(grep -q '^enable_shell=1$' "$upd/etc/usertools.conf" && echo 1 || echo 0)"
+assert_eq "upgrade keeps off value" "1" "$(grep -q '^enable_fix_home=0$' "$upd/etc/usertools.conf" && echo 1 || echo 0)"
+assert_eq "upgrade adds missing at 0" "1" "$(grep -q '^enable_app_helper=0$' "$upd/etc/usertools.conf" && echo 1 || echo 0)"
+assert_eq "notice names the on tool" "1" "$(printf '%s' "$out" | grep -q 'Manage Shell' && echo 1 || echo 0)"
+assert_eq "notice omits the off tool" "0" "$(printf '%s' "$out" | grep -q 'Fix Home Permissions' && echo 1 || echo 0)"
+printf '%s\n' 'enable_ownership_report=1' 'enable_app_helper=1' >>"$upd/etc/usertools.conf"
+out="$(USERTOOLS_DESTDIR="$upd" USERTOOLS_ETC="/etc" install_confs 0 1)"
+assert_eq "notice lists each on tool" "3" "$(printf '%s' "$out" | grep -oE 'Manage Shell|Ownership Report|App Helper' | wc -l | tr -d ' ')"
+printf '%s\n' 'enable_shell=0' >"$upd/etc/usertools.conf"
+out="$(USERTOOLS_DESTDIR="$upd" USERTOOLS_ETC="/etc" install_confs 0 1)"
+assert_eq "no notice when all are off" "0" "$(printf '%s' "$out" | grep -c 'notice:')"
+rm -rf "$upd"
+
+# --- install/upgrade never touch the feature lists --------------------------------
+fd="$(mktemp -d)"
+mkdir -p "$fd/var/cpanel/features"
+printf '%s\n' 'api_shell=0' 'usertools_shell=0' >"$fd/var/cpanel/features/default"
+printf '%s\n' 'usertools_shell=1' >"$fd/var/cpanel/features/Mail Only"
+fbefore="$(cd "$fd/var/cpanel" && find features -type f -print0 | sort -z | xargs -0 md5sum)"
+USERTOOLS_DESTDIR="$fd" USERTOOLS_ETC="/etc" install_confs 0 0 >/dev/null
+USERTOOLS_DESTDIR="$fd" USERTOOLS_ETC="/etc" install_confs 0 1 >/dev/null
+fafter="$(cd "$fd/var/cpanel" && find features -type f -print0 | sort -z | xargs -0 md5sum)"
+assert_eq "install and upgrade leave feature lists byte-identical" "$fbefore" "$fafter"
+rm -rf "$fd"
+
 mkdir -p "$destd/usr/local/cpanel/scripts" "$destd/usr/local/cpanel/bin"
 export FIX_DYNAMICUI="$destd/usr/local/cpanel/base/frontend/jupiter/dynamicui"
 printf '#!/bin/sh\nmkdir -p "$FIX_DYNAMICUI"\nprintf "usertools_shell usertools_fix_home usertools_bulk_perms usertools_ownership_report usertools_app_helper\\n" >"$FIX_DYNAMICUI/dynamicui_usertools.conf"\nexit 0\n' >"$destd/usr/local/cpanel/scripts/install_plugin"
@@ -210,6 +251,15 @@ rm -rf "$dryd"
 out="$(enable_features_help 'default' 2>&1)"
 assert_eq "steps name the list" "1" "$(printf '%s' "$out" | grep -q "feature list 'default'" && echo 1 || echo 0)"
 assert_eq "steps name features" "1" "$(printf '%s' "$out" | grep -c 'usertools_app_helper')"
+assert_eq "steps start at UserTools Settings" "1" \
+    "$(printf '%s' "$out" | grep -q 'UserTools Settings' && echo 1 || echo 0)"
+assert_eq "steps say untick per package" "1" \
+    "$(printf '%s' "$out" | grep -q 'Untick' && echo 1 || echo 0)"
+next="$(whats_next 2>&1)"
+assert_eq "next says switches ship off" "1" \
+    "$(printf '%s' "$next" | grep -q 'switch ships off' && echo 1 || echo 0)"
+assert_eq "next warns all entries appear" "1" \
+    "$(printf '%s' "$next" | grep -q 'all ten menu entries appear' && echo 1 || echo 0)"
 
 # --- uninstall order + absolute lookup + verification rows ----------------------------
 oroot="$(mktemp -d)"

@@ -216,6 +216,20 @@ sub write_pair {
 
     my $defaults = $Pkg->can('read_settings')->( "$dir/missing.conf", "$dir/missing.private" );
     is( $defaults->{composer_path}, '', 'composer_path defaults to empty' );
+    for my $key (qw(enable_shell enable_fix_home enable_bulk_perms
+        enable_ownership_report enable_app_helper)) {
+        is( $defaults->{$key}, '0', "$key defaults to 0" );
+    }
+
+    open my $of, '>', "$dir/on.conf" or die $!;
+    print $of "enable_shell=1\nenable_fix_home=1\nenable_bulk_perms=1\n"
+      . "enable_ownership_report=1\nenable_app_helper=1\n";
+    close $of;
+    my $on = $Pkg->can('read_settings')->( "$dir/on.conf", "$dir/missing.private" );
+    for my $key (qw(enable_shell enable_fix_home enable_bulk_perms
+        enable_ownership_report enable_app_helper)) {
+        is( $on->{$key}, '1', "$key saved 1 reads back as 1" );
+    }
 }
 
 # --- Composer discovery (same order as the user-side code) ----------------------
@@ -376,7 +390,9 @@ sub write_pair {
     my $help = \&UserTools::WHM::Settings::feature_list_help;
     my $h = $help->( 'default', 'usertools_shell', "$dir/features" );
     like( $h->{steps}, qr/usertools_shell/, 'steps name the feature' );
+    like( $h->{steps}, qr/UserTools Settings/, 'steps start at the policy switches' );
     like( $h->{steps}, qr/Feature Manager/, 'steps name the WHM path' );
+    like( $h->{steps}, qr/[Uu]ntick/, 'steps narrow per package' );
     $h = $help->( '../x', 'usertools_shell', "$dir/features" );
     like( $h->{error}, qr/Invalid/, 'traversal refused' );
     $h = $help->( '..', 'usertools_shell', "$dir/features" );

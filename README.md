@@ -81,15 +81,17 @@ Full removal including settings and log:
 
 ## After installing
 
-1. WHM → Packages → Feature Manager: tick the ten `usertools_*`
-   features for each package that should get the tools. Everything is
-   **off by default** until you do this. (`./install.sh
-   --enable-features=LIST` prints the exact steps for a list.)
-2. WHM → Plugins → UserTools Settings: policy switches, shell modes,
-   app packages, update check (opt-in, report only — never installs),
-   automatic updates (opt-in), and the last 200 audit log lines. When the
-   check finds a newer release, an "Update now" button downloads the
-   signature-verified release and upgrades.
+1. WHM → Plugins → UserTools Settings: switch on the tools you want.
+   Every tool switch ships Off, and a tool that is off refuses with a
+   message. The settings page also holds shell modes, app packages, the
+   update check (opt-in, report only — never installs), automatic updates
+   (opt-in), and the last 200 audit log lines.
+2. WHM → Packages → Feature Manager: cPanel ticks every new feature on
+   every list, so all ten `usertools_*` menu entries appear on a fresh
+   install. Untick any feature on a package that should not get that tool.
+   The feature only narrows a tool per package; the UserTools switch is
+   the real on/off control. (`./install.sh --enable-features=LIST` prints
+   the exact steps for a list.)
 3. Try it on a throwaway account first before enabling it widely.
 
 ## Features
@@ -126,8 +128,11 @@ Full removal including settings and log:
   server policy must allow it, the caller's package must include the
   feature, and the caller name comes from the server (never from the
   request).
-- Features are off by default. Nothing is offered until you enable it
-  per package in Feature Manager.
+- All nine tool policy switches ship off. A tool is available only when
+  its switch is `1` and its feature is ticked; either refusal returns a
+  message. cPanel ticks new features on every list, so Feature Manager
+  only narrows a tool per package. My Activity has no switch and is empty
+  until the enabled tools record something.
 - Shell changes are read back and rolled back if the result is not what
   was asked for.
 - No `.env` value ever leaves the server except `APP_ENV`/`APP_DEBUG`
@@ -167,14 +172,14 @@ Public file `/etc/usertools.conf` (0644, safe to read). Never edited by
 users; the installer creates it from the example and `--upgrade` only
 adds missing keys:
 
-- `enable_shell` (0/1): master switch for Manage Shell.
+- `enable_shell` (0/1): master switch for Manage Shell; ships `0`.
 - `allowed_shell_modes` (list): which modes users may pick
   (`disabled`, `jailed`, plus `normal` only if you add it).
 - `enable_fix_home`, `enable_bulk_perms`, `enable_ownership_report`,
   `enable_app_helper`, `enable_space_cleaner`, `enable_site_doctor`,
-  `enable_exposed_files` (0/1): one switch per tool. The last three
-  ship `0`: ticking their feature alone is not enough until you turn
-  these on.
+  `enable_exposed_files`, `enable_cron_doctor` (0/1): one switch per
+  tool. All nine tool switches ship `0`, and a missing key is off.
+  Ticking a feature alone is not enough until you turn its switch on.
 - `cleaner_log_min_mb` (number, MB, 1–1024, default 50): `error_log`
   and per-website PHP logs at or above this size qualify for
   truncating.
@@ -183,8 +188,9 @@ adds missing keys:
 - `allow_user_app_docroot` (0/1): lets users point their own main
   domain at `public_html/public` themselves. Off by default.
 - `app_packages` (list): new accounts on these packages get the app
-  folder layout from the account-creation hook. Empty by default;
-  names must match files in `/var/cpanel/packages/`.
+  folder layout from the account-creation hook. Empty by default; names
+  must match files in `/var/cpanel/packages/`. The hook needs
+  `enable_app_helper=1`, so it stays inactive until App Helper is on.
 - `max_job_seconds` (number): longest a background job may run.
 - `enable_update_check` (0/1) + `update_repo` (owner/name, prefilled with
   `amirs86/usertools-for-cpanel`): opt-in check against the GitHub

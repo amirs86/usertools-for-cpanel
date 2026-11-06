@@ -133,9 +133,9 @@ sub read_settings {
     $conf    = $CONF         unless defined $conf;
     $private = $PRIVATE_CONF unless defined $private;
     my %vals = (
-        enable_shell => '1', allowed_shell_modes => 'disabled,jailed',
-        enable_fix_home => '1', enable_bulk_perms => '1',
-        enable_ownership_report => '1', enable_app_helper => '1',
+        enable_shell => '0', allowed_shell_modes => 'disabled,jailed',
+        enable_fix_home => '0', enable_bulk_perms => '0',
+        enable_ownership_report => '0', enable_app_helper => '0',
         enable_space_cleaner => '0', cleaner_log_min_mb => '50',
         cleaner_trash_days => '7', enable_site_doctor => '0',
         enable_exposed_files => '0', enable_cron_doctor => '0',
@@ -532,8 +532,8 @@ sub jail_default_on {
 sub feature_list_help {
     my ( $list, $feature, $dir ) = @_;
     # No silent changes: validate the list, confirm it exists, and return
-    # the exact WHM click-path with the feature to tick. (Using a Feature
-    # Manager write API is a possible follow-up.)
+    # the click-path. The policy switch is the real on/off control; the
+    # feature list only narrows it per package.
     $dir = '/var/cpanel/features' unless defined $dir;
     if ( !_valid_list_name($list) ) {
         return { error => 'Invalid feature list name.' };
@@ -543,8 +543,11 @@ sub feature_list_help {
         return { error => "Feature list '$list' does not exist on this server." };
     }
     return {
-        steps => "WHM >> Home >> Packages >> Feature Manager >> Manage feature list '$list' "
-          . ">> tick '$feature' >> Save.",
+        steps => "1. WHM >> Home >> Plugins >> UserTools Settings: switch on the tool "
+          . "(it is off by default). 2. WHM >> Home >> Packages >> Feature Manager "
+          . ">> Manage feature list '$list': untick '$feature' for packages that "
+          . "should not have it. cPanel ticks new features on every list, so the "
+          . "feature only narrows the tool per package.",
         feature => $feature,
         list    => $list,
     };
