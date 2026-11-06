@@ -39,6 +39,16 @@ our $FEATURE_EXPOSED_FILES = 'usertools_exposed_files';
 our $FEATURE_CRON_DOCTOR = 'usertools_cron_doctor';
 our $FEATURE_ACTIVITY = 'usertools_activity';
 
+# Tools whose policy switch is enforced by the UAPI gates. Tools without an
+# entry here keep their existing checks (shell has its own, activity has no
+# switch, and the later tools use their own policy helpers).
+our %TOOL_POLICY_KEY = (
+    $FEATURE_FIX_HOME         => 'enable_fix_home',
+    $FEATURE_BULK_PERMS       => 'enable_bulk_perms',
+    $FEATURE_OWNERSHIP_REPORT => 'enable_ownership_report',
+    $FEATURE_APP_HELPER       => 'enable_app_helper',
+);
+
 our %API = (
     'home_permissions_check' => { 'needs_feature' => $FEATURE_FIX_HOME },
     'home_permissions_fix'   => { 'needs_feature' => $FEATURE_FIX_HOME },
@@ -559,6 +569,9 @@ sub home_permissions_check {
         $result->error( '_ERROR_FEATURE', $feature );
         return;
     }
+    if ( !_tool_policy_enabled( $result, $feature ) ) {
+        return;
+    }
 
     if ( $Cpanel::CPDATA{'DEMO'} ) {
         $result->error( '_ERROR_DEMO_MODE', $feature );
@@ -623,6 +636,9 @@ sub home_permissions_fix {
         $result->error( '_ERROR_FEATURE', $feature );
         return;
     }
+    if ( !_tool_policy_enabled( $result, $feature ) ) {
+        return;
+    }
 
     if ( $Cpanel::CPDATA{'DEMO'} ) {
         $result->error( '_ERROR_DEMO_MODE', $feature );
@@ -676,6 +692,9 @@ sub home_permissions_undo {
     my $feature = $FEATURE_FIX_HOME;
     if ( !main::hasfeature($feature) ) {
         $result->error( '_ERROR_FEATURE', $feature );
+        return;
+    }
+    if ( !_tool_policy_enabled( $result, $feature ) ) {
         return;
     }
 
@@ -1057,12 +1076,28 @@ sub _spawn_engine {
     return ( undef, 'worker did not start' );
 }
 
+sub _tool_policy_enabled {
+    my ( $result, $feature ) = @_;
+    # The feature list narrows a tool per package; this switch is the real
+    # on/off control. Only a literal 1 is on, and a missing or unreadable
+    # policy file is off.
+    my $key = $TOOL_POLICY_KEY{$feature};
+    return 1 unless defined $key;
+    my $policy = _read_user_policy();
+    if ( ref $policy eq 'HASH' && ( $policy->{$key} // '' ) eq '1' ) {
+        return 1;
+    }
+    $result->error('This feature is not enabled for your account.');
+    return 0;
+}
+
 sub _gate_tool {
     my ( $result, $feature ) = @_;
     if ( !main::hasfeature($feature) ) {
         $result->error( '_ERROR_FEATURE', $feature );
         return 0;
     }
+    return 0 unless _tool_policy_enabled( $result, $feature );
     if ( $Cpanel::CPDATA{'DEMO'} ) {
         $result->error( '_ERROR_DEMO_MODE', $feature );
         return 0;
@@ -5797,6 +5832,7 @@ sub _gate_app {
         $result->error( '_ERROR_FEATURE', $feature );
         return;
     }
+    return unless _tool_policy_enabled( $result, $feature );
     if ( $Cpanel::CPDATA{'DEMO'} ) {
         $result->error( '_ERROR_DEMO_MODE', $feature );
         return;

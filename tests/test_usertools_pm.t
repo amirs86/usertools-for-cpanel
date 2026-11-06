@@ -114,6 +114,12 @@ sub make_home {
     $REAL_GID = ( CORE::lstat($home) )[5];
     $Cpanel::API::UserTools::TEST_USER = 'testuser';
     $Cpanel::API::UserTools::TEST_HOME = $home;
+    my $tool_policy = "$home/usertools-test-policy.conf";
+    open my $pf, '>', $tool_policy or die $!;
+    print $pf "enable_fix_home=1\nenable_bulk_perms=1\n"
+      . "enable_ownership_report=1\nenable_app_helper=1\n";
+    close $pf;
+    $Cpanel::API::UserTools::TEST_POLICY_FILE = $tool_policy;
     %FAKE_UID = ();
     %FAKE_GID = ();
     %FAKE_GRPNAME = ();
@@ -174,6 +180,94 @@ is(
     my ( $ok, $res ) = call_check();
     ok( !$ok, 'check refused in demo mode' );
     is( $res->{errors}[0][0], '_ERROR_DEMO_MODE', 'demo error reported' );
+}
+
+{
+    # Policy is the on/off switch for every API behind these four features.
+    # The function list is built from %API, so a new function cannot slip by.
+    my $home = make_home();
+    my @features = qw(
+      usertools_fix_home usertools_bulk_perms
+      usertools_ownership_report usertools_app_helper
+    );
+    my $policy_zero = "$home/policy-zero.conf";
+    my $policy_missing = "$home/policy-missing.conf";
+    open my $missing, '>', $policy_missing or die $!;
+    print $missing "enable_other_tool=1\n";
+    close $missing;
+    my $policy_unknown = "$home/policy-unknown.conf";
+    make_path($policy_unknown);
+    my $policy_on = "$home/policy-on.conf";
+    open my $on, '>', $policy_on or die $!;
+    print $on "enable_fix_home=1\nenable_bulk_perms=1\n"
+      . "enable_ownership_report=1\nenable_app_helper=1\n";
+    close $on;
+
+    local $Cpanel::API::UserTools::TEST_ENGINE_BIN = 'python3';
+    local $Cpanel::API::UserTools::TEST_ENGINE =
+      "$FindBin::Bin/../engine/perm_engine.py";
+    local $ENV{USERTOOLS_TESTING} = '1';
+    no warnings 'redefine';
+    for my $feature (@features) {
+        my $key = $Cpanel::API::UserTools::TOOL_POLICY_KEY{$feature};
+        ok( defined $key, "$feature has a policy key" );
+        my @fns = sort grep {
+            ( $Cpanel::API::UserTools::API{$_}{needs_feature} // '' ) eq $feature
+        } keys %Cpanel::API::UserTools::API;
+        ok( @fns, "$feature has API functions" );
+
+        for my $variant (
+            [ 'policy 0',    $policy_zero,     "$key=0\n" ],
+            [ 'missing key', $policy_missing,  undef ],
+            [ 'unreadable',  $policy_unknown,  undef ],
+          )
+        {
+            my ( $label, $path, $content ) = @{$variant};
+            if ( defined $content ) {
+                open my $fh, '>', $path or die $!;
+                print $fh $content;
+                close $fh;
+            }
+            local $Cpanel::API::UserTools::TEST_POLICY_FILE = $path;
+            for my $fn (@fns) {
+                my $res = FakeResult->new();
+                my $ok = Cpanel::API::UserTools->can($fn)->( FakeArgs->new(), $res );
+                ok( !$ok, "$fn refused with $label" );
+                is( $res->{errors}[0][0],
+                    'This feature is not enabled for your account.',
+                    "$fn reports the policy refusal with $label" );
+                ok( !defined $res->{data}, "$fn does no work with $label" );
+            }
+            ok( !-e "$home/.cpanel/usertools/activity.jsonl"
+                  && !-e "$home/.cpanel/usertools/jobs",
+                "$label leaves no activity or jobs" );
+        }
+
+        local $Cpanel::API::UserTools::TEST_POLICY_FILE = $policy_on;
+        my $res = FakeResult->new();
+        my $representative =
+            $feature eq 'usertools_fix_home' ? 'home_permissions_check'
+          : $feature eq 'usertools_bulk_perms' ? 'bulk_permissions_status'
+          : $feature eq 'usertools_ownership_report' ? 'ownership_report_status'
+          : 'app_helper_list';
+        my $ok = Cpanel::API::UserTools->can($representative)->(
+            FakeArgs->new( app => 'missing', job_id => 'missing' ), $res );
+        if ( $feature eq 'usertools_fix_home' || $feature eq 'usertools_app_helper' ) {
+            ok( $ok, "$representative reaches its normal path with policy 1" );
+        }
+        else {
+            ok( !$ok && ( $res->{errors}[0][0] // '' ) eq 'Unknown job.',
+                "$representative passes the gate with policy 1" );
+        }
+    }
+    ok( !-e "$home/.cpanel/usertools/activity.jsonl",
+        'policy-on representatives leave the activity log alone' );
+    local $Cpanel::API::UserTools::TEST_POLICY_FILE = $policy_zero;
+    my $activity = FakeResult->new();
+    my $activity_ok =
+      Cpanel::API::UserTools::activity_list( FakeArgs->new(), $activity );
+    ok( $activity_ok, 'My Activity has no policy switch and still answers' );
+    is_deeply( $activity->{data}{entries}, [], 'activity returns an empty list' );
 }
 
 # --- green check + mode mismatch + fix ------------------------------------------
@@ -1230,7 +1324,9 @@ $Cpanel::API::UserTools::TEST_SITE_ENGINE =
 sub site_policy_file {
     my ($home) = @_;
     open my $fh, '>', "$home/policy.conf" or die $!;
-    print $fh "enable_site_doctor=1\nenable_exposed_files=1\n";
+    print $fh "enable_site_doctor=1\nenable_exposed_files=1\n"
+      . "enable_fix_home=1\nenable_bulk_perms=1\n"
+      . "enable_ownership_report=1\nenable_app_helper=1\n";
     close $fh;
     return "$home/policy.conf";
 }
@@ -4339,7 +4435,7 @@ sub write_ht_pair {
     my $home = make_public_html_app();
     write_ht_pair($home);
     open my $pf, '>', "$home/policy.conf" or die $!;
-    print $pf "allow_user_app_docroot=1\n";
+    print $pf "allow_user_app_docroot=1\nenable_app_helper=1\n";
     close $pf;
     local $Cpanel::API::UserTools::TEST_POLICY_FILE = "$home/policy.conf";
     my $res = FakeResult->new();
@@ -4611,7 +4707,7 @@ sub write_ht_pair {
     Cpanel::AdminBin::Call::reset();
     $Cpanel::AdminBin::Call::RESPOND{SET_APP_DOCROOT} = { enable => 1, docroot => 'public_html/public' };
     open my $pf, '>', "$home/policy.conf" or die $!;
-    print $pf "allow_user_app_docroot=1\n";
+    print $pf "allow_user_app_docroot=1\nenable_app_helper=1\n";
     close $pf;
     local $Cpanel::API::UserTools::TEST_POLICY_FILE = "$home/policy.conf";
     $res = FakeResult->new();
@@ -5124,7 +5220,7 @@ package main;
     my $home = make_public_html_app();
     write_ht_pair($home);
     open my $pf, '>', "$home/policy.conf" or die $!;
-    print $pf "allow_user_app_docroot=1\n";
+    print $pf "allow_user_app_docroot=1\nenable_app_helper=1\n";
     close $pf;
     local $Cpanel::API::UserTools::TEST_POLICY_FILE = "$home/policy.conf";
     Cpanel::AdminBin::Call::reset();
