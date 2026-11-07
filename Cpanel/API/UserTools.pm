@@ -7295,6 +7295,9 @@ sub _ht_root_state {
     # would-be write into a skip with a reason. Returns the plan with
     # {block} set when the root file may be written.
     my $plan = _ht_root_plan( $user, $approot );
+    if ( @{ $plan->{nested} || [] } ) {
+        $plan->{note} .= ' Nested sites: ' . join( ', ', @{ $plan->{nested} } ) . '.';
+    }
     $plan->{block} = undef;
     if ( $plan->{write_root} ) {
         my ( $block, $err ) = _ht_root_block( $user, $home, $approot );
@@ -7522,6 +7525,7 @@ sub app_helper_htaccess_apply {
             user => $user, app => $app_param, options => $opt,
             root_skipped => $plan->{skipped} ? 1 : 0,
             root_deferred => $plan->{deferred} ? 1 : 0,
+            root_locked => _htaccess_pair_applied($approot) ? 1 : 0,
             nested_domains => $plan->{nested},
             $plan->{note} ne '' ? ( root_note => $plan->{note} ) : (),
             backups  => { root => $root_bak, public => $pub_bak },

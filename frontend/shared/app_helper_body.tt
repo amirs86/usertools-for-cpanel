@@ -89,6 +89,10 @@ var UT_STR = {
     htaccessRestored: "[% locale.maketext('The homepage broke, so both files were restored: ') %]",
     htaccessUndone: "[% locale.maketext('.htaccess undone.') %]",
     htaccessFailed: "[% locale.maketext('.htaccess change failed: ') %]",
+    rootLocked: "[% locale.maketext('The app root is locked.') %]",
+    rootNotLocked: "[% locale.maketext('The app root was not locked.') %]",
+    appRootLocked: "[% locale.maketext('App root: locked') %]",
+    appRootUnlocked: "[% locale.maketext('App root: not locked') %]",
     optNonwww: "[% locale.maketext('Redirect www to bare domain') %]",
     optHttps: "[% locale.maketext('Force HTTPS') %]",
     optSlash: "[% locale.maketext('Trim trailing slashes') %]",
@@ -228,6 +232,7 @@ window.addEventListener("DOMContentLoaded", function () {
             html += '<div class="ut-card" data-app="' + idx + '"><h2>' + esc(app.path) + "</h2>";
             html += "<p>" + esc(UT_STR.version) + ": " + ver + " &middot; " + esc(app.source) + "</p>";
             var ht = app.htaccess || {};
+            html += "<p>" + esc(ht.lock ? UT_STR.appRootLocked : UT_STR.appRootUnlocked) + "</p>";
             if (ht.lock && !ht.public) {
                 html += '<div class="ut-banner warn">' + esc(UT_STR.deployWarning) + "</div>";
             }
@@ -270,7 +275,12 @@ window.addEventListener("DOMContentLoaded", function () {
                 + esc(UT_STR.docrootApply) + "</button> ";
             html += '<button class="ut-btn small secondary" type="button" data-docroot-undo="' + idx + '">'
                 + esc(UT_STR.docrootUndo) + "</button></p>";
-            html += '<div class="ut-out" id="ut-docroot-' + idx + '" aria-live="polite"></div></details>';
+            html += '<div class="ut-out" id="ut-docroot-' + idx + '" aria-live="polite"></div>';
+            if (!ht.lock) {
+                html += '<p><button class="ut-btn small secondary" type="button" id="ut-lock-' + idx
+                    + '" data-lock-root="' + idx + '">' + esc(UT_STR.lockRoot) + "</button></p>";
+            }
+            html += '<div class="ut-out" id="ut-lock-out-' + idx + '" aria-live="polite"></div></details>';
             html += '<details class="ut-sub"><summary>' + esc(UT_STR.htaccessTitle) + "</summary><p>";
             var HTOPTS = [["nonwww", "optNonwww", true], ["https", "optHttps", false],
                 ["slash", "optSlash", true], ["indexphp", "optIndexphp", false],
@@ -283,7 +293,8 @@ window.addEventListener("DOMContentLoaded", function () {
             });
             html += '</p><p><button class="ut-btn small secondary" type="button" data-ht-preview="' + idx + '">'
                 + esc(UT_STR.htaccessPreview) + "</button> ";
-            html += '<button class="ut-btn small secondary" type="button" data-ht-apply="' + idx + '">'
+            html += '<button class="ut-btn small secondary" type="button" id="ut-ht-apply-' + idx
+                + '" data-ht-apply="' + idx + '">'
                 + esc(UT_STR.htaccessApply) + "</button> ";
             html += '<button class="ut-btn small secondary" type="button" data-ht-undo="' + idx + '">'
                 + esc(UT_STR.htaccessUndo) + "</button></p>";
@@ -428,10 +439,7 @@ window.addEventListener("DOMContentLoaded", function () {
                         UT_STR.apply, function () {
                             UserTools.callApi("app_helper_set_docroot",
                                 { app: app.path, domain: domain }, "POST").then(function () {
-                                    var box = document.getElementById("ut-docroot-" + idx);
-                                    box.innerHTML = '<div class="ut-banner ok">'
-                                        + esc(UT_STR.docrootDone) + "</div>" + lockButton(idx);
-                                    bindLock(idx);
+                                    setBanner("ok", UT_STR.docrootDone);
                                     load();
                                 }).catch(function (err) {
                                     setBanner("err", UT_STR.docrootFailed + err.message);
@@ -456,13 +464,19 @@ window.addEventListener("DOMContentLoaded", function () {
         });
         Array.prototype.forEach.call(document.querySelectorAll("[data-ht-preview]"), function (btn) {
             btn.addEventListener("click", function () {
-                previewHtaccess(+btn.getAttribute("data-ht-preview"), false);
+                previewHtaccess(+btn.getAttribute("data-ht-preview"), false, "ut-ht-" + btn.getAttribute("data-ht-preview"), false, btn);
             });
         });
         Array.prototype.forEach.call(document.querySelectorAll("[data-ht-apply]"), function (btn) {
             btn.addEventListener("click", function () {
                 var idx = +btn.getAttribute("data-ht-apply");
-                previewHtaccess(idx, true);
+                previewHtaccess(idx, true, "ut-ht-" + idx, false, btn);
+            });
+        });
+        Array.prototype.forEach.call(document.querySelectorAll("[data-lock-root]"), function (btn) {
+            btn.addEventListener("click", function () {
+                var idx = +btn.getAttribute("data-lock-root");
+                previewHtaccess(idx, true, "ut-lock-out-" + idx, true, btn);
             });
         });
         Array.prototype.forEach.call(document.querySelectorAll("[data-ht-undo]"), function (btn) {
@@ -470,7 +484,12 @@ window.addEventListener("DOMContentLoaded", function () {
                 var idx = +btn.getAttribute("data-ht-undo");
                 var app = apps[idx];
                 UserTools.callApi("app_helper_htaccess_undo", { app: app.path }, "POST").then(function () {
-                    setBanner("ok", UT_STR.htaccessUndone);
+                    var msg = UT_STR.htaccessUndone;
+                    showResult("ut-ht-" + idx, msg, "ok");
+                    load(function () {
+                        showResult("ut-ht-" + idx, msg, "ok");
+                        setBanner("ok", msg);
+                    });
                 }).catch(function (err) {
                     setBanner("err", UT_STR.htaccessFailed + err.message);
                 });
@@ -808,59 +827,90 @@ window.addEventListener("DOMContentLoaded", function () {
                     + esc(UT_STR.docrootFailed + err.message) + "</div>";
             });
     }
-    function lockButton(idx) {
-        return '<p><button class="ut-btn small" type="button" id="ut-lock-' + idx + '">'
-            + esc(UT_STR.lockRoot) + "</button></p>";
-    }
-    function bindLock(idx) {
-        var lock = document.getElementById("ut-lock-" + idx);
-        if (lock) {
-            lock.addEventListener("click", function () { applyHtaccess(idx); });
-        }
-    }
-    function previewHtaccess(idx, confirmApply) {
+    function previewHtaccess(idx, confirmApply, targetId, isLock, btn) {
         var app = apps[idx];
         var params = htOptions(idx);
         params.app = app.path;
+        var oldLabel = btn ? btn.textContent : "";
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = UT_STR.loading || "";
+        }
+        function resetButton() {
+            if (!btn) { return; }
+            btn.disabled = false;
+            btn.textContent = oldLabel;
+        }
         UserTools.callApi("app_helper_htaccess_preview", params, "POST").then(function (data) {
-            var t = "=== " + data.root.file + " ===\n" + data.root.diff
+            resetButton();
+            var note = data.root_note ? data.root_note + "\n\n" : "";
+            var t = note + "=== " + data.root.file + " ===\n" + data.root.diff
                 + "\n\n=== " + data.public.file + " ===\n" + data.public.diff;
             var warns = (data.root.warnings || []).concat(data.public.warnings || []);
             if (warns.length) { t += "\n\nWarnings:\n- " + warns.join("\n- "); }
-            showPre("ut-ht-" + idx, t, warns.length ? "bad" : "ok");
+            showPre(targetId, t, warns.length || data.root_note ? "bad" : "ok");
             if (confirmApply) {
                 openDialog(UT_STR.htaccessTitle, t.length > 400 ? t.slice(0, 400) + "…" : t,
-                    UT_STR.apply, function () { applyHtaccess(idx); });
+                    UT_STR.apply, function () { applyHtaccess(idx, targetId, isLock, btn); });
             }
         }).catch(function (err) {
-            showPre("ut-ht-" + idx, UT_STR.htaccessFailed + err.message, "bad");
+            resetButton();
+            showPre(targetId, UT_STR.htaccessFailed + err.message, "bad");
         });
     }
-    function applyHtaccess(idx) {
+    function showResult(id, text, kind) {
+        var el = document.getElementById(id);
+        if (!el) { return; }
+        el.innerHTML = '<div class="ut-banner ' + (kind === "bad" ? "err" : kind) + '">'
+            + esc(text) + "</div>";
+        var open = el.closest("details");
+        if (open) { open.open = true; }
+    }
+    function applyHtaccess(idx, targetId, isLock, btn) {
         var app = apps[idx];
         var params = htOptions(idx);
         params.app = app.path;
+        var oldLabel = btn ? btn.textContent : "";
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = UT_STR.loading || "";
+        }
+        function resetButton() {
+            if (!btn) { return; }
+            btn.disabled = false;
+            btn.textContent = oldLabel;
+        }
         UserTools.callApi("app_helper_htaccess_apply", params, "POST").then(function (data) {
+            resetButton();
             var crit = (data.checked || []).filter(function (c) { return c.verdict === "critical"; });
-            var extra = "";
-            if (data.root_note) {
-                extra = '<div class="ut-banner warn">' + esc(data.root_note) + "</div>";
-            }
+            var locked = String(data.root_locked) === "1";
+            var msg = "";
+            var kind = "ok";
             if (data.restored) {
-                showPre("ut-ht-" + idx, UT_STR.htaccessRestored + (data.reason || ""), "bad");
-                setBanner("warn", UT_STR.htaccessRestored + (data.reason || ""));
+                msg = UT_STR.htaccessRestored + (data.reason || "");
+                kind = "bad";
             } else if (crit.length) {
-                showPre("ut-ht-" + idx, UT_STR.envCritical, "bad");
-                setBanner("warn", UT_STR.envCritical);
+                msg = UT_STR.envCritical;
+                kind = "bad";
+            } else if (data.root_skipped || data.root_deferred || (isLock && !locked)) {
+                msg = UT_STR.rootNotLocked + (data.root_note ? " " + data.root_note : "");
+                kind = "warn";
+            } else if (isLock) {
+                msg = UT_STR.rootLocked;
             } else {
-                setBanner("ok", UT_STR.htaccessDone);
+                msg = UT_STR.htaccessDone;
             }
-            if (extra) {
-                var box = document.getElementById("ut-ht-" + idx);
-                box.innerHTML = extra + box.innerHTML;
-            }
+            showResult(targetId, msg, kind);
+            setBanner(kind === "bad" ? "warn" : kind, msg);
+            load(function () {
+                showResult(targetId, msg, kind);
+                setBanner(kind === "bad" ? "warn" : kind, msg);
+            });
         }).catch(function (err) {
-            setBanner("err", UT_STR.htaccessFailed + err.message);
+            resetButton();
+            var msg = UT_STR.htaccessFailed + err.message;
+            showResult(targetId, msg, "bad");
+            setBanner("err", msg);
         });
     }
     function checkPrimary(idx) {
@@ -880,12 +930,9 @@ window.addEventListener("DOMContentLoaded", function () {
                 var servingApp = data.current_docroot
                     && data.current_docroot.indexOf("public_html/public") !== -1;
                 html = '<p><button class="ut-btn small" type="button" id="ut-toggle-' + idx + '">'
-                    + esc(servingApp ? UT_STR.primaryRevert : UT_STR.primaryServe) + "</button> "
-                    + '<button class="ut-btn small secondary" type="button" id="ut-lock-' + idx + '">'
-                    + esc(UT_STR.lockRoot) + "</button></p>";
+                    + esc(servingApp ? UT_STR.primaryRevert : UT_STR.primaryServe) + "</button></p>";
             }
             box.innerHTML = html;
-            bindLock(idx);
             var copy = document.getElementById("ut-copy-" + idx);
             if (copy) {
                 copy.addEventListener("click", function () { copyText(data.host_command); });
@@ -930,11 +977,12 @@ window.addEventListener("DOMContentLoaded", function () {
             setBanner("err", UT_STR.runFailed + err.message);
         });
     }
-    function load() {
+    function load(done) {
         setBanner("warn", UT_STR.loading || "Loading.");
         UserTools.callApi("app_helper_list", {}, "GET").then(function (data) {
             apps = data.apps || [];
             render();
+            if (done) { done(); }
         }).catch(function (err) {
             setBanner("err", UT_STR.loadFailed + err.message);
         });
@@ -950,7 +998,7 @@ window.addEventListener("DOMContentLoaded", function () {
             setBanner("err", UT_STR.addFailed + err.message);
         });
     });
-    reloadBtn.addEventListener("click", load);
+    reloadBtn.addEventListener("click", function () { load(); });
     load();
 });
 </script>

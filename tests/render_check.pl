@@ -78,6 +78,7 @@ my %pages = (
     'app_helper.html.tt' => [
         '<title>App Helper</title>', 'ut-addpath', 'ut-apps',
         'UT_STR', 'as86.pro', 'ut-dialog', 'Laravel applications',
+        'App root', 'The app root is locked.', 'The app root was not locked.',
     ],
     'space_cleaner.html.tt' => [
         '<title>Space Cleaner</title>', 'ut-cat-error_logs',

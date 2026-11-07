@@ -4274,6 +4274,7 @@ RewriteRule ^(.*)$ /public/$1 [L]
         FakeArgs->new( app => 'myapp' ), $res );
     ok( $ok, 'apply accepted' );
     is( $res->{data}{restored}, 0, 'healthy homepage: no auto-restore' );
+    is( $res->{data}{root_locked}, 1, 'root_locked reads the written root file' );
     open my $pf, '<', "$home/myapp/public/.htaccess" or die $!;
     my $pub = do { local $/; <$pf> };
     close $pf;
@@ -4383,6 +4384,7 @@ RewriteRule ^(.*)$ /public/$1 [L]
         FakeArgs->new( app => 'myapp' ), $res );
     ok( $ok, 'apply accepted' );
     is( $res->{data}{restored}, 1, 'broken homepage triggers auto-restore' );
+    is( $res->{data}{root_locked}, 0, 'root_locked reads the restored root file' );
     like( $res->{data}{reason}, qr/403/, 'reason names the status' );
     open my $qf, '<', "$home/myapp/.htaccess" or die $!;
     my $root = do { local $/; <$qf> };
@@ -4640,12 +4642,14 @@ sub write_ht_pair {
     is( $res->{data}{root_skipped}, 1, 'root skipped with a nested domain' );
     is_deeply( $res->{data}{nested_domains}, ['shop2'], 'nested list returned' );
     like( $res->{data}{root_note}, qr/would be blocked/, 'plain-text explanation' );
+    like( $res->{data}{root_note}, qr/shop2/, 'note names the nested domain' );
 
     $res = FakeResult->new();
     $ok = Cpanel::API::UserTools::app_helper_htaccess_apply(
         FakeArgs->new( app => 'public_html' ), $res );
     ok( $ok, 'apply accepted' );
     is( $res->{data}{root_skipped}, 1, 'apply skips the root file' );
+    is( $res->{data}{root_locked}, 0, 'root_locked stays 0 when skipped' );
     ok( !-f "$home/public_html/.htaccess", 'root file untouched' );
     ok( -f "$home/public_html/public/.htaccess", 'public file still written' );
     is( $res->{data}{backups}{root}, undef, 'no root backup' );
@@ -4699,6 +4703,7 @@ sub write_ht_pair {
         FakeArgs->new( app => 'public_html' ), $res );
     ok( $ok, 'first apply accepted' );
     is( $res->{data}{root_deferred}, 1, 'root deferred while the domain is on the app root' );
+    is( $res->{data}{root_locked}, 0, 'root_locked stays 0 when deferred' );
     like( $res->{data}{root_note}, qr/public folder first/, 'deferral explains the order' );
     is( $res->{data}{restored}, 0, 'no auto-restore on deferral' );
     ok( -f "$home/public_html/public/.htaccess", 'public file written' );
