@@ -139,6 +139,84 @@ Full removal including settings and log:
   (for example in the production-switch change list and readiness
   counts). Full file contents are never returned.
 
+### Threat model: the privileged calls
+
+Root runs code for an account in exactly two modules, with three
+functions. A cPanel user can call these modules directly, bypassing the
+pages and UAPI, so every check below runs inside the module itself.
+
+| | Manage Shell: `SET_SHELL` | App Helper: `SET_APP_DOCROOT` |
+|---|---|---|
+| Module | [`Shell.pm`](admin/Cpanel/Admin/Modules/UserTools/Shell.pm) | [`AppDocroot.pm`](admin/Cpanel/Admin/Modules/UserTools/AppDocroot.pm) |
+| Accepts | Exactly one key, `mode`: `disabled`, `jailed` or `normal` | Exactly one key, `enable`: JSON `true`/`false` or `1`/`0` |
+| Acts on | The caller's own login shell | The caller's own main domain |
+| What root runs | `whmapi1 modifyacct` with a fixed shell: `/usr/local/cpanel/bin/noshell`, `/usr/local/cpanel/bin/jailshell` or `/bin/bash` | `whmapi1 set_primary_domain_docroot` with a fixed value: `public_html/public` or `public_html` |
+| Rate limit | 10 changes per hour | 5 changes per hour |
+| Policy keys | `enable_shell`, `allowed_shell_modes`, `normal_shell_users` | `enable_app_helper`, `allow_user_app_docroot` |
+
+No privileged call accepts a path, file name, user name or domain. The
+account name always comes from cPanel's own caller identity, never from
+the request. Both WHM calls use list form, with no shell in between.
+
+Checks, in this order:
+
+1. The caller name is from cPanel and is a valid account name.
+2. The tool's policy switch is literally `1`, and a missing key means
+   off. For the main-domain change, `allow_user_app_docroot` must also be
+   `1`.
+3. The caller's package has the tool's feature.
+4. The request has exactly the one allowed key, with an allowed value.
+   Any other key, or any other value, is refused.
+5. **Shell only:** the mode is in `allowed_shell_modes` (default
+   `disabled,jailed`). `normal` also needs the account in
+   `normal_shell_users`, which is kept in the root-only
+   `/etc/usertools.private.conf`. `jailed` needs WHM's
+   `jaildefaultshell=1`.
+6. The account is not root or a system account (UID under 1000), is a
+   real cPanel account, and is not suspended.
+7. If the account is already in the requested state, the call stops
+   there: no WHM call, no audit line, and no rate-limit slot used.
+8. The rate limit is checked and recorded.
+
+What happens when something fails:
+
+| When | `SET_SHELL` | `SET_APP_DOCROOT` |
+|---|---|---|
+| Any check above refuses | An error message is returned. Nothing changes. | An error message is returned. Nothing changes. |
+| The WHM call fails | The error is returned, with WHM's reason cut to 200 characters. The rate-limit slot is already used. | The error is returned, with WHM's reason cut to 200 characters. The rate-limit slot is already used. |
+| The WHM call succeeds but the result is wrong | The shell is read back. If it differs, the previous shell is set again and read back, both steps go to the audit log, and an error is returned. | The main domain is read back through cPanel's DomainInfo API. If it differs, an error is returned, but the change is **not** rolled back and no audit line is written. |
+| Success | One audit line: old mode to new mode | One audit line: old document root to new |
+
+The audit log is `/var/log/usertools.log` (mode 0600). Refusals are
+returned to the caller and are not logged.
+
+`GET_SHELL` is the third privileged function, and it is read-only. It
+runs checks 1 to 3, then returns only the caller's own shell mode, the
+modes they may pick, the SSH port and yes/no flags. It never returns the
+name lists from the private policy file.
+
+**The account-creation hook** also runs as root, but no user can call
+it: cPanel runs it once when an account is created on a package listed in
+`app_packages`, and only with `enable_app_helper=1`. Root does only the
+same main-domain change through the WHM API. Every file it creates,
+`public_html/public/index.php` and the two `.htaccess` files, is written
+as the new account through cPanel's documented privilege drop, using
+create-only opens that never follow a symlink. A hook failure is logged
+and never blocks account creation. The code is in
+[`AppSetup.pm`](hooks/lib/UserTools/Hook/AppSetup.pm).
+
+**Known limit:** someone who calls `SET_APP_DOCROOT` directly, skipping
+the page's own checks, can point their own main domain at a
+`public_html/public` folder that doesn't exist. That only breaks their
+own site.
+
+The tests for these paths are in
+[`tests/test_shell_admin.t`](tests/test_shell_admin.t),
+[`tests/test_appdocroot_admin.t`](tests/test_appdocroot_admin.t) and
+[`tests/test_hook_app_setup.t`](tests/test_hook_app_setup.t). These paths
+have not had an independent security review yet; reports are welcome
+through [SECURITY.md](SECURITY.md).
+
 ## Requirements and notes
 
 - Jailed shell is offered only when WHM → Tweak Settings → 'Use cPanel jailshell by default' is on; otherwise users can only turn SSH access off.
