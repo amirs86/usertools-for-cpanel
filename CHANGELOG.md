@@ -3,6 +3,28 @@
 All notable changes to this project are documented here. Versions follow
 [SemVer](https://semver.org/).
 
+## [0.5.2] - 2026-11-07
+
+### Fixed
+
+- App Helper: "Lock the app root" now shows its result directly under the
+  button. A lock that is skipped or deferred, because another site lives inside
+  the app folder or the website still points at the app root, now says so and
+  names the reason, instead of reporting `.htaccess applied.`. The preview shows
+  that reason before anything is written.
+- App Helper: the lock button no longer disappears after pointing a website at
+  the app, and the document root confirmation stays on screen.
+- Buttons marked small no longer pick up cPanel Jupiter's `.small { width: 25% }`
+  rule, which made them overflow their text at phone widths on every page.
+
+### Changed
+
+- App Helper shows a permanent "App root: locked / not locked" line on each app
+  and keeps one lock button in "Point a website here".
+- App Helper layout: a single app uses the full width, the command buttons are
+  lighter and wrap cleanly under their labels, the add folder controls share one
+  row, and the sections are spaced apart.
+
 ## [0.5.1] - 2026-11-07
 
 ### Changed
