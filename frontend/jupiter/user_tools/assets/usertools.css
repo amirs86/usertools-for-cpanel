@@ -41,7 +41,7 @@
   gap: 6px 10px; align-items: start; margin: 8px 0; }
 .ut-actions > strong { font-size: 0.9em; padding-block-start: 4px; }
 .ut-actions-buttons { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
-.ut-actions-buttons .ut-btn { flex: 0 0 auto; width: max-content; max-width: 100%;
+.ut-actions-buttons .ut-btn { flex: 0 0 auto; max-width: 100%;
   white-space: nowrap; }
 @media (max-width: 699px) {
   .ut-actions { grid-template-columns: 1fr; gap: 4px; }
@@ -89,7 +89,8 @@
   margin-inline-end: 8px; }
 .ut-btn.secondary { background: #fff; color: #1a73e8; }
 .ut-btn:disabled { opacity: 0.5; cursor: default; }
-.ut-btn.small { padding: 4px 10px; font-size: 0.85em; }
+.ut-btn.small { padding: 4px 10px; font-size: 0.85em; width: auto;
+  max-width: 100%; }
 .ut-btn:focus-visible, summary:focus-visible { outline: 2px solid #1a73e8;
   outline-offset: 2px; }
 .ut-history { margin: 0 0 16px; }

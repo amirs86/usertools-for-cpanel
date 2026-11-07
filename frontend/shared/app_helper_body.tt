@@ -438,8 +438,11 @@ window.addEventListener("DOMContentLoaded", function () {
                         UT_STR.apply, function () {
                             UserTools.callApi("app_helper_set_docroot",
                                 { app: app.path, domain: domain }, "POST").then(function () {
-                                    setBanner("ok", UT_STR.docrootDone);
-                                    load();
+                                    var msg = UT_STR.docrootDone;
+                                    load(function () {
+                                        showResult("ut-docroot-" + idx, msg, "ok");
+                                        setBanner("ok", msg);
+                                    });
                                 }).catch(function (err) {
                                     setBanner("err", UT_STR.docrootFailed + err.message);
                                 });
@@ -891,13 +894,13 @@ window.addEventListener("DOMContentLoaded", function () {
             } else if (crit.length) {
                 msg = UT_STR.envCritical;
                 kind = "bad";
-            } else if (data.root_skipped || data.root_deferred || (isLock && !locked)) {
+            } else if (!locked && (data.root_skipped || data.root_deferred || isLock)) {
                 msg = UT_STR.rootNotLocked + (data.root_note ? " " + data.root_note : "");
                 kind = "warn";
             } else if (isLock) {
                 msg = UT_STR.rootLocked;
             } else {
-                msg = UT_STR.htaccessDone;
+                msg = UT_STR.htaccessDone + (data.root_note ? " " + data.root_note : "");
             }
             showResult(targetId, msg, kind);
             setBanner(kind === "bad" ? "warn" : kind, msg);
