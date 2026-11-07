@@ -9,8 +9,8 @@
 # SET_APP_DOCROOT with a blessed fake (caller name via package var), mock
 # getpwnam (uid/home) and the WHM/uapi spawns (fixture binaries programmed
 # through the environment). Policy, rate-limit, audit, suspend and userdata
-# locations are package vars pointed at a File::Temp tree. Every gate and
-# refusal path is covered.
+# locations are package vars pointed at a File::Temp tree. Every check,
+# refusal and read-back mismatch path is covered.
 use strict;
 use warnings;
 no warnings 'once';
@@ -78,23 +78,58 @@ sub set_user {
     return;
 }
 
+sub write_plan {
+    my ( $path, $text ) = @_;
+    open my $fh, '>', $path or die $!;
+    print $fh $text;
+    close $fh;
+    return;
+}
+
+sub read_lines {
+    my ($path) = @_;
+    open my $fh, '<', $path or return ();
+    my @lines = <$fh>;
+    close $fh;
+    chomp @lines;
+    return @lines;
+}
+
 sub write_bins {
     my ($root) = @_;
     make_path("$root/bin");
     open my $wh, '>', "$root/bin/whmapi1" or die $!;
     print $wh <<'SCRIPT';
 #!/bin/bash
-# Fixture: records argv, then behaves per FAKE_WHM_MODE. On success it
-# records the new docroot in FAKE_DOCROOT_FILE (as $FAKE_DOCROOT_HOME/<doc>)
-# so the follow-up read API sees the change, like the real server.
-printf '%s\n' "$@" >"$FAKE_WHM_ARGV"
+# Fixture: records argv, then behaves per FAKE_WHM_MODE or a per-call
+# FAKE_WHM_PLAN. On success it records the new docroot in FAKE_DOCROOT_FILE
+# (as $FAKE_DOCROOT_HOME/<doc>) so the follow-up read API sees the change,
+# like the real server. "stale" succeeds but stores FAKE_WHM_STALE_DOCROOT
+# instead, to exercise a read-back mismatch.
+if [ -n "$FAKE_WHM_ARGV" ]; then printf '%s\n' "$@" >>"$FAKE_WHM_ARGV"; fi
+n=0
+if [ -n "$FAKE_WHM_COUNT_FILE" ]; then
+  n=$(cat "$FAKE_WHM_COUNT_FILE" 2>/dev/null || printf 0)
+  n=$((n + 1))
+  printf '%s\n' "$n" >"$FAKE_WHM_COUNT_FILE"
+fi
 mode="$FAKE_WHM_MODE"
+if [ -n "$FAKE_WHM_PLAN" ] && [ -s "$FAKE_WHM_PLAN" ]; then
+  [ "$n" -gt 0 ] || n=1
+  planned=$(sed -n "${n}p" "$FAKE_WHM_PLAN")
+  [ -n "$planned" ] && mode="$planned"
+fi
+dr=""
+for a in "$@"; do case "$a" in docroot=*) dr="${a#docroot=}";; esac; done
 case "$mode" in
   ok)
-    dr=""
-    for a in "$@"; do case "$a" in docroot=*) dr="${a#docroot=}";; esac; done
     if [ -n "$FAKE_DOCROOT_FILE" ] && [ -n "$FAKE_DOCROOT_HOME" ] && [ -n "$dr" ]; then
       printf '%s/%s\n' "$FAKE_DOCROOT_HOME" "$dr" >"$FAKE_DOCROOT_FILE"
+    fi
+    printf '{"metadata":{"result":1}}\n'; exit 0;;
+  stale)
+    if [ -n "$FAKE_DOCROOT_FILE" ] && [ -n "$FAKE_WHM_STALE_DOCROOT" ]; then
+      printf '%s\n' "$FAKE_WHM_STALE_DOCROOT" >"$FAKE_DOCROOT_FILE"
     fi
     printf '{"metadata":{"result":1}}\n'; exit 0;;
   fail)
@@ -113,7 +148,18 @@ SCRIPT
 # main_domain as a HASH, plus addon_domains, parked_domains, sub_domains).
 # The current docroot comes from the FAKE_DOCROOT_FILE state when it holds
 # a value (a successful whmapi1 wrote it), else FAKE_DOMAININFO_DOCROOT.
-printf '%s\n' "$@" >"$FAKE_UAPI_ARGV"
+# A per-call counter plus FAKE_UAPI_FAIL_CALL can make later reads fail.
+if [ -n "$FAKE_UAPI_ARGV" ]; then printf '%s\n' "$@" >>"$FAKE_UAPI_ARGV"; fi
+n=0
+if [ -n "$FAKE_UAPI_COUNT_FILE" ]; then
+  n=$(cat "$FAKE_UAPI_COUNT_FILE" 2>/dev/null || printf 0)
+  n=$((n + 1))
+  printf '%s\n' "$n" >"$FAKE_UAPI_COUNT_FILE"
+fi
+if [ -n "$FAKE_UAPI_FAIL_CALL" ] && [ "$n" -ge "$FAKE_UAPI_FAIL_CALL" ]; then
+  printf 'not json at all\n'
+  exit 0
+fi
 docroot="$FAKE_DOMAININFO_DOCROOT"
 if [ -n "$FAKE_DOCROOT_FILE" ] && [ -s "$FAKE_DOCROOT_FILE" ]; then
   docroot="$(cat "$FAKE_DOCROOT_FILE")"
@@ -206,6 +252,178 @@ SCRIPT
     ok( !-e "$root/whm-argv.txt", 'still no WHM call' );
     ok( !-e "$root/audit.log",   'still no audit line' );
     ok( !-e "$root/ratelimit/uttest", 'still no rate-limit slot consumed' );
+}
+
+# --- mismatch: restore the fixed plain docroot -------------------------------
+{
+    my $root = make_dirs();
+    set_user( 'uttest', 1000 );
+    open my $fh, '>', "$root/users/uttest" or die $!;
+    close $fh;
+    write_bins($root);
+    write_plan( "$root/whm-plan.txt", "stale\nok\n" );
+    local $ENV{FAKE_WHM_ARGV} = "$root/whm-argv.txt";
+    local $ENV{FAKE_WHM_MODE} = 'ok';
+    local $ENV{FAKE_WHM_PLAN} = "$root/whm-plan.txt";
+    local $ENV{FAKE_WHM_COUNT_FILE} = "$root/whm-count.txt";
+    local $ENV{FAKE_WHM_STALE_DOCROOT} = '/home/uttest/stale';
+    local $ENV{FAKE_UAPI_ARGV} = "$root/uapi-argv.txt";
+    local $ENV{FAKE_DOMAININFO_DOCROOT} = '/home/uttest/public_html';
+    local $ENV{FAKE_DOCROOT_FILE} = "$root/docroot.txt";
+    local $ENV{FAKE_DOCROOT_HOME} = '/home/uttest';
+
+    my $got = Cpanel::Admin::Modules::UserTools::AppDocroot::SET_APP_DOCROOT(
+        make_self(), { enable => 1 } );
+    is( $got->{error},
+        'docroot change did not take effect; previous main domain restored; contact your host',
+        'mismatch with public_html restores the previous main domain' );
+    my @calls = grep { /^docroot=/ } read_lines("$root/whm-argv.txt");
+    is_deeply( \@calls, [ 'docroot=public_html/public', 'docroot=public_html' ],
+        'rollback call carries the fixed plain docroot' );
+    my @audit = read_lines("$root/audit.log");
+    is( scalar @audit, 2, 'mismatch and rollback both audited' );
+    like( $audit[0],
+        qr{\Quttest primary-docroot:/home/uttest/public_html->primary-docroot:mismatch:public_html/public(got:/home/uttest/stale)\E},
+        'mismatch line records the old, target and live docroot' );
+    like( $audit[1], qr{\Quttest rollback:/home/uttest/stale->/home/uttest/public_html\E},
+        'rollback line records the restored docroot' );
+    is( scalar( read_lines("$root/ratelimit/uttest") ), 1,
+        'rollback used no extra rate-limit slot' );
+}
+
+# --- mismatch: restore the fixed app docroot --------------------------------
+{
+    my $root = make_dirs();
+    set_user( 'uttest', 1000 );
+    open my $fh, '>', "$root/users/uttest" or die $!;
+    close $fh;
+    write_bins($root);
+    write_plan( "$root/whm-plan.txt", "stale\nok\n" );
+    local $ENV{FAKE_WHM_ARGV} = "$root/whm-argv.txt";
+    local $ENV{FAKE_WHM_MODE} = 'ok';
+    local $ENV{FAKE_WHM_PLAN} = "$root/whm-plan.txt";
+    local $ENV{FAKE_WHM_COUNT_FILE} = "$root/whm-count.txt";
+    local $ENV{FAKE_WHM_STALE_DOCROOT} = '/home/uttest/stale';
+    local $ENV{FAKE_UAPI_ARGV} = "$root/uapi-argv.txt";
+    local $ENV{FAKE_DOMAININFO_DOCROOT} = '/home/uttest/public_html/public';
+    local $ENV{FAKE_DOCROOT_FILE} = "$root/docroot.txt";
+    local $ENV{FAKE_DOCROOT_HOME} = '/home/uttest';
+
+    my $got = Cpanel::Admin::Modules::UserTools::AppDocroot::SET_APP_DOCROOT(
+        make_self(), { enable => 0 } );
+    is( $got->{error},
+        'docroot change did not take effect; previous main domain restored; contact your host',
+        'mismatch with public_html/public restores the previous main domain' );
+    my @calls = grep { /^docroot=/ } read_lines("$root/whm-argv.txt");
+    is_deeply( \@calls, [ 'docroot=public_html', 'docroot=public_html/public' ],
+        'rollback call carries the fixed app docroot' );
+    my @audit = read_lines("$root/audit.log");
+    is( scalar @audit, 2, 'mismatch and rollback both audited' );
+    like( $audit[0],
+        qr{\Quttest primary-docroot:/home/uttest/public_html/public->primary-docroot:mismatch:public_html(got:/home/uttest/stale)\E},
+        'mismatch line records the old, target and live docroot' );
+    like( $audit[1], qr{\Quttest rollback:/home/uttest/stale->/home/uttest/public_html/public\E},
+        'rollback line records the restored docroot' );
+    is( scalar( read_lines("$root/ratelimit/uttest") ), 1,
+        'rollback used no extra rate-limit slot' );
+}
+
+# --- mismatch: the restore read-back fails ----------------------------------
+{
+    my $root = make_dirs();
+    set_user( 'uttest', 1000 );
+    open my $fh, '>', "$root/users/uttest" or die $!;
+    close $fh;
+    write_bins($root);
+    write_plan( "$root/whm-plan.txt", "stale\nok\n" );
+    local $ENV{FAKE_WHM_ARGV} = "$root/whm-argv.txt";
+    local $ENV{FAKE_WHM_MODE} = 'ok';
+    local $ENV{FAKE_WHM_PLAN} = "$root/whm-plan.txt";
+    local $ENV{FAKE_WHM_COUNT_FILE} = "$root/whm-count.txt";
+    local $ENV{FAKE_WHM_STALE_DOCROOT} = '/home/uttest/stale';
+    local $ENV{FAKE_UAPI_ARGV} = "$root/uapi-argv.txt";
+    local $ENV{FAKE_UAPI_COUNT_FILE} = "$root/uapi-count.txt";
+    local $ENV{FAKE_UAPI_FAIL_CALL} = 3;
+    local $ENV{FAKE_DOMAININFO_DOCROOT} = '/home/uttest/public_html';
+    local $ENV{FAKE_DOCROOT_FILE} = "$root/docroot.txt";
+    local $ENV{FAKE_DOCROOT_HOME} = '/home/uttest';
+
+    my $got = Cpanel::Admin::Modules::UserTools::AppDocroot::SET_APP_DOCROOT(
+        make_self(), { enable => 1 } );
+    is( $got->{error},
+        'docroot change did not take effect; previous main domain could not be restored; contact your host',
+        'failed restore read-back says the previous main domain was not restored' );
+    my @calls = grep { /^docroot=/ } read_lines("$root/whm-argv.txt");
+    is_deeply( \@calls, [ 'docroot=public_html/public', 'docroot=public_html' ],
+        'one rollback attempt was made' );
+    my @audit = read_lines("$root/audit.log");
+    is( scalar @audit, 2, 'mismatch and rollback both audited' );
+    like( $audit[1], qr{\Quttest rollback:/home/uttest/stale->unknown\E},
+        'rollback line records an unreadable result' );
+    is( scalar( read_lines("$root/ratelimit/uttest") ), 1,
+        'rollback used no extra rate-limit slot' );
+}
+
+# --- mismatch: a custom old docroot is never sent back ----------------------
+{
+    my $root = make_dirs();
+    set_user( 'uttest', 1000 );
+    open my $fh, '>', "$root/users/uttest" or die $!;
+    close $fh;
+    write_bins($root);
+    local $ENV{FAKE_WHM_ARGV} = "$root/whm-argv.txt";
+    local $ENV{FAKE_WHM_MODE} = 'stale';
+    local $ENV{FAKE_WHM_STALE_DOCROOT} = '/home/uttest/stale';
+    local $ENV{FAKE_UAPI_ARGV} = "$root/uapi-argv.txt";
+    local $ENV{FAKE_DOMAININFO_DOCROOT} = '/home/uttest/custom';
+    local $ENV{FAKE_DOCROOT_FILE} = "$root/docroot.txt";
+    local $ENV{FAKE_DOCROOT_HOME} = '/home/uttest';
+
+    my $got = Cpanel::Admin::Modules::UserTools::AppDocroot::SET_APP_DOCROOT(
+        make_self(), { enable => 1 } );
+    is( $got->{error},
+        'docroot change did not take effect; previous main domain could not be restored; contact your host',
+        'custom old docroot is reported as not restored' );
+    my @calls = grep { /^docroot=/ } read_lines("$root/whm-argv.txt");
+    is_deeply( \@calls, ['docroot=public_html/public'],
+        'custom old docroot triggers no second WHM call' );
+    my @audit = read_lines("$root/audit.log");
+    is( scalar @audit, 1, 'mismatch is still audited' );
+    like( $audit[0],
+        qr{\Quttest primary-docroot:/home/uttest/custom->primary-docroot:mismatch:public_html/public(got:/home/uttest/stale)\E},
+        'mismatch line names the custom old docroot' );
+    is( scalar( read_lines("$root/ratelimit/uttest") ), 1,
+        'the failed change used one rate-limit slot' );
+}
+
+# --- mismatch: an unreadable old docroot is never sent back -----------------
+{
+    my $root = make_dirs();
+    set_user( 'uttest', 1000 );
+    open my $fh, '>', "$root/users/uttest" or die $!;
+    close $fh;
+    write_bins($root);
+    local $ENV{FAKE_WHM_ARGV} = "$root/whm-argv.txt";
+    local $ENV{FAKE_WHM_MODE} = 'ok';
+    local $ENV{FAKE_UAPI_ARGV} = "$root/uapi-argv.txt";
+    local $ENV{FAKE_UAPI_COUNT_FILE} = "$root/uapi-count.txt";
+    local $ENV{FAKE_UAPI_FAIL_CALL} = 1;
+
+    my $got = Cpanel::Admin::Modules::UserTools::AppDocroot::SET_APP_DOCROOT(
+        make_self(), { enable => 1 } );
+    is( $got->{error},
+        'docroot change did not take effect; previous main domain could not be restored; contact your host',
+        'unreadable old docroot is reported as not restored' );
+    my @calls = grep { /^docroot=/ } read_lines("$root/whm-argv.txt");
+    is_deeply( \@calls, ['docroot=public_html/public'],
+        'unreadable old docroot triggers no second WHM call' );
+    my @audit = read_lines("$root/audit.log");
+    is( scalar @audit, 1, 'mismatch is still audited' );
+    like( $audit[0],
+        qr{\Quttest primary-docroot:unknown->primary-docroot:mismatch:public_html/public(got:unknown)\E},
+        'mismatch line records the unknown old and live docroot' );
+    is( scalar( read_lines("$root/ratelimit/uttest") ), 1,
+        'the failed change used one rate-limit slot' );
 }
 
 # --- gates: feature + both policy keys, before anything else ---------------------
@@ -395,18 +613,25 @@ SCRIPT
     my $got = Cpanel::Admin::Modules::UserTools::AppDocroot::SET_APP_DOCROOT(
         make_self(), { enable => 1 } );
     is( $got->{error}, 'docroot change failed: no such account', 'WHM reason passed through' );
+    my @calls = grep { /^docroot=/ } read_lines("$root/whm-argv.txt");
+    is( scalar @calls, 1, 'failed WHM call did not roll back' );
+    ok( !-e "$root/audit.log", 'failed WHM call wrote no audit line' );
 
     local $ENV{FAKE_WHM_MODE} = 'garbage';
     $got = Cpanel::Admin::Modules::UserTools::AppDocroot::SET_APP_DOCROOT(
         make_self(), { enable => 1 } );
     like( $got->{error}, qr/unreadable reply/, 'non-JSON WHM reply refused' );
+    @calls = grep { /^docroot=/ } read_lines("$root/whm-argv.txt");
+    is( scalar @calls, 2, 'unreadable WHM reply did not roll back' );
+    ok( !-e "$root/audit.log", 'unreadable WHM reply wrote no audit line' );
 
     local $ENV{FAKE_WHM_MODE} = 'ok';
     local $ENV{FAKE_DOMAININFO_DOCROOT} = '/home/uttest/public_html';
     $got = Cpanel::Admin::Modules::UserTools::AppDocroot::SET_APP_DOCROOT(
         make_self(), { enable => 1 } );
-    is( $got->{error}, 'docroot change did not take effect; contact your host',
-        'stale docroot honestly reported' );
+    is( $got->{error},
+        'docroot change did not take effect; previous main domain restored; contact your host',
+        'stale docroot honestly reported and restored' );
 }
 
 done_testing();

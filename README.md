@@ -184,7 +184,7 @@ What happens when something fails:
 |---|---|---|
 | Any check above refuses | An error message is returned. Nothing changes. | An error message is returned. Nothing changes. |
 | The WHM call fails | The error is returned, with WHM's reason cut to 200 characters. The rate-limit slot is already used. | The error is returned, with WHM's reason cut to 200 characters. The rate-limit slot is already used. |
-| The WHM call succeeds but the result is wrong | The shell is read back. If it differs, the previous shell is set again and read back, both steps go to the audit log, and an error is returned. | The main domain is read back through cPanel's DomainInfo API. If it differs, an error is returned, but the change is **not** rolled back and no audit line is written. |
+| The WHM call succeeds but the result is wrong | The shell is read back. If it differs, the previous shell is set again and read back, both steps go to the audit log, and an error is returned. | The main domain is read back through cPanel's DomainInfo API. If it differs, the mismatch and the restore attempt go to the audit log, and the previous docroot is set again and read back only when it was exactly `public_html` or `public_html/public`; any other value is never sent to WHM. The error says whether the previous main domain was restored. |
 | Success | One audit line: old mode to new mode | One audit line: old document root to new |
 
 The audit log is `/var/log/usertools.log` (mode 0600). Refusals are

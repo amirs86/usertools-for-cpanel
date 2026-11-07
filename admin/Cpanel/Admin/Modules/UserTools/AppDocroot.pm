@@ -9,7 +9,9 @@ package Cpanel::Admin::Modules::UserTools::AppDocroot;
 # caller's PRIMARY domain at public_html/public (enable=1) or back at
 # public_html (enable=0) through WHM API 1 set_primary_domain_docroot, then
 # verifies the new docroot through the documented read API and audits the
-# change. Both values are hard-coded; no function takes a path, glob,
+# change. If the read-back differs, the mismatch and the restore attempt are
+# audited, and the previous docroot is set again when it was one of the two
+# fixed values. Both values are hard-coded; no function takes a path, glob,
 # username, domain or any other key. The username always comes from
 # get_caller_username(). When the domain already serves from the requested
 # docroot the call is a no-op: {enable, docroot, changed:0} with no WHM
@@ -177,7 +179,39 @@ sub SET_APP_DOCROOT {
     my $live = _read_primary_docroot($user);
     my $want = ( defined $home && $home ne '' ) ? "$home/$target" : undef;
     if ( !defined $live || !defined $want || $live ne $want ) {
-        return { error => 'docroot change did not take effect; contact your host' };
+        my $got = defined $live ? $live : 'unknown';
+        Cpanel::Admin::Modules::UserTools::Base::_audit(
+            $AUDIT_LOG, $user,
+            'primary-docroot:' . ( defined $old_docroot ? $old_docroot : 'unknown' ),
+            "primary-docroot:mismatch:$target(got:$got)" );
+
+        # Fail closed, but only to a fixed value. A custom or unreadable
+        # previous docroot is never sent back to WHM; it stays in the audit
+        # log and the caller is told the restore could not happen.
+        my $rollback;
+        if ( defined $home && $home ne '' && defined $old_docroot ) {
+            if ( $old_docroot eq "$home/" . DOCROOT_NORMAL ) {
+                $rollback = DOCROOT_NORMAL;
+            }
+            elsif ( $old_docroot eq "$home/" . DOCROOT_APP ) {
+                $rollback = DOCROOT_APP;
+            }
+        }
+
+        my $restored = 0;
+        if ( defined $rollback ) {
+            # One attempt, on the slot already recorded above.
+            _whm_set_primary_docroot( $user, $rollback );
+            my $after = _read_primary_docroot($user);
+            my $after_label = defined $after ? $after : 'unknown';
+            Cpanel::Admin::Modules::UserTools::Base::_audit(
+                $AUDIT_LOG, $user, "rollback:$got", $after_label );
+            $restored = ( defined $after && $after eq $old_docroot ) ? 1 : 0;
+        }
+        my $outcome = $restored
+          ? 'previous main domain restored'
+          : 'previous main domain could not be restored';
+        return { error => "docroot change did not take effect; $outcome; contact your host" };
     }
     Cpanel::Admin::Modules::UserTools::Base::_audit(
         $AUDIT_LOG, $user,
