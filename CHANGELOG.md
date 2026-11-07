@@ -3,6 +3,25 @@
 All notable changes to this project are documented here. Versions follow
 [SemVer](https://semver.org/).
 
+## [0.5.3] - 2026-11-07
+
+### Fixed
+
+- App Helper's main-domain switch now rolls back a change that did not stick.
+  When cPanel reports success but the main domain reads back wrong, the
+  previous document root is set again and read back, but only when it was
+  `public_html` or `public_html/public`. Any other value is never sent to WHM.
+  Both the mismatch and the restore attempt go to the audit log, and the error
+  says whether the previous main domain was restored. Before, nothing was
+  rolled back and nothing was logged.
+- Audit log lines replace control characters with `?`, so one event always
+  writes exactly one line.
+
+### Added
+
+- README: a threat model for the privileged calls, listing what each accepts,
+  the checks in order, and what happens when something fails.
+
 ## [0.5.2] - 2026-11-07
 
 ### Fixed
