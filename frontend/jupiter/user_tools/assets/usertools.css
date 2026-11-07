@@ -26,6 +26,7 @@
   border: 1px solid #d93025; }
 .ut-grid { display: grid; gap: 12px; grid-template-columns: 1fr; }
 @media (min-width: 700px) { .ut-grid { grid-template-columns: 1fr 1fr; } }
+.ut-grid > :only-child { grid-column: 1 / -1; }
 .ut-card { border: 1px solid #dadce0; border-radius: 8px; padding: 12px 14px;
   background: #fff; }
 .ut-card.ok { border-inline-start: 6px solid #34a853; }
@@ -33,6 +34,19 @@
 .ut-card h2 { font-size: 1.05em; margin: 0 0 4px; }
 .ut-path { font-family: monospace; font-size: 0.85em; color: #555;
   word-break: break-all; }
+.ut-label { display: inline-block; color: #3c4043; font-size: 0.9em;
+  font-weight: bold; }
+.ut-meta { color: #5f6368; font-size: 0.88em; margin: 0 0 6px; }
+.ut-actions { display: grid; grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 10px; align-items: start; margin: 8px 0; }
+.ut-actions > strong { font-size: 0.9em; padding-block-start: 4px; }
+.ut-actions-buttons { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.ut-actions-buttons .ut-btn { flex: 0 0 auto; width: max-content; max-width: 100%;
+  white-space: nowrap; }
+@media (max-width: 699px) {
+  .ut-actions { grid-template-columns: 1fr; gap: 4px; }
+  .ut-actions > strong { padding-block-start: 0; }
+}
 .ut-badge { display: inline-block; border-radius: 10px; padding: 1px 10px;
   font-size: 0.8em; font-weight: bold; margin-inline-start: 8px; }
 .ut-badge.ok { background: #e6f4ea; color: #137333; }
@@ -45,6 +59,13 @@
 .ut-note { background: #fef7e0; border: 1px solid #f9ab00; border-radius: 6px;
   padding: 8px 10px; margin: 8px 0; font-size: 0.9em; }
 .ut-controls { margin: 16px 0; }
+.ut-toolbar { display: flex; flex-wrap: wrap; align-items: center;
+  gap: 8px; margin: 0 0 12px; }
+.ut-toolbar-end { margin-inline-start: auto; }
+.ut-sub { border-top: 1px solid #dadce0; margin-top: 12px;
+  padding-block: 8px; }
+.ut-sub[open] { padding-block-end: 10px; }
+.ut-sub[open] > p, .ut-sub[open] > .ut-actions { margin-block: 8px; }
 .ut-fieldset { border: 1px solid #dadce0; border-radius: 8px; padding: 10px 14px;
   margin: 0 0 12px; }
 .ut-fieldset legend { font-weight: bold; padding-inline: 4px; }
@@ -59,6 +80,7 @@
 .ut-addrow { margin: 0 0 12px; }
 .ut-input { font: inherit; padding: 6px 8px; border: 1px solid #dadce0;
   border-radius: 6px; max-width: 100%; box-sizing: border-box; }
+.ut-input:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; }
 .ut-out pre { background: #f8f9fa; border: 1px solid #dadce0; border-radius: 6px;
   padding: 8px 10px; overflow-x: auto; font-size: 0.85em; white-space: pre-wrap;
   word-break: break-word; }

@@ -12,13 +12,11 @@
     <p>[% locale.maketext('Point a website at an app, generate safe .htaccess files, and switch the main domain to public_html/public. Every change shows a preview first and can be undone.') %]</p>
   </details>
   <div class="ut-banner warn" id="ut-banner" role="status" aria-live="polite">[% locale.maketext('Loading.') %]</div>
-  <div class="ut-controls">
-    <button class="ut-btn secondary" id="ut-reload" type="button">[% locale.maketext('Reload') %]</button>
-  </div>
-  <div class="ut-addrow">
-    <label class="ut-path" for="ut-addpath">[% locale.maketext('Add folder (home-relative):') %]</label>
+  <div class="ut-toolbar">
+    <label class="ut-label" for="ut-addpath">[% locale.maketext('Add folder (home-relative):') %]</label>
     <input class="ut-input" type="text" id="ut-addpath" size="30" placeholder="[% locale.maketext('example: apps/blog') %]">
     <button class="ut-btn small" id="ut-add" type="button">[% locale.maketext('Add folder') %]</button>
+    <button class="ut-btn small secondary ut-toolbar-end" id="ut-reload" type="button">[% locale.maketext('Reload') %]</button>
   </div>
   <div class="ut-grid" id="ut-apps" aria-live="polite"></div>
   <dialog class="ut-dialog" id="ut-dialog" aria-labelledby="ut-dialog-title">
@@ -230,27 +228,28 @@ window.addEventListener("DOMContentLoaded", function () {
         apps.forEach(function (app, idx) {
             var ver = app.framework_version ? esc(app.framework_version) : esc("(" + UT_STR.unknown + ")");
             html += '<div class="ut-card" data-app="' + idx + '"><h2>' + esc(app.path) + "</h2>";
-            html += "<p>" + esc(UT_STR.version) + ": " + ver + " &middot; " + esc(app.source) + "</p>";
+            html += '<p class="ut-meta">' + esc(UT_STR.version) + ": " + ver + " &middot; " + esc(app.source) + "</p>";
             var ht = app.htaccess || {};
-            html += "<p>" + esc(ht.lock ? UT_STR.appRootLocked : UT_STR.appRootUnlocked) + "</p>";
+            html += '<p class="ut-meta">' + esc(ht.lock ? UT_STR.appRootLocked : UT_STR.appRootUnlocked) + "</p>";
             if (ht.lock && !ht.public) {
                 html += '<div class="ut-banner warn">' + esc(UT_STR.deployWarning) + "</div>";
             }
             var doms = app.domains || [];
             if (doms.length) {
-                html += "<p>" + esc(UT_STR.domains) + ": ";
+                html += '<p class="ut-meta">' + esc(UT_STR.domains) + ": ";
                 html += doms.map(function (d) { return esc(d); }).join(", ");
                 html += "</p>";
             } else {
-                html += "<p>" + esc(UT_STR.noDomains) + "</p>";
+                html += '<p class="ut-meta">' + esc(UT_STR.noDomains) + "</p>";
             }
             COMMAND_GROUPS.forEach(function (g) {
-                html += "<p><strong>" + esc(UT_STR[g.name]) + ":</strong> ";
+                html += '<div class="ut-actions"><strong>' + esc(UT_STR[g.name]) + ":</strong>"
+                    + '<div class="ut-actions-buttons">';
                 g.commands.forEach(function (c) {
-                    html += '<button class="ut-btn small" type="button" data-artisan="' + esc(c)
-                        + '" data-idx="' + idx + '">' + esc(c) + "</button> ";
+                    html += '<button class="ut-btn small secondary" type="button" data-artisan="' + esc(c)
+                        + '" data-idx="' + idx + '">' + esc(c) + "</button>";
                 });
-                html += "</p>";
+                html += "</div></div>";
             });
             html += '<div class="ut-out" id="ut-out-' + idx + '" aria-live="polite"></div>';
             html += '<p><button class="ut-btn small secondary" type="button" data-fixperms="' + idx + '">'
