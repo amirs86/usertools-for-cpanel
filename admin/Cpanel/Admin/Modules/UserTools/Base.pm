@@ -134,6 +134,11 @@ sub _rate_check_and_record {
 
 sub _audit {
     my ( $log, $user, $old, $new ) = @_;
+    # One log line per event: read-back values are untrusted text.
+    for my $value ( \$user, \$old, \$new ) {
+        next unless defined $$value;
+        $$value =~ s/[\x00-\x1f\x7f]/?/g;
+    }
     my @t = gmtime();
     my $ts = sprintf( "%04d-%02d-%02dT%02d:%02d:%02dZ",
         $t[5] + 1900, $t[4] + 1, $t[3], $t[2], $t[1], $t[0] );

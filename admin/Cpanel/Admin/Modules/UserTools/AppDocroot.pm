@@ -156,13 +156,14 @@ sub SET_APP_DOCROOT {
     my @pw   = getpwnam($user);
     my $home = @pw ? $pw[7] : undef;
     my $old_docroot = _read_primary_docroot($user);
+    my $old_norm = $old_docroot;
+    $old_norm =~ s{/+\z}{} if defined $old_norm;
     # Already serving from the target is a no-op — no WHM call, no
     # audit line, no rate-limit slot; just {changed:0}. The read above is
     # the documented UAPI read API (no writes), so checking before the rate
     # record costs nothing and keeps "X->X" out of the limit entirely.
-    if ( defined $home && $home ne '' && defined $old_docroot ) {
-        ( my $norm = $old_docroot ) =~ s{/+\z}{};
-        if ( $norm eq "$home/$target" ) {
+    if ( defined $home && $home ne '' && defined $old_norm ) {
+        if ( $old_norm eq "$home/$target" ) {
             return { enable => $on ? 1 : 0, docroot => $target, changed => 0 };
         }
     }
@@ -189,11 +190,11 @@ sub SET_APP_DOCROOT {
         # previous docroot is never sent back to WHM; it stays in the audit
         # log and the caller is told the restore could not happen.
         my $rollback;
-        if ( defined $home && $home ne '' && defined $old_docroot ) {
-            if ( $old_docroot eq "$home/" . DOCROOT_NORMAL ) {
+        if ( defined $home && $home ne '' && defined $old_norm ) {
+            if ( $old_norm eq "$home/" . DOCROOT_NORMAL ) {
                 $rollback = DOCROOT_NORMAL;
             }
-            elsif ( $old_docroot eq "$home/" . DOCROOT_APP ) {
+            elsif ( $old_norm eq "$home/" . DOCROOT_APP ) {
                 $rollback = DOCROOT_APP;
             }
         }
@@ -206,7 +207,7 @@ sub SET_APP_DOCROOT {
             my $after_label = defined $after ? $after : 'unknown';
             Cpanel::Admin::Modules::UserTools::Base::_audit(
                 $AUDIT_LOG, $user, "rollback:$got", $after_label );
-            $restored = ( defined $after && $after eq $old_docroot ) ? 1 : 0;
+            $restored = ( defined $after && $after eq $old_norm ) ? 1 : 0;
         }
         my $outcome = $restored
           ? 'previous main domain restored'

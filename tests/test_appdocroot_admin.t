@@ -180,6 +180,17 @@ SCRIPT
     is_deeply( \@actions, ['SET_APP_DOCROOT'], 'exactly one function' );
 }
 
+# --- audit: control characters in every field stay on one line ----------------
+{
+    my $root = make_dirs();
+    Cpanel::Admin::Modules::UserTools::Base::_audit(
+        "$root/audit.log", "ut\nser", "old\rx", "new\x00y" );
+    my @audit = read_lines("$root/audit.log");
+    is( scalar @audit, 1, 'one audit line for a record with control characters' );
+    like( $audit[0], qr{\Qut?ser old?x->new?y\E},
+        'user, old and new have control characters replaced' );
+}
+
 # --- happy paths (real changes; no-ops live in their own block) ---------------
 {
     my $root = make_dirs();
@@ -287,6 +298,84 @@ SCRIPT
         'mismatch line records the old, target and live docroot' );
     like( $audit[1], qr{\Quttest rollback:/home/uttest/stale->/home/uttest/public_html\E},
         'rollback line records the restored docroot' );
+    is( scalar( read_lines("$root/ratelimit/uttest") ), 1,
+        'rollback used no extra rate-limit slot' );
+}
+
+# --- mismatch: a trailing slash on the old docroot is restored ---------------
+{
+    my $root = make_dirs();
+    set_user( 'uttest', 1000 );
+    open my $fh, '>', "$root/users/uttest" or die $!;
+    close $fh;
+    write_bins($root);
+    write_plan( "$root/whm-plan.txt", "stale\nok\n" );
+    local $ENV{FAKE_WHM_ARGV} = "$root/whm-argv.txt";
+    local $ENV{FAKE_WHM_MODE} = 'ok';
+    local $ENV{FAKE_WHM_PLAN} = "$root/whm-plan.txt";
+    local $ENV{FAKE_WHM_COUNT_FILE} = "$root/whm-count.txt";
+    local $ENV{FAKE_WHM_STALE_DOCROOT} = '/home/uttest/stale';
+    local $ENV{FAKE_UAPI_ARGV} = "$root/uapi-argv.txt";
+    local $ENV{FAKE_DOMAININFO_DOCROOT} = '/home/uttest/public_html/';
+    local $ENV{FAKE_DOCROOT_FILE} = "$root/docroot.txt";
+    local $ENV{FAKE_DOCROOT_HOME} = '/home/uttest';
+
+    my $got = Cpanel::Admin::Modules::UserTools::AppDocroot::SET_APP_DOCROOT(
+        make_self(), { enable => 1 } );
+    is( $got->{error},
+        'docroot change did not take effect; previous main domain restored; contact your host',
+        'trailing slash on the old docroot still restores' );
+    my @calls = grep { /^docroot=/ } read_lines("$root/whm-argv.txt");
+    is_deeply( \@calls, [ 'docroot=public_html/public', 'docroot=public_html' ],
+        'rollback call still carries the fixed plain docroot' );
+    my @audit = read_lines("$root/audit.log");
+    is( scalar @audit, 2, 'mismatch and rollback both audited' );
+    like( $audit[0],
+        qr{\Quttest primary-docroot:/home/uttest/public_html/->primary-docroot:mismatch:public_html/public(got:/home/uttest/stale)\E},
+        'mismatch line keeps the raw old docroot' );
+    like( $audit[1], qr{\Quttest rollback:/home/uttest/stale->/home/uttest/public_html\E},
+        'rollback line records the restored docroot' );
+    is( scalar( read_lines("$root/ratelimit/uttest") ), 1,
+        'rollback used no extra rate-limit slot' );
+}
+
+# --- mismatch: control characters in the read-back stay on one line ----------
+{
+    my $root = make_dirs();
+    set_user( 'uttest', 1000 );
+    open my $fh, '>', "$root/users/uttest" or die $!;
+    close $fh;
+    write_bins($root);
+    local $ENV{FAKE_WHM_ARGV} = "$root/whm-argv.txt";
+    local $ENV{FAKE_WHM_MODE} = 'ok';
+    local $ENV{FAKE_DOCROOT_FILE} = "$root/docroot.txt";
+    local $ENV{FAKE_DOCROOT_HOME} = '/home/uttest';
+
+    my @reads = (
+        '/home/uttest/public_html',
+        "/home/uttest/public_html/public\nforged\rline",
+        '/home/uttest/public_html',
+    );
+    no warnings 'redefine';
+    local *Cpanel::Admin::Modules::UserTools::AppDocroot::_read_primary_docroot =
+        sub { return shift @reads; };
+
+    my $got = Cpanel::Admin::Modules::UserTools::AppDocroot::SET_APP_DOCROOT(
+        make_self(), { enable => 1 } );
+    is( $got->{error},
+        'docroot change did not take effect; previous main domain restored; contact your host',
+        'control characters in the read-back do not change the outcome' );
+    my @calls = grep { /^docroot=/ } read_lines("$root/whm-argv.txt");
+    is_deeply( \@calls, [ 'docroot=public_html/public', 'docroot=public_html' ],
+        'rollback is still attempted once' );
+    my @audit = read_lines("$root/audit.log");
+    is( scalar @audit, 2, 'control characters do not create extra audit lines' );
+    like( $audit[0],
+        qr{\Quttest primary-docroot:/home/uttest/public_html->primary-docroot:mismatch:public_html/public(got:/home/uttest/public_html/public?forged?line)\E},
+        'mismatch line replaces newline and carriage return with question marks' );
+    like( $audit[1],
+        qr{\Quttest rollback:/home/uttest/public_html/public?forged?line->/home/uttest/public_html\E},
+        'rollback line replaces newline and carriage return with question marks' );
     is( scalar( read_lines("$root/ratelimit/uttest") ), 1,
         'rollback used no extra rate-limit slot' );
 }
